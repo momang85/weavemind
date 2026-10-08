@@ -2,7 +2,7 @@ import { ReactNode, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
 import { Settings } from 'lucide-react'
-import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X } from 'lucide-react'
+import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X, Microscope } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { useDemoRunner } from '../stores/useDemoRunner'
@@ -17,6 +17,7 @@ const navItems = [
   { to: '/memory', icon: Brain, label: '记忆与进化' },
   { to: '/evals', icon: FlaskConical, label: '评测' },
   { to: '/skills', icon: Layers, label: 'Skill' },
+  { to: '/research-study', icon: Microscope, label: '本地研究试验' },
   { to: '/metrics', icon: Activity, label: '指标' },
   { to: '/audit', icon: Shield, label: '审计' },
   { to: '/settings', icon: Settings, label: '设置' },
@@ -73,6 +74,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     '/memory': '记忆与进化',
     '/evals': '评测看板',
     '/skills': 'Skill 管理',
+    '/research-study': '本地研究试验',
     '/metrics': '指标看板',
     '/audit': '审计日志',
     '/settings': '设置',

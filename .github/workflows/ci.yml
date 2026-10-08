@@ -142,6 +142,8 @@ jobs:
         run: python test_quant_publish.py
       - name: "Independent trading calendar (suspension vs market holiday, coverage-aware unknown)"
         run: python test_trading_calendar.py
+      - name: "Local research study entry (preview -> confirm -> run_study -> verify/replay, identity/time guards)"
+        run: python test_research_study_entry.py
       - name: Skills & validators check
         run: python -c "from skill_registry import list_skills; assert len(list_skills())>=3; from validators.registry import list_validators; assert len(list_validators())>=4"
       - name: Eval cases schema check

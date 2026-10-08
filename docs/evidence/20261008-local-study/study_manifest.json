@@ -1,0 +1,110 @@
+{
+  "artifacts": {
+    "events.json": "076ca4914859fcda577843aa756bf68a39041de2e1809be829d5abce2bcbf97a",
+    "excluded.json": "a63ed023844d4804659ba2d9cd2670a49bf46ed5de5d96e9b05afb2eec37e86e",
+    "financial.json": "0e0bdd0e4d9338a766ba335183d2fc965354d2bc452d0ab24013aa33b98a4a7d",
+    "inputs.json": "b56f71a0fffbc9b2fd6b1725ef2ab8d70b320e553d4154d1620229bcb8030ee0",
+    "label_readiness.json": "01f8e19863895196fd2b375494f329e3cb72aa0ed35419ced2b58e4e8dda234c",
+    "previews.json": "549b0d6e1138915bbd14257217e3a417ce289a693e1cceac5dc17c86025cc09b",
+    "quant/backtest.json": "bc54befc86acb55b56961dcc0445cf849622ecdb8dae681f693ef2daef9b163e",
+    "quant/event_returns.json": "6326df16ee8f8391f73a4547bb27f800d5dc2f14cff26b055da7480f9fab0ab6",
+    "quant/quant_detail.md": "0e34a2bec0d1193a2499574e8ad64a32dd968aa57678da7bab2557b6fc1574de",
+    "quant/quant_manifest.json": "b47a9a5b8cb171dc6c12f8fc5ab3a6b9febf2fd059a25b2e97654d42ff45597c",
+    "risk.json": "79390824b79330652867bed7d9e518facf9998996cdc2d968ae5f076945f7778",
+    "summary.md": "bfcc3ee8bd41ff0e1071f9a043189e3d72880b51f9be23210d00929a3151b78a"
+  },
+  "evaluation_as_of": "2025-06-30",
+  "external_delivery": {
+    "allowed": false,
+    "reason": "本批仅生成内部研究产物"
+  },
+  "feature_cutoff": "2025-04-30",
+  "human_review": "unreviewed",
+  "impl_version": "study/1.0.0",
+  "implementation_hashes": {
+    "adapters/wind_import.py": "3c4bdf3209de93c2506b8572ecc7c6458fe0f14a30c001e2e1a7d16cf31023b4",
+    "financial_analysis/__init__.py": "4033aa54c048a44847bebe6a817080a8b41067da39cabd7b387aa5a1c90c4b8e",
+    "financial_analysis/charts.py": "6d759ceb903b00346d20c5db918c7544cea649fecab6330753077610d99e80c9",
+    "financial_analysis/continuation.py": "c9a184fd05f59104289038bb8d8d8da6db7036e50a24240521b2f7221e061864",
+    "financial_analysis/contracts.py": "8fa07ed9e54d820ed2490b8b560f743756fb74f6f2a623068f6ec005bafde4b6",
+    "financial_analysis/dataset.py": "26c78eb7cc78f88ccd7de3daf3ed2c8f2d2791b9467ba6ad871aac6cc52b56fa",
+    "financial_analysis/events.py": "1eaf8fae8ffb86be6e72122ca1b86ef4710bf2fdaf2455f401110bffd6776491",
+    "financial_analysis/judgments.py": "03a571045222c57b297b53908b132b72dc8a4d6898efd1d96e2d193a1d078054",
+    "financial_analysis/narrative.py": "e6cc919b97779654347c5f5aba5a3b5036de30e9ccc7db7d440fc6f564bb432f",
+    "financial_analysis/operators/__init__.py": "01c8daa54f30d7912bf50667615800548a44dbbb349266f15c742acfdb3a32d0",
+    "financial_analysis/operators/cash_pressure.py": "e9e20e7f7ad94b9cc5627c3aca87f0da4cba503123f3b44211cce377947622a4",
+    "financial_analysis/operators/cash_quality.py": "92fbf3bb957cf2a5d15564c5d261932fcb800dbd7b6c7caa92ccf72257d984e8",
+    "financial_analysis/operators/cash_reconciliation.py": "e1d93aac88275959e0f4c065e91631722ed5d037155e44daf0f0eb5377f9edae",
+    "financial_analysis/operators/operating_drivers.py": "bebf2abb4203c05c236d140a72155cd6c551b047af47048d4b247ef7309ffa35",
+    "financial_analysis/operators/profit_bridge.py": "7bd2a5a56d530e4b3c0c1305fe81db27764e2108ea42d65c004211c90d3b5817",
+    "financial_analysis/operators/profit_to_cash.py": "61b61d12b3eb82353f60c6f49960e9415542099a48b004cf7b1229d834837cb2",
+    "financial_analysis/operators/scenario.py": "3924eb163cd12092523dc4bfd743a9180c519e55c5877194be8c3b93d5c02e74",
+    "financial_analysis/operators/working_capital.py": "ebeb9f5d0386c1829c1d138d9397a8be418683953b2abbb0060e1b5f5af28e6b",
+    "financial_analysis/questions.py": "84a5a3848db212cf4e0210b2197e241b53ba80b5263821112ebea81e2a759678",
+    "financial_analysis/registry.py": "a98026f1817659c7be618be725a6dc62fc32eb3cf4bfbf1b7411b5cd0e25541e",
+    "financial_analysis/report_adapter.py": "565666d95fefe48137b28e4543d0022eb6c30e55448cd404b4432fcccacc643b",
+    "financial_analysis/runner.py": "24f5e8f818480c6e146d63bd78613cf0bf344e7f7f388c3ebf400125338a0001",
+    "financial_analysis/store.py": "95e045eff5821991243fa234b7879ee4e2b15aaff5021d472901d5d91b67acac",
+    "financial_analysis/validation.py": "322c5c6566408581df1ed3b6a9610be810f5434aeb4a71b1fe3ebdfe5a7e7019",
+    "quant_research/backtest.py": "d126233ed553a3baf5d7c74bf6a7ba16cf47f4fab234e4520badc18e13586389",
+    "quant_research/event_returns.py": "d49bbadc8f1fc652b35fd85234af4b94b5fab023ea5c7c8abe8c1f8a4d7f05ba",
+    "quant_research/publish.py": "5ba0e18395ae61ab80808ae0aa526898334918d6f28b1e92745e264f3e71d159",
+    "quant_research/study.py": "2d3389d948b639291d2e96b4f132ebd66e4111d96bb8eee69e75b2a2281a9b52",
+    "risk_research/features.py": "a7905e2afa40199935b929db7e9868afc9f2eee0a25214a89d42996c349c01a5",
+    "risk_research/readiness.py": "c6349ee2b7a24ad9e97c1caaa7384b1bdf5841c9b310a5a19671f4f7a9ca87b6"
+  },
+  "params_hash": "fb353c0fa65fbc7281035af47ad43165a59d70e4341ee65f6cb49b27d3daff48",
+  "research_state": "research_draft",
+  "result_hash": "6d11576ac5e8ecd9a9505bea1f2885f668167719d8a7988bde5dfd680a250744",
+  "schema": "weavemind.research_study/1",
+  "sources": {
+    "calendar": {
+      "field_map": {},
+      "file": "calendar.csv",
+      "metadata": {},
+      "raw_sha256": "5d26fe75879ea270b60cb9f19909f459bf6f2afc828a81fe25a2205a273538f5"
+    },
+    "credit_labels": {
+      "field_map": {},
+      "file": "credit_labels.json",
+      "metadata": {},
+      "raw_sha256": "3f49c38131e85abd6d03dfb0beecb865cc1b3c21e027f812e0eac66b3bbcd286"
+    },
+    "events": {
+      "field_map": {},
+      "file": "news.json",
+      "metadata": {},
+      "raw_sha256": "8e47131b7ed6bc735cbcdc6abc9d46a6880be32fe553b5393f78c48df6066830"
+    },
+    "financial": {
+      "field_map": {},
+      "file": "financials.csv",
+      "metadata": {
+        "license": "synthetic_internal_only",
+        "source": "synthetic_fixture",
+        "synthetic": true
+      },
+      "raw_sha256": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8"
+    },
+    "fraud_labels": {
+      "field_map": {},
+      "file": "fraud_labels.json",
+      "metadata": {},
+      "raw_sha256": "93b4be186c2486a1955175a078defa0a7197644d42f6ae52a3be5c4c26fd9ee3"
+    },
+    "market": {
+      "field_map": {},
+      "file": "daily_prices.csv",
+      "metadata": {
+        "adj_basis": "不复权",
+        "currency": "CNY",
+        "license": "synthetic_internal_only",
+        "source": "synthetic_fixture",
+        "unit": "元"
+      },
+      "raw_sha256": "8f720e3c000fc007a273f47a389f2e67ba83debfab10e36eff534b67866f8470"
+    }
+  },
+  "study_id": "f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828",
+  "synthetic": true
+}

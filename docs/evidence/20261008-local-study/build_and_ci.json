@@ -1,0 +1,292 @@
+{
+ "batch": "10-08 本地研究试验入口",
+ "baseline": "ffa1d02",
+ "dist": {
+  "index_html_sha256": "e64c6e9135e463fb7b763148d5535db09ae6ee9dc3c47975dd532bf35d6bfd9d",
+  "assets": {
+   "Agents-DEMTQpwb.js": {
+    "bytes": 13733,
+    "sha256": "ca7a91cb42efdd486abf51a6b145902df0917004ffc4a59a87a2a54fce54f13a"
+   },
+   "AuditPage-BtpCYbGo.js": {
+    "bytes": 2572,
+    "sha256": "ba4035f0cd0a4ab38872e143ee5b9915ee716b980198b8dceebcc69ac5c843db"
+   },
+   "chevron-down-C0X8smcK.js": {
+    "bytes": 296,
+    "sha256": "9b1eba8c85109150b80737bfc8c824ecb571520b9686e46b576ecdbd2832ccd8"
+   },
+   "chevron-right-j9DjW-lS.js": {
+    "bytes": 298,
+    "sha256": "74a38b08cdeddb2f50af5331cbdab8905b6efde5676e263a61d1ba5eb7e5aea9"
+   },
+   "circle-check-D10NU0HK.js": {
+    "bytes": 341,
+    "sha256": "360e74a2d55d2672085cf48d3bb5ebb0e468cce1a28b498d8fd002f6445c41b6"
+   },
+   "copy-D0hDeIKD.js": {
+    "bytes": 400,
+    "sha256": "844da751dc870a323cb4765360574854495b0e9463b757ef9c0dd6b623c6550b"
+   },
+   "Evals-LUuwCNVE.js": {
+    "bytes": 3264,
+    "sha256": "719ba798bac084a202e01f7118b3a7781dee58fe94c4e9e1e8bd3814b664e321"
+   },
+   "file-text-CPFsmE8X.js": {
+    "bytes": 501,
+    "sha256": "66a945d6a650a081de58ce811f542f631ab08d18f3065008c67cd7e5065d0964"
+   },
+   "format-1Mowjkq1.js": {
+    "bytes": 894,
+    "sha256": "5d2df37f291c8cebb662bc0d1c7de517454360a1d331d83c12fd89063a39a195"
+   },
+   "Health-CPYT0ygq.js": {
+    "bytes": 8664,
+    "sha256": "5f2a332ec0be65a15df14ab48ae6e0a1401c08d77576abd29793823fe9e83928"
+   },
+   "History-D3hxSdai.js": {
+    "bytes": 7047,
+    "sha256": "7ebc8664d4a60ff4a64234994924885f31eccd449b122bbcea68b218b0d61f6c"
+   },
+   "index-BlLbaRuY.css": {
+    "bytes": 43257,
+    "sha256": "b2836207056ccc9e32214a69d23fdd1a2e6e3db246d9e1268310d9bf95043a20"
+   },
+   "index-CWNpexyZ.js": {
+    "bytes": 214424,
+    "sha256": "74a7fe25b1c3c33323d4f727aadf376dddc60b8637922d5aba08e0f8adab014f"
+   },
+   "Memory-nWDA1UhP.js": {
+    "bytes": 16534,
+    "sha256": "26ccb9a10d10ede96291ab706ad3207546590863d759a41f35e10fa91ef4f560"
+   },
+   "MetricsPage-DAv0n8ok.js": {
+    "bytes": 5266,
+    "sha256": "9bf418134996d5ebe55f50a6d28458338b0817a15efe86125acc1a2d913d0ac1"
+   },
+   "plus-BKjuu0fR.js": {
+    "bytes": 322,
+    "sha256": "b8d2e497355402774d543c3a53e71210f3c493d7a366760ebbffadf0234c8471"
+   },
+   "ReportViewer-Bd7vkAys.js": {
+    "bytes": 305087,
+    "sha256": "185460de382a4e0039cc75d0a3545c64c773914ff9b3de44cfccb84a05632ab9"
+   },
+   "ResearchStudy-COoVdPMw.js": {
+    "bytes": 19432,
+    "sha256": "83fd657ec59fc70ca340f56e2bf08e412484f97ec3c9112a7cbd82608af2763f"
+   },
+   "rotate-ccw-BQ6s-FrG.js": {
+    "bytes": 368,
+    "sha256": "a3f3fdccae7010758f2e8932612bbdd598059aef066828f3e3aa693584c258a8"
+   },
+   "search-D2D8Ocwg.js": {
+    "bytes": 588,
+    "sha256": "2b013856f73852de0d63138ba5c77c9b7e775340196ca60c8356441be82c8c22"
+   },
+   "Settings-MLMJQxMU.js": {
+    "bytes": 23646,
+    "sha256": "168a141950b64e2384817d0f34755f1b8958fbf77640f98d2cda16269215f89c"
+   },
+   "Skills-CVWfonnh.js": {
+    "bytes": 2072,
+    "sha256": "27cfc279f6c3da81ac22e3b00ea0a47fb87259d72471c73c36b4a5300c3ae613"
+   },
+   "sparkles-C7AixKnR.js": {
+    "bytes": 1003,
+    "sha256": "f45913e6a685e3a0997839042369164f0f9a3cea03b571d37fda2bd6c7da1add"
+   },
+   "statusMeta-BgQ6MMVI.js": {
+    "bytes": 3046,
+    "sha256": "ff20d1faaf2056d14ff11cef88c9944f1a406e53e592bca2718a60662df666c0"
+   },
+   "TaskConsole-N-oGsiNb.js": {
+    "bytes": 88295,
+    "sha256": "c7b4c589324432226e1276ecda7a25c675d9d882454b223154643b92d964f7ec"
+   },
+   "trash-2-CH7I6Lw3.js": {
+    "bytes": 1028,
+    "sha256": "ac1bdabce0d4f3f057821b70ad13ca3c85a9d9490e7c4262c5a43951daec102c"
+   },
+   "ui-C2Qg0ywT.js": {
+    "bytes": 4427,
+    "sha256": "7c668477ca9fe8cf28c7e810f8be5dd24c0dbb2feb0b12073cf7bb25a2b48f22"
+   },
+   "upload-DPorBiO-.js": {
+    "bytes": 745,
+    "sha256": "fddc15de470c4bfc4114f73fb9b176e15ac39b27d99c262105bfd48ef02a43ff"
+   }
+  },
+  "new_page_chunk": "ResearchStudy-COoVdPMw.js"
+ },
+ "routes": {
+  "referenced": [
+   "/api/research-study/hypothesis-card",
+   "/api/research-study/preview",
+   "/api/research-study/replay",
+   "/api/research-study/run",
+   "/api/research-study/sample",
+   "/api/research-study/studies",
+   "/api/research-study/upload",
+   "/api/research-study/verify"
+  ],
+  "post_predicates": [
+   "/api/research-study/hypothesis-card",
+   "/api/research-study/preview",
+   "/api/research-study/replay",
+   "/api/research-study/run",
+   "/api/research-study/upload",
+   "/api/research-study/verify"
+  ],
+  "note": "GET 两条（sample/studies）+ POST 六条（upload/preview/run/verify/replay/hypothesis-card）；POST 自动走管理员门"
+ },
+ "demo_guard_has_prefix": true,
+ "ci_gate": {
+  "executed": [
+   "test_acceptance_adversarial.py",
+   "test_actionable_state.py",
+   "test_admission.py",
+   "test_annual_financial_tables.py",
+   "test_auth_audit.py",
+   "test_backtest.py",
+   "test_cancel_semantics.py",
+   "test_checkpointer.py",
+   "test_cninfo_discovery.py",
+   "test_common.py",
+   "test_delivery_chain.py",
+   "test_deploy_manifest.py",
+   "test_eastmoney_params.py",
+   "test_fact_fidelity.py",
+   "test_facts.py",
+   "test_financial_analysis.py",
+   "test_financial_chain.py",
+   "test_frontend_guards.py",
+   "test_isolation_scope.py",
+   "test_llm_thinking_escape.py",
+   "test_lora_manager.py",
+   "test_market_events.py",
+   "test_memory_degradation.py",
+   "test_metrics_scope.py",
+   "test_narrative_evidence.py",
+   "test_net_policy.py",
+   "test_notifications.py",
+   "test_offline_delivery.py",
+   "test_orchestrator_v2.py",
+   "test_p0.py",
+   "test_prompt_system.py",
+   "test_quant_publish.py",
+   "test_question_assessment.py",
+   "test_r0_boundaries.py",
+   "test_redis_acquisition.py",
+   "test_report_quality.py",
+   "test_report_version.py",
+   "test_research_study_entry.py",
+   "test_review_degradation.py",
+   "test_review_edit_api.py",
+   "test_review_isolation.py",
+   "test_review_protocol.py",
+   "test_root_budget.py",
+   "test_sandbox_isolation.py",
+   "test_search_quality_unified.py",
+   "test_settings_requirements.py",
+   "test_setup_wizard.py",
+   "test_startup_readiness.py",
+   "test_task_context.py",
+   "test_task_persistence.py",
+   "test_task_projection.py",
+   "test_task_state.py",
+   "test_task_time_optimization.py",
+   "test_trading_calendar.py",
+   "test_transport_deadline.py",
+   "test_trial_metrics.py",
+   "test_us_chain.py",
+   "test_working_paper.py",
+   "test_writer_consolidation.py"
+  ],
+  "on_disk": [
+   "test_acceptance_adversarial.py",
+   "test_actionable_state.py",
+   "test_admission.py",
+   "test_annual_financial_tables.py",
+   "test_auth_audit.py",
+   "test_backtest.py",
+   "test_cancel_semantics.py",
+   "test_checkpointer.py",
+   "test_cninfo_discovery.py",
+   "test_common.py",
+   "test_delivery_chain.py",
+   "test_deploy_manifest.py",
+   "test_eastmoney_params.py",
+   "test_fact_fidelity.py",
+   "test_facts.py",
+   "test_financial_analysis.py",
+   "test_financial_chain.py",
+   "test_financial_events.py",
+   "test_frontend_guards.py",
+   "test_isolation_scope.py",
+   "test_llm_thinking_escape.py",
+   "test_lora_manager.py",
+   "test_market_events.py",
+   "test_memory_degradation.py",
+   "test_metrics_scope.py",
+   "test_narrative_evidence.py",
+   "test_net_policy.py",
+   "test_notifications.py",
+   "test_offline_delivery.py",
+   "test_orchestrator_v2.py",
+   "test_p0.py",
+   "test_prompt_system.py",
+   "test_quant_publish.py",
+   "test_question_assessment.py",
+   "test_r0_boundaries.py",
+   "test_redis_acquisition.py",
+   "test_report_quality.py",
+   "test_report_version.py",
+   "test_research_study.py",
+   "test_research_study_entry.py",
+   "test_review_degradation.py",
+   "test_review_edit_api.py",
+   "test_review_isolation.py",
+   "test_review_protocol.py",
+   "test_risk_research.py",
+   "test_root_budget.py",
+   "test_sandbox_isolation.py",
+   "test_search_quality_unified.py",
+   "test_settings_requirements.py",
+   "test_setup_wizard.py",
+   "test_startup_readiness.py",
+   "test_task_context.py",
+   "test_task_persistence.py",
+   "test_task_projection.py",
+   "test_task_state.py",
+   "test_task_time_optimization.py",
+   "test_trading_calendar.py",
+   "test_transport_deadline.py",
+   "test_trial_metrics.py",
+   "test_us_chain.py",
+   "test_wind_import.py",
+   "test_working_paper.py",
+   "test_writer_consolidation.py"
+  ],
+  "missing_from_ci": [
+   "test_financial_events.py",
+   "test_research_study.py",
+   "test_risk_research.py",
+   "test_wind_import.py"
+  ],
+  "extra_in_ci": [],
+  "note": "`missing_from_ci` 里那 4 个是**架构师 §16 的框架测试文件，尚未入库**（git 未跟踪）：它们在磁盘上存在，所以**本地**工作树跑 CI 覆盖守卫会 FAIL；而**干净检出**（只含已入库文件）不受影响。本批只补了**本批自己**的步骤（`test_research_study_entry.py`，随本批入库），并核过提交后 59 步 = 59 个测试文件、无悬空步骤。框架入库时须同步补它们的 ci.yml 步骤。"
+ },
+ "ci_after_this_commit": {
+  "steps": 59,
+  "tracked_test_files_including_this_batch": 59,
+  "steps_without_file": [],
+  "files_without_step": [],
+  "how_checked": "只统计 `git ls-files test_*.py` + 本批新文件，模拟干净检出"
+ },
+ "tests": {
+  "test_research_study_entry": "15 项通过",
+  "architect_framework_tests": "78 项通过（test_wind_import/test_financial_events/test_risk_research/test_research_study）",
+  "combined_run": "93 项全过（一次进程内跑）"
+ }
+}

@@ -18,6 +18,7 @@ const MetricsPage = lazy(() => import('./pages/MetricsPage'))
 const MemoryPage = lazy(() => import('./pages/Memory'))
 const EvalsPage = lazy(() => import('./pages/Evals'))
 const SkillsPage = lazy(() => import('./pages/Skills'))
+const ResearchStudyPage = lazy(() => import('./pages/ResearchStudy'))
 
 function PageFallback() {
   return (
@@ -123,6 +124,7 @@ export default function App() {
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/evals" element={<EvalsPage />} />
             <Route path="/skills" element={<SkillsPage />} />
+            <Route path="/research-study" element={<ResearchStudyPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/metrics" element={<MetricsPage />} />

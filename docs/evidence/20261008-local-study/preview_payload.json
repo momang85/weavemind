@@ -1,0 +1,828 @@
+{
+ "study_id": "f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828",
+ "result_hash": "6d11576ac5e8ecd9a9505bea1f2885f668167719d8a7988bde5dfd680a250744",
+ "synthetic": true,
+ "feature_cutoff": "2025-04-30",
+ "evaluation_as_of": "2025-06-30",
+ "research_state": "research_draft",
+ "human_review": "unreviewed",
+ "external_delivery": {
+  "allowed": false,
+  "reason": "本批仅生成内部研究产物"
+ },
+ "sources": {
+  "financial": {
+   "file": "financials.csv",
+   "raw_sha256": "6a6e785d80b2351f"
+  },
+  "market": {
+   "file": "daily_prices.csv",
+   "raw_sha256": "8f720e3c000fc007"
+  },
+  "events": {
+   "file": "news.json",
+   "raw_sha256": "8e47131b7ed6bc73"
+  },
+  "calendar": {
+   "file": "calendar.csv",
+   "raw_sha256": "5d26fe75879ea270"
+  },
+  "credit_labels": {
+   "file": "credit_labels.json",
+   "raw_sha256": "3f49c38131e85abd"
+  },
+  "fraud_labels": {
+   "file": "fraud_labels.json",
+   "raw_sha256": "93b4be186c2486a1"
+  }
+ },
+ "subjects": [
+  "900001.SH",
+  "900002.SH"
+ ],
+ "financial": {
+  "900001.SH": {
+   "synthetic": true,
+   "runs": [
+    {
+     "model_id": "scenario_sensitivity",
+     "status": "validated",
+     "reason": "",
+     "outputs": [
+      {
+       "metric": "scenario_net_profit",
+       "label": "情景归母净利润（假设成立时）",
+       "value": 1600000.0,
+       "unit": "元"
+      },
+      {
+       "metric": "scenario_sensitivity",
+       "label": "单因素敏感度（每 +1 个百分点）",
+       "value": 120000.0,
+       "unit": "元"
+      },
+      {
+       "metric": "collection_days_capital_per_day",
+       "label": "回款天数敏感性：每 1 天的资金占用",
+       "value": 32876.71,
+       "unit": "元"
+      },
+      {
+       "metric": "collection_days_sensitivity_10d",
+       "label": "回款天数敏感性：±10 天的资金占用（单项，非现金流预测）",
+       "value": 328767.12,
+       "unit": "元"
+      },
+      {
+       "metric": "margin_threshold_to_hold_base_profit",
+       "label": "维持目标归母净利所需毛利率（单因素；收入固定基期）",
+       "value": 29.1667,
+       "unit": "%"
+      },
+      {
+       "metric": "margin_gap_to_threshold_pp",
+       "label": "所需毛利率与基期毛利率之差（百分点）",
+       "value": -0.8333,
+       "unit": "%（pp）"
+      },
+      {
+       "metric": "revenue_growth_to_hold_target",
+       "label": "维持目标归母净利所需收入变化（单因素；毛利率固定基期）",
+       "value": -2.7778,
+       "unit": "%"
+      }
+     ]
+    },
+    {
+     "model_id": "cash_pressure",
+     "status": "validated",
+     "reason": "",
+     "outputs": [
+      {
+       "metric": "incremental_capital_occupation",
+       "label": "天数冲击的额外资金占用（回款 +10.00 天／库存 +10.00 天）",
+       "value": 558904.11,
+       "unit": "元"
+      },
+      {
+       "metric": "collection_days_capital_per_day",
+       "label": "回款代理：每 1 天的资金量（同一情景 R1/365）",
+       "value": 32876.71,
+       "unit": "元"
+      },
+      {
+       "metric": "inventory_days_capital_per_day",
+       "label": "库存代理：每 1 天的资金量（同一情景 C1/365）",
+       "value": 23013.7,
+       "unit": "元"
+      }
+     ]
+    },
+    {
+     "model_id": "cash_quality",
+     "status": "validated",
+     "reason": "",
+     "outputs": [
+      {
+       "metric": "cfo_minus_profit",
+       "label": "经营现金流 − 归母净利润",
+       "value": -600000.0,
+       "unit": "元"
+      },
+      {
+       "metric": "cashflow_coverage",
+       "label": "经营现金流对归母净利润的覆盖",
+       "value": 62.5,
+       "unit": "%"
+      }
+     ]
+    }
+   ],
+   "unit_conversion": [
+    {
+     "fact_id": "wind:2ad7eb0b57a559edb6823565",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 1000.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 10000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:b8e481b479c3af85f248b42e",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 700.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 7000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:f9eaa9967f884b70d521be41",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 150.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1500000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:971de5bc34a21c228801b50a",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 160.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1600000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:f7667d2047b4aa67b0628de2",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 120.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1200000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:f710471208ee612b0d8d57a2",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 100.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:99291f34b52d2235dd42deff",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 140.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1400000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:b14b4d6d315d306134e235f4",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 80.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 800000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    }
+   ],
+   "unsupported_units": []
+  },
+  "900002.SH": {
+   "synthetic": true,
+   "runs": [
+    {
+     "model_id": "scenario_sensitivity",
+     "status": "validated",
+     "reason": "",
+     "outputs": [
+      {
+       "metric": "scenario_net_profit",
+       "label": "情景归母净利润（假设成立时）",
+       "value": 2500000.0,
+       "unit": "元"
+      },
+      {
+       "metric": "scenario_sensitivity",
+       "label": "单因素敏感度（每 +1 个百分点）",
+       "value": 220000.0,
+       "unit": "元"
+      },
+      {
+       "metric": "collection_days_capital_per_day",
+       "label": "回款天数敏感性：每 1 天的资金占用",
+       "value": 60273.97,
+       "unit": "元"
+      },
+      {
+       "metric": "collection_days_sensitivity_10d",
+       "label": "回款天数敏感性：±10 天的资金占用（单项，非现金流预测）",
+       "value": 602739.73,
+       "unit": "元"
+      },
+      {
+       "metric": "margin_threshold_to_hold_base_profit",
+       "label": "维持目标归母净利所需毛利率（单因素；收入固定基期）",
+       "value": 31.8182,
+       "unit": "%"
+      },
+      {
+       "metric": "margin_gap_to_threshold_pp",
+       "label": "所需毛利率与基期毛利率之差（百分点）",
+       "value": -3.1818,
+       "unit": "%（pp）"
+      },
+      {
+       "metric": "revenue_growth_to_hold_target",
+       "label": "维持目标归母净利所需收入变化（单因素；毛利率固定基期）",
+       "value": -9.0909,
+       "unit": "%"
+      }
+     ]
+    },
+    {
+     "model_id": "cash_pressure",
+     "status": "validated",
+     "reason": "",
+     "outputs": [
+      {
+       "metric": "incremental_capital_occupation",
+       "label": "天数冲击的额外资金占用（回款 +10.00 天／库存 +10.00 天）",
+       "value": 994520.55,
+       "unit": "元"
+      },
+      {
+       "metric": "collection_days_capital_per_day",
+       "label": "回款代理：每 1 天的资金量（同一情景 R1/365）",
+       "value": 60273.97,
+       "unit": "元"
+      },
+      {
+       "metric": "inventory_days_capital_per_day",
+       "label": "库存代理：每 1 天的资金量（同一情景 C1/365）",
+       "value": 39178.08,
+       "unit": "元"
+      }
+     ]
+    },
+    {
+     "model_id": "cash_quality",
+     "status": "validated",
+     "reason": "",
+     "outputs": [
+      {
+       "metric": "cfo_minus_profit",
+       "label": "经营现金流 − 归母净利润",
+       "value": -100000.0,
+       "unit": "元"
+      },
+      {
+       "metric": "cashflow_coverage",
+       "label": "经营现金流对归母净利润的覆盖",
+       "value": 96.0,
+       "unit": "%"
+      }
+     ]
+    }
+   ],
+   "unit_conversion": [
+    {
+     "fact_id": "wind:43485b8319b7848017972ecc",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 2000.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 20000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:6d2415a0d643d92c73dab388",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 1400.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 14000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:a4cc45a3029037e9559f73de",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 180.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1800000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:26c7478396df92469032e28c",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 200.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 2000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:61d79d25a580a228776480f2",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 160.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 1600000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:d596d62ac93b33c81367ea2f",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 500.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 5000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:72f0c7f5a9aefec1311b4e77",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 280.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 2800000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    },
+    {
+     "fact_id": "wind:5ee2f6e97836fd4e588ef1c3",
+     "source_hash": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8",
+     "source_value": 300.0,
+     "source_unit": "万元",
+     "factor": 10000,
+     "value": 3000000.0,
+     "unit": "元",
+     "formula": "source_value × explicit_unit_factor",
+     "version": "unit_bridge/1"
+    }
+   ],
+   "unsupported_units": []
+  }
+ },
+ "events": {
+  "candidates": 2,
+  "excluded": 1
+ },
+ "quant": {
+  "event_returns": {
+   "status": "ok",
+   "reason": ""
+  },
+  "backtest": {
+   "status": "ok",
+   "reason": ""
+  }
+ },
+ "risk": {
+  "900001.SH": {
+   "status": "synthetic_research_features",
+   "features": 4,
+   "gaps": 1,
+   "anomaly_clues": [
+    "receivables_outpace_revenue",
+    "inventory_outpaces_cost"
+   ]
+  },
+  "900002.SH": {
+   "status": "synthetic_research_features",
+   "features": 4,
+   "gaps": 1,
+   "anomaly_clues": [
+    "inventory_outpaces_cost"
+   ]
+  }
+ },
+ "label_readiness": {
+  "credit": {
+   "status": "synthetic_contract_only"
+  },
+  "fraud": {
+   "status": "synthetic_contract_only"
+  }
+ },
+ "previews": {
+  "financial": {
+   "kind": "financial",
+   "status": "ready",
+   "rows": 44,
+   "raw_columns": [
+    "下载日期",
+    "公司名称",
+    "单位",
+    "合并净利润",
+    "存货",
+    "币种",
+    "应付账款",
+    "应收账款",
+    "归母净利润",
+    "总负债",
+    "总资产",
+    "报告期",
+    "报告类型",
+    "报表口径",
+    "披露日期",
+    "经营活动产生的现金流量净额",
+    "营业成本",
+    "营业收入",
+    "证券代码"
+   ],
+   "declared": {
+    "source": "synthetic_fixture",
+    "synthetic": true,
+    "license": "synthetic_internal_only"
+   },
+   "unknown_columns": [],
+   "eligible_records": 44,
+   "instruments": [
+    "900001.SH",
+    "900002.SH"
+   ],
+   "raw_file": "financials.csv",
+   "raw_bytes": 762,
+   "usage_scope": "学校研究/内部开发；实际授权范围待核实",
+   "license_status": "unverified",
+   "export_allowed": false,
+   "historical_version": "下载时版本；披露日期本身不能证明该值在历史时点未被重述",
+   "sample_rows": [
+    {
+     "entity_id": "900001.SH",
+     "metric": "revenue",
+     "value": 1000.0,
+     "unit": "万元",
+     "period": "2023年",
+     "caliber": "合并",
+     "disclosed_at": "2024-04-25",
+     "available_at": "2024-04-25",
+     "eligible": true,
+     "raw_fields": {
+      "证券代码": "900001.SH",
+      "公司名称": "模拟公司甲",
+      "报告期": "2023-12-31",
+      "报告类型": "年度",
+      "披露日期": "2024-04-25",
+      "下载日期": "2025-04-30",
+      "单位": "万元",
+      "币种": "CNY",
+      "报表口径": "合并",
+      "营业收入": "1000",
+      "营业成本": "700",
+      "归母净利润": "150"
+     }
+    },
+    {
+     "entity_id": "900001.SH",
+     "metric": "operating_cost",
+     "value": 700.0,
+     "unit": "万元",
+     "period": "2023年",
+     "caliber": "合并",
+     "disclosed_at": "2024-04-25",
+     "available_at": "2024-04-25",
+     "eligible": true,
+     "raw_fields": {
+      "证券代码": "900001.SH",
+      "公司名称": "模拟公司甲",
+      "报告期": "2023-12-31",
+      "报告类型": "年度",
+      "披露日期": "2024-04-25",
+      "下载日期": "2025-04-30",
+      "单位": "万元",
+      "币种": "CNY",
+      "报表口径": "合并",
+      "营业收入": "1000",
+      "营业成本": "700",
+      "归母净利润": "150"
+     }
+    },
+    {
+     "entity_id": "900001.SH",
+     "metric": "net_profit",
+     "value": 150.0,
+     "unit": "万元",
+     "period": "2023年",
+     "caliber": "合并",
+     "disclosed_at": "2024-04-25",
+     "available_at": "2024-04-25",
+     "eligible": true,
+     "raw_fields": {
+      "证券代码": "900001.SH",
+      "公司名称": "模拟公司甲",
+      "报告期": "2023-12-31",
+      "报告类型": "年度",
+      "披露日期": "2024-04-25",
+      "下载日期": "2025-04-30",
+      "单位": "万元",
+      "币种": "CNY",
+      "报表口径": "合并",
+      "营业收入": "1000",
+      "营业成本": "700",
+      "归母净利润": "150"
+     }
+    }
+   ],
+   "issues": [],
+   "issue_count": 0
+  },
+  "market": {
+   "kind": "market",
+   "status": "ready",
+   "rows": 87,
+   "raw_columns": [
+    "amount",
+    "available_at",
+    "close",
+    "high",
+    "low",
+    "open",
+    "source",
+    "volume",
+    "日期",
+    "证券代码"
+   ],
+   "declared": {
+    "source": "synthetic_fixture",
+    "currency": "CNY",
+    "unit": "元",
+    "adj_basis": "不复权",
+    "license": "synthetic_internal_only"
+   },
+   "unknown_columns": [],
+   "eligible_records": 87,
+   "instruments": [
+    "900001.SH",
+    "900002.SH",
+    "900300.SH"
+   ],
+   "raw_file": "daily_prices.csv",
+   "raw_bytes": 9949,
+   "usage_scope": "学校研究/内部开发；实际授权范围待核实",
+   "license_status": "unverified",
+   "export_allowed": false,
+   "historical_version": "下载时版本；披露日期本身不能证明该值在历史时点未被重述",
+   "sample_rows": [
+    {
+     "entity_id": "900001.SH",
+     "metric": "2025-04-21",
+     "value": null,
+     "unit": "元",
+     "period": "2025-04-21",
+     "caliber": "",
+     "disclosed_at": "",
+     "available_at": "2025-04-21T15:00:00+08:00",
+     "eligible": true,
+     "raw_fields": {
+      "证券代码": "900001.SH",
+      "日期": "2025-04-21",
+      "open": "10.0",
+      "high": "10.15",
+      "low": "9.9",
+      "close": "10.05",
+      "volume": "10000",
+      "amount": "100500.0",
+      "available_at": "2025-04-21T15:00:00+08:00",
+      "source": "synthetic_fixture"
+     }
+    },
+    {
+     "entity_id": "900001.SH",
+     "metric": "2025-04-22",
+     "value": null,
+     "unit": "元",
+     "period": "2025-04-22",
+     "caliber": "",
+     "disclosed_at": "",
+     "available_at": "2025-04-22T15:00:00+08:00",
+     "eligible": true,
+     "raw_fields": {
+      "证券代码": "900001.SH",
+      "日期": "2025-04-22",
+      "open": "10.1",
+      "high": "10.25",
+      "low": "10.0",
+      "close": "10.15",
+      "volume": "10000",
+      "amount": "101500.0",
+      "available_at": "2025-04-22T15:00:00+08:00",
+      "source": "synthetic_fixture"
+     }
+    },
+    {
+     "entity_id": "900001.SH",
+     "metric": "2025-04-23",
+     "value": null,
+     "unit": "元",
+     "period": "2025-04-23",
+     "caliber": "",
+     "disclosed_at": "",
+     "available_at": "2025-04-23T15:00:00+08:00",
+     "eligible": true,
+     "raw_fields": {
+      "证券代码": "900001.SH",
+      "日期": "2025-04-23",
+      "open": "10.2",
+      "high": "10.35",
+      "low": "10.1",
+      "close": "10.25",
+      "volume": "10000",
+      "amount": "102500.0",
+      "available_at": "2025-04-23T15:00:00+08:00",
+      "source": "synthetic_fixture"
+     }
+    }
+   ],
+   "issues": [],
+   "issue_count": 0
+  }
+ },
+ "excluded": {
+  "financial": 0,
+  "market": 0
+ },
+ "limits": [
+  "仅值/时间/口径有效的材料参与计算；首次披露日不能证明最新重述值当时可得",
+  "事件与情绪为有引用的规则候选，未用人工标注评估中文准确率",
+  "事件收益为事后价格反应观察；组合账本为既有内部原型，未验证策略有效性",
+  "财报异常是核查线索；标签就绪不等于已训练、校准或可部署的信用/反欺诈模型",
+  "尚未接入正常工作台选版/MD-PDF-ZIP交付；内部研究文件不会自动采纳旧任务"
+ ],
+ "summary_markdown": "# 织光离线研究\n\n**模拟数据：只验证功能流程，不证明收益或风险模型有效性。**\n\n特征截止：2025-04-30；结果评价截止：2025-06-30。\n\n## 财务与现金压力\n\n### 900001.SH\n\n- scenario_sensitivity：validated\n  - 情景归母净利润（假设成立时）：160.00 万元\n  - 所需毛利率与基期毛利率之差（百分点）：-0.83 %（pp）\n  - 维持目标归母净利所需收入变化（单因素；毛利率固定基期）：-2.78 %\n- cash_pressure：validated\n  - 天数冲击的额外资金占用（回款 +10.00 天／库存 +10.00 天）：55.89 万元\n- cash_quality：validated\n  - 经营现金流对归母净利润的覆盖：62.50 %\n### 900002.SH\n\n- scenario_sensitivity：validated\n  - 情景归母净利润（假设成立时）：250.00 万元\n  - 所需毛利率与基期毛利率之差（百分点）：-3.18 %（pp）\n  - 维持目标归母净利所需收入变化（单因素；毛利率固定基期）：-9.09 %\n- cash_pressure：validated\n  - 天数冲击的额外资金占用（回款 +10.00 天／库存 +10.00 天）：99.45 万元\n- cash_quality：validated\n  - 经营现金流对归母净利润的覆盖：96.00 %\n\n## 事件与情绪候选\n\n- 900001.SH · earnings_guidance · positive：模拟甲发布经营计划（详情/原文位置见 events.json）\n- 900002.SH · orders_demand · positive：模拟乙签订设备订单（详情/原文位置见 events.json）\n候选 2；排除/待原文 1。\n\n## 历史检验\n\n- event_returns：ok\n  下一交易日为第1日；以下为收盘价格反应，未模拟成交。\n  - 900001.SH 第1交易日：基准调整 +0.76%。\n  - 900001.SH 第5交易日：基准调整 +3.76%。\n  - 900001.SH 第20交易日：基准调整 +14.60%。\n  - 900002.SH 第1交易日：基准调整 -0.45%。\n  - 900002.SH 第5交易日：基准调整 -2.23%。\n  - 900002.SH 第20交易日：基准调整 -8.68%。\n- backtest：ok\n\n## 风险研究与标签准备\n\n- 900001.SH：synthetic_research_features；有效特征 4，缺口 1。\n  - 经营现金/合并净利润：58.82%。\n  - 期末应收/同期收入：15.00%。\n  - 期末存货/同期成本：28.57%。\n  - 总负债/总资产：54.17%。\n  - 核查线索：应收增长超过收入增长 +60.00 个百分点。\n    正常替代解释：结算日期、信用期变化、客户结构或合并范围变化；补账龄与合同条款核实。\n  - 核查线索：库存增长超过成本增长 +51.43 个百分点。\n    正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实。\n- 900002.SH：synthetic_research_features；有效特征 4，缺口 1。\n  - 经营现金/合并净利润：92.31%。\n  - 期末应收/同期收入：21.82%。\n  - 期末存货/同期成本：23.08%。\n  - 总负债/总资产：61.36%。\n  - 核查线索：库存增长超过成本增长 +15.71 个百分点。\n    正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实。\n- credit 标签：synthetic_contract_only；尚未训练模型。\n- fraud 标签：synthetic_contract_only；尚未训练模型。\n\n## 适用边界\n\n- 仅值/时间/口径有效的材料参与计算；首次披露日不能证明最新重述值当时可得\n- 事件与情绪为有引用的规则候选，未用人工标注评估中文准确率\n- 事件收益为事后价格反应观察；组合账本为既有内部原型，未验证策略有效性\n- 财报异常是核查线索；标签就绪不等于已训练、校准或可部署的信用/反欺诈模型\n- 尚未接入正常工作台选版/MD-PDF-ZIP交付；内部研究文件不会自动采纳旧任务\n\n研究ID：`f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828`；来源与实现hash见 study_manifest.json。\n",
+ "input_id": "__sample__",
+ "input_dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\examples\\research_study",
+ "files": [
+  {
+   "name": "README.md",
+   "bytes": 5294,
+   "sha256": "f199ce58faff4ae4cc118c0bd84468bab8939ebdce4ba5f80bfa71085911ba82"
+  },
+  {
+   "name": "calendar.csv",
+   "bytes": 354,
+   "sha256": "5d26fe75879ea270b60cb9f19909f459bf6f2afc828a81fe25a2205a273538f5"
+  },
+  {
+   "name": "credit_labels.json",
+   "bytes": 998,
+   "sha256": "3f49c38131e85abd6d03dfb0beecb865cc1b3c21e027f812e0eac66b3bbcd286"
+  },
+  {
+   "name": "daily_prices.csv",
+   "bytes": 9949,
+   "sha256": "8f720e3c000fc007a273f47a389f2e67ba83debfab10e36eff534b67866f8470"
+  },
+  {
+   "name": "financials.csv",
+   "bytes": 762,
+   "sha256": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8"
+  },
+  {
+   "name": "fraud_labels.json",
+   "bytes": 517,
+   "sha256": "93b4be186c2486a1955175a078defa0a7197644d42f6ae52a3be5c4c26fd9ee3"
+  },
+  {
+   "name": "news.json",
+   "bytes": 1098,
+   "sha256": "8e47131b7ed6bc735cbcdc6abc9d46a6880be32fe553b5393f78c48df6066830"
+  },
+  {
+   "name": "study.json",
+   "bytes": 1272,
+   "sha256": "f26bf94ebb3dd8330f2765eda3b5a915e510eb30b1237939f01cc1e38fa504e6"
+  }
+ ],
+ "spec": {
+  "schema": "weavemind.study_spec/1",
+  "name": "模拟两公司经营、事件与风险研究",
+  "synthetic": true,
+  "feature_cutoff": "2025-04-30",
+  "evaluation_as_of": "2025-06-30",
+  "benchmark": "900300.SH",
+  "financial": {
+   "file": "financials.csv",
+   "metadata": {
+    "source": "synthetic_fixture",
+    "synthetic": true,
+    "license": "synthetic_internal_only"
+   },
+   "periods": [
+    2023,
+    2024
+   ],
+   "models": [
+    "scenario_sensitivity",
+    "cash_pressure",
+    "cash_quality"
+   ],
+   "scenario_params": {
+    "revenue_growth": 0.0,
+    "gross_margin_delta": 0.0
+   },
+   "params": {
+    "cash_pressure": {
+     "collection_days_delta": 10,
+     "inventory_days_delta": 10
+    }
+   }
+  },
+  "market": {
+   "file": "daily_prices.csv",
+   "metadata": {
+    "source": "synthetic_fixture",
+    "currency": "CNY",
+    "unit": "元",
+    "adj_basis": "不复权",
+    "license": "synthetic_internal_only"
+   }
+  },
+  "calendar": {
+   "file": "calendar.csv"
+  },
+  "events": {
+   "file": "news.json"
+  },
+  "allow_unadjusted": true,
+  "event_windows": [
+   1,
+   5,
+   20
+  ],
+  "backtest": {
+   "universe": [
+    "900001.SH",
+    "900002.SH"
+   ],
+   "rebalance": "buy_and_hold",
+   "initial_cash": 100000,
+   "holdout_start": "2025-05-15"
+  },
+  "credit_labels": {
+   "file": "credit_labels.json"
+  },
+  "fraud_labels": {
+   "file": "fraud_labels.json"
+  }
+ },
+ "preview_only": true,
+ "next_step": "确认以上主体与两个截止后，再点『运行并保存』（服务端会核对确认清单，未确认不给运行）"
+}

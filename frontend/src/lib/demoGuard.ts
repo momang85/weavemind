@@ -33,6 +33,8 @@ export const DEMO_BLOCKED_PREFIXES = [
   '/api/kill-worker',      // 终止 worker（改进程池）
   '/api/llm-mode',         // 切换 LLM 路由（改全局模式）
   '/api/single-agent',     // 单智能体直发（费用）
+  '/api/research-study',   // 本地研究试验的上传/预览/运行/假说卡（会在服务端写文件；
+                           //  预览虽只读，但与运行同前缀，演示模式下整体拦住更诚实）
 ] as const
 
 // **付费的 GET**：不能按"只读一律放行"处理。
