@@ -8372,6 +8372,58 @@ def _get_research_study_studies(self, p):
     return self._json({"root": root, "count": len(items), "studies": items})
 
 
+def _get_research_study_file(self, p):
+    """`GET /api/research-study/file?id=<研究ID>&name=<文件名>`：下载内部研究产物文件。
+
+    三域规划 §17.10 第 4 项：研究页上的内部研究 MD/JSON 要**可下载**，不能只列
+    文件名。与 studies 列表读同一个产物根目录；鉴权沿用 do_GET 的登录门（非公开
+    GET 一律要求会话，viewer 可读）。文件名防线：不许路径分隔符（`_STUDY_FILE_RE`
+    逐段校验）、不许 `.` 开头、不许 `..`，解析后必须仍落在该研究目录内。
+    产物是**内部研究**：attachment 直下，不进 MD/PDF/ZIP 交付包。
+    """
+    from urllib.parse import parse_qs
+    q = parse_qs(urlparse(self.path).query)
+    study_id = (q.get("id") or [""])[0].strip()
+    name = (q.get("name") or [""])[0].strip().replace("\\", "/")
+    d = _study_dir_of(study_id)
+    if not d:
+        return self._json({"error": "研究产物不存在"}, 404)
+    parts = name.split("/")
+    if (not name or name.startswith("/")
+            or any(not part or part.startswith(".")
+                   or not _STUDY_FILE_RE.match(part) for part in parts)):
+        return self._json({"error": "非法文件名"}, 400)
+    fp = os.path.join(d, *parts)
+    root = os.path.realpath(d)
+    real = os.path.realpath(fp)
+    if not real.startswith(root + os.sep) or not os.path.isfile(real):
+        return self._json({"error": "产物文件不存在"}, 404)
+    try:
+        with open(real, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        return self._json({"error": "read failed", "detail": str(exc)[:200]}, 500)
+    ext = os.path.splitext(real)[1].lower()
+    if ext == ".md":
+        ctype = "text/markdown"
+    elif ext == ".json":
+        ctype = "application/json"
+    else:
+        ctype = mimetypes.guess_type(real)[0] or "application/octet-stream"
+    session = self._auth_session() or {}
+    audit_log(session.get("user", ""), self._client_ip(), "research_study.file",
+              target=study_id[:16], result="ok", detail=f"file={name}")
+    self.send_response(200)
+    if ctype.startswith("text/") or ctype == "application/json":
+        self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+    else:
+        self.send_header("Content-Type", ctype)
+    self.send_header("Content-Disposition", f'attachment; filename="{parts[-1]}"')
+    self.send_header("Content-Length", str(len(raw)))
+    self.end_headers()
+    self.wfile.write(raw)
+
+
 def _post_research_study_upload(self, p, body, admin):
     """`POST /api/research-study/upload`：把文件存进本次研究的输入目录（复用上传契约）。
 
@@ -9002,6 +9054,7 @@ _GET_ROUTES = [
     (lambda self, p: p == "/api/health", _get_health),
     (lambda self, p: p == "/api/research-study/sample", _get_research_study_sample),
     (lambda self, p: p == "/api/research-study/studies", _get_research_study_studies),
+    (lambda self, p: p == "/api/research-study/file", _get_research_study_file),
     (lambda self, p: p == "/api/auth/bootstrap", _get_bootstrap),
     (lambda self, p: p == "/api/demo/brief", _get_demo_brief),
     (lambda self, p: p == "/api/audit", _get_audit),

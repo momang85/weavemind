@@ -278,6 +278,96 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(chain["baseline_profit"]["sign"], "未知")
 
 
+class IncrementDirectionTests(unittest.TestCase):
+    """B2 纠偏：_increment 必须**分方向**（优/同/差）、同样本比较、零留出不报优势。"""
+
+    @staticmethod
+    def _case(i, *, decision_at, outcome_at, sign_o, sign_y, baseline_profit_sign):
+        return {"case_id": f"E{i}::t=2030", "entity_id": f"E{i}", "t": "2030",
+                "next_year": "2031", "decision_at": decision_at,
+                "outcome_at": outcome_at, "sign_o": sign_o, "sign_y": sign_y,
+                "y_state": "mature", "baseline_profit_sign": baseline_profit_sign,
+                "rule_available": True, "time_unknown": False}
+
+    def _run(self, cases):
+        pool = sorted({c["entity_id"] for c in cases})
+        return EV.evaluate(cases, pool=pool, split_at="2025-04-30")["increment"]
+
+    def test_rule_worse_is_disadvantage_not_advantage(self):
+        # 规则错 5/5、基线错 0/5 ⇒ 必须"差"，绝不能说成更优/无证据。
+        cases = [self._case(i, decision_at="2025-06-01", outcome_at="2026-06-01",
+                            sign_o="正", sign_y="负", baseline_profit_sign="负")
+                 for i in range(5)]
+        inc = self._run(cases)
+        self.assertEqual(inc["direction"], "差")
+        self.assertEqual(inc["verdict"], "disadvantage")
+        self.assertIn("更差", inc["reason"])
+        self.assertIn("规则误判 5/5", inc["reason"])
+        self.assertIn("归母基线误判 0/5", inc["reason"])
+
+    def test_equal_misses_means_no_increment(self):
+        cases = [self._case(i, decision_at="2025-06-01", outcome_at="2026-06-01",
+                            sign_o="正" if i else "负", sign_y="正" if i else "负",
+                            baseline_profit_sign="正" if i else "负")
+                 for i in range(5)]
+        inc = self._run(cases)
+        self.assertEqual(inc["direction"], "同")
+        self.assertEqual(inc["verdict"], "no_evidence")
+        self.assertIn("没有增量", inc["reason"])
+        self.assertIn("共同有效样本 5 例", inc["reason"])
+
+    def test_better_on_exploration_but_zero_holdout_no_advantage(self):
+        # 方向为优但全部案例都在切分前（探索期）⇒ 不报优势。
+        cases = [self._case(i, decision_at="2024-06-01", outcome_at="2025-04-01",
+                            sign_o="正", sign_y="负" if i == 4 else "正",
+                            baseline_profit_sign="负")
+                 for i in range(5)]
+        inc = self._run(cases)
+        self.assertEqual(inc["direction"], "优")
+        self.assertEqual(inc["verdict"], "no_evidence")
+        self.assertIn("留出为 0", inc["reason"])
+        self.assertFalse(inc["three_way_comparable"])
+
+    def test_crossing_does_not_substitute_for_holdout(self):
+        # 跨切分案例再多也不算留出：留出=0 ⇒ 优势方向也不报优势。
+        cases = [self._case(i, decision_at="2025-04-01", outcome_at="2026-06-01",
+                            sign_o="负", sign_y="负", baseline_profit_sign="正")
+                 for i in range(5)]
+        inc = self._run(cases)
+        self.assertEqual(inc["direction"], "优")
+        self.assertEqual(inc["verdict"], "no_evidence")
+        self.assertIn("留出为 0", inc["reason"])
+        self.assertEqual(inc["per_bucket"]["crossing"]["rule_scored"], 5)
+        self.assertEqual(inc["per_bucket"]["holdout"]["rule_scored"], 0)
+        self.assertEqual(inc["per_bucket"]["exploration"]["rule_scored"], 0)
+
+    def test_holdout_advantage_candidate(self):
+        # 留出 5 例、规则 0 误判 vs 基线 5 误判、无重叠 ⇒ 才允许"优势候选"。
+        cases = [self._case(i, decision_at="2025-06-01", outcome_at="2026-06-01",
+                            sign_o="负", sign_y="负", baseline_profit_sign="正")
+                 for i in range(5)]
+        inc = self._run(cases)
+        self.assertEqual(inc["direction"], "优")
+        self.assertEqual(inc["verdict"], "directional")
+        self.assertIn("优势候选", inc["reason"])
+        self.assertEqual(inc["holdout_scored"], 5)
+
+    def test_reason_reports_denominator_and_abstains(self):
+        # 零预测是弃权，不进胜负分母；理由里必须写明分母与弃权数。
+        cases = [self._case(0, decision_at="2025-06-01", outcome_at="2026-06-01",
+                            sign_o="负", sign_y="负", baseline_profit_sign="负"),
+                 self._case(1, decision_at="2025-06-01", outcome_at="2026-06-01",
+                            sign_o="正", sign_y="负", baseline_profit_sign="正"),
+                 self._case(2, decision_at="2025-06-01", outcome_at="2026-06-01",
+                            sign_o="零", sign_y="负", baseline_profit_sign="负")]
+        inc = self._run(cases)
+        self.assertEqual(inc["common_effective_cases"], 2)
+        self.assertEqual(inc["rule_abstain"], 1)
+        self.assertIn("共同有效样本 2 例", inc["reason"])
+        self.assertIn("规则另弃权 1 例", inc["reason"])
+        self.assertEqual(inc["direction"], "同")
+
+
 class FollowUpTests(unittest.TestCase):
     """follow_up：未成熟 ⇒ 待数据/未决且不写读数；已核验才给支持/削弱。"""
 

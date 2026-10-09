@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -31,22 +32,53 @@ FIN_HEADER = ("证券代码,公司名称,报告期,报告类型,披露日期,下
 
 
 class _Handler:
-    """最小 handler 替身：只实现 `_json`（收集响应）与 `_client_ip`。"""
+    """最小 handler 替身：`_json` 收集 JSON 响应；下载类收集状态/头/字节。
+
+    `_get_research_study_file` 不走 `_json`，而是 `send_response`+`send_header`
+    +`wfile.write`（与底稿文件下载同形态），替身把三段都收下来供断言。
+    """
 
     def __init__(self, path: str):
         self.path = path
         self.responses: list[tuple] = []
+        self.status_out: list[int] = []
+        self.headers_out: list[tuple] = []
+        self.wfile = io.BytesIO()
 
     def _json(self, payload, status=200):
         self.responses.append((payload, status))
         return payload
 
+    def send_response(self, status):
+        self.status_out.append(status)
+
+    def send_header(self, name, value):
+        self.headers_out.append((name, value))
+
+    def end_headers(self):
+        pass
+
     def _client_ip(self):
         return "127.0.0.1"
+
+    def _auth_session(self):
+        return {"user": "admin", "role": "admin"}
 
     @property
     def last(self):
         return self.responses[-1] if self.responses else (None, None)
+
+    @property
+    def download_status(self):
+        return self.status_out[-1] if self.status_out else None
+
+    @property
+    def download_headers(self):
+        return dict(self.headers_out)
+
+    @property
+    def download_body(self):
+        return self.wfile.getvalue()
 
 
 class _Base(unittest.TestCase):
@@ -395,6 +427,87 @@ class TestStudyEntryIdentityAndTimeGuards(_Base):
         self.assertEqual(status, 200, ver)
         self.assertFalse(ver["ok"])
         self.assertIn("summary.md", ver["failed"])
+
+
+class TestStudyFileDownload(_Base):
+    """§17.10 第 4 项「可下载」：`GET /api/research-study/file` 缝。
+
+    - 命中：返回 200 + 与盘上字节一致 + attachment 头（text/md → text/markdown）；
+    - 反例：路径分隔符 / `..` / 开头点 → 400；未知研究与未知文件 → 404；
+    - 越界：嵌套里的 `..` 段不给直下；目录外的名字不给 200。
+    """
+
+    def _file(self, sid: str, name: str):
+        import web_ui
+        h = _Handler(f"/api/research-study/file?id={sid}&name={name}")
+        web_ui._get_research_study_file(h, h.path)
+        return h
+
+    def _run_study(self):
+        payload, status = self._run()
+        self.assertEqual(status, 200, payload)
+        return payload
+
+    def test_download_serves_bytes_with_attachment_header(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        raw_disk = (Path(payload["dir"]) / "summary.md").read_bytes()
+        h = self._file(sid, "summary.md")
+        self.assertEqual(h.download_status, 200, h.last)
+        self.assertEqual(h.download_body, raw_disk)
+        headers = h.download_headers
+        self.assertEqual(headers["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertEqual(headers["Content-Disposition"],
+                         'attachment; filename="summary.md"')
+        self.assertEqual(int(headers["Content-Length"]), len(raw_disk))
+        # JSON 产物同样可下载，类型标 application/json
+        h2 = self._file(sid, "study_manifest.json")
+        self.assertEqual(h2.download_status, 200, h2.last)
+        self.assertEqual(h2.download_headers["Content-Type"],
+                         "application/json; charset=utf-8")
+        self.assertTrue(h2.download_headers["Content-Type"].startswith(
+            h2.download_headers["Content-Type"]))
+
+    def test_download_rejects_traversal_dotfiles_and_bad_names(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        (Path(payload["dir"]).parent / "_secret.md").write_text(
+            "不该被下载的秘密", encoding="utf-8")
+        for bad in ("..", "../_secret.md", "..%2F_secret.md", ".env",
+                    "a/b/../c.md", "", "."):
+            h = self._file(sid, bad)
+            payload_r, status = h.last
+            self.assertEqual(status, 400, (bad, payload_r))
+            self.assertEqual(h.download_status, None)
+
+    def test_download_unknown_study_and_unknown_file_404(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        h = self._file("0" * 32, "summary.md")
+        self.assertEqual(h.last[1], 404, h.last)
+        h = self._file("zzzz", "summary.md")
+        self.assertEqual(h.last[1], 404, h.last)
+        h = self._file(sid, "no_such_artifact.md")
+        self.assertEqual(h.last[1], 404, h.last)
+        self.assertEqual(h.download_status, None)
+
+    def test_download_subdir_artifact_and_outside_root_refused(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        d = Path(payload["dir"])
+        (d / "sub").mkdir()
+        (d / "sub" / "nested.json").write_text('{"ok": 1}', encoding="utf-8")
+        h = self._file(sid, "sub/nested.json")
+        self.assertEqual(h.download_status, 200, h.last)
+        self.assertEqual(h.download_body, b'{"ok": 1}')
+        # 产物根之外的文件（uploads 区）不给直下
+        up = d.parent / "_uploads" / sid[:16]
+        up.mkdir(parents=True)
+        (up / "leak.md").write_text("leak", encoding="utf-8")
+        h = self._file(sid, "../_uploads/" + sid[:16] + "/leak.md")
+        payload_r, status = h.last
+        self.assertEqual(status, 400, (payload_r, h.download_status))
+        self.assertEqual(h.download_status, None)
 
 
 if __name__ == "__main__":

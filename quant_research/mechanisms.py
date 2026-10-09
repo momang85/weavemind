@@ -420,11 +420,14 @@ def short_card(reading: dict, *, composition_row: dict | None = None,
             "direction_rule": "sign(O_t) → sign(Y_op)",
             "observation_metric": "下一同口径年度 Y_op = (E_{t+1} − E_t)/收入_t",
             "target_period": f"{t} 年的下一同口径年度",
-            "alternatives": [
+            # B2：公司级主因/替代解释由研究输入（spec）显式给出；缺省仍是通用替代解释，
+            # 不硬编码任何公司的结论句。
+            "company_primary_cause": ctx.get("company_primary_cause") or "",
+            "alternatives": [str(a) for a in (ctx.get("alternatives") or [
                 "毛利变化可来自结构/价格/渠道费用归类，不等同需求改善",
                 "费用项变化可来自一次性计提、口径重分类或合并范围变化",
                 "税金及附加与消费税/附加税费相关，不随收入等比例变化",
-            ],
+            ])],
             "refutation_conditions": [
                 "下一同口径年度 sign(Y_op) 与 sign(O_t) 相反（分母收入为正）",
                 "同一 (指标, 期间) 出现重述后的不同值 ⇒ 本期读数作废，重算",
@@ -449,15 +452,17 @@ def short_card(reading: dict, *, composition_row: dict | None = None,
             "revenue_growth_to_hold_target": target.get("revenue_growth_to_hold_target"),
             "target_source": target.get("target_source"),
             "incremental_capital_occupation": target.get("incremental_capital_occupation"),
+            "conditioned_reading": target.get("conditioned_reading")
+            or ctx.get("target_note") or "",
             "note": "目标门槛是**替代路径**（收入或毛利率，不同时成立）；"
                     "交易日数冲击是设定情景，不是历史信号；"
                     "研究者设定/回到上年水平都不叫管理层承诺",
         },
-        "next_material": [
+        "next_material": [str(m) for m in (ctx.get("next_check") or [
             "下一期同口径年度报告（同主体/同合并范围/同科目口径）",
             "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
             "若为真实材料：下一期行情（事后反应观察；缺合格行情只停价格域）",
-        ],
+        ])],
         "provenance_kind": ctx.get("provenance_kind") or "历史重建",
         "provenance_note": ctx.get("provenance_note") or "",
         "usage_state": {
@@ -520,6 +525,8 @@ def card_markdown(card: dict) -> str:
               f"- 机制：{j['mechanism']}",
               f"- 预期方向：{j['expected_direction']}（规则 {j['direction_rule']}）",
               f"- 观察指标／目标期：{j['observation_metric']}；{j['target_period']}",
+              f"- 本公司具体主因（来自研究输入，供核查）：{j.get('company_primary_cause') or '未提供'}",
+              "- 替代解释：" + "；".join(j["alternatives"]),
               "- 反证条件：" + "；".join(j["refutation_conditions"]), "",
               "## 现金与周转的替代解释", "",
               f"- 读数的期间：{cash.get('period_of_run') or '未标（与组成表同期时为空）'}"
@@ -539,8 +546,10 @@ def card_markdown(card: dict) -> str:
               f"- 毛利率距目标阈值：{_pp(target.get('margin_gap_to_threshold_pp'))} 个百分点；"
               f"收入维持目标所需变化：{_pp(target.get('revenue_growth_to_hold_target'))}",
               f"- 目标来源：{target.get('target_source') or '未取得'}",
-              f"- 10 天回款＋库存的额外占用：{_yi(target.get('incremental_capital_occupation'))}",
-              f"- {target['note']}", "",
+              f"- 10 天回款＋库存的额外占用：{_yi(target.get('incremental_capital_occupation'))}"]
+    if target.get("conditioned_reading"):
+        lines.append(f"- 条件下的可承受空间（研究输入）：{target['conditioned_reading']}")
+    lines += [f"- {target['note']}", "",
               "## 下一份应核材料", ""]
     lines += [f"- {item}" for item in card["next_material"]]
     fu = card.get("follow_up") or {}

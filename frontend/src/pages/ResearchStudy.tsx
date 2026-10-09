@@ -493,7 +493,11 @@ export default function ResearchStudy() {
               hint={`${(run.artifacts ?? []).length} 个文件`}>
               <ul className="list-disc pl-4">
                 {(run.artifacts ?? []).map(a => (
-                  <li key={a.path}><span className="font-mono">{a.path}</span>（{a.bytes.toLocaleString()} 字节）</li>
+                  <li key={a.path}>
+                    <a className="font-mono text-cyan-300 hover:text-cyan-200 underline decoration-dotted"
+                      href={`/api/research-study/file?id=${encodeURIComponent(String(run.study_id ?? ''))}&name=${encodeURIComponent(a.path)}`}
+                      download>{a.path}</a>（{a.bytes.toLocaleString()} 字节）
+                  </li>
                 ))}
               </ul>
             </Fold>
@@ -553,7 +557,20 @@ export default function ResearchStudy() {
                     <td>{s.synthetic ? '模拟' : '真实'}</td>
                     <td>{s.research_state || '—'}</td>
                     <td>{s.human_review || '—'}</td>
-                    <td className="text-right tabular-nums">{(s.artifacts ?? []).length}</td>
+                    <td className="text-right tabular-nums align-top">
+                      <details>
+                        <summary className="cursor-pointer list-none">{(s.artifacts ?? []).length} 件</summary>
+                        <ul className="text-left mt-1 space-y-0.5">
+                          {((s.artifacts ?? []) as { path: string }[]).map(a => (
+                            <li key={a.path}>
+                              <a className="text-cyan-300 hover:text-cyan-200 underline decoration-dotted"
+                                href={`/api/research-study/file?id=${encodeURIComponent(String(s.study_id))}&name=${encodeURIComponent(a.path)}`}
+                                download>{a.path}</a>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    </td>
                   </tr>
                 ))}
               </tbody>
