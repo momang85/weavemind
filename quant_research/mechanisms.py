@@ -495,13 +495,17 @@ def card_markdown(card: dict) -> str:
     j = card["judgement"]
     cash = card["cash_turnover_alternatives"]
     target = card["target_condition_to_check"]
+    # 衔接点A（B3 首例）：卡只绑研究ID、result_hash 不回填（无环形 hash）——为空时
+    # 不得渲染成孤零零的"…"，如实指向研究清单（版本冻结时写入 result_hash）。
+    _rh = str(card['identity'].get('result_hash') or '')
+    _rh_render = (f"结果hash：`{_rh[:16]}…`" if _rh else
+                  "结果hash：研究级，随版本冻结写入 study_manifest.json（不回填卡片，无环形哈希）")
     lines = [f"# {card.get('entity') or ''}（{card['entity_id']}）经营机制卡",
              "",
              f"- 方法：`{card['identity']['method_version']}`；口径："
              f"{card['caliber']['scope']}／{card['caliber']['currency']}／{card['caliber']['period']}",
              f"- 身份：**{card['provenance_kind']}**——{card.get('provenance_note') or '—'}",
-             f"- 卡hash：`{card['card_hash'][:16]}…`；研究ID：`{card['identity'].get('study_id')}`；"
-             f"结果hash：`{str(card['identity'].get('result_hash') or '')[:16]}…`",
+             f"- 卡hash：`{card['card_hash'][:16]}…`；研究ID：`{card['identity'].get('study_id')}`；{_rh_render}",
              ""]
     if r.get("t"):
         lines += [f"## 组成表（{r['prev_year']} → {r['t']}）", "",

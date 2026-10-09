@@ -76,7 +76,8 @@ def _read_records(path: Path) -> list[dict]:
 
 def _implementations() -> dict:
     # Include the reused calculators, so a changed implementation invalidates a study.
-    names = ["quant_research/study.py", "adapters/wind_import.py",
+    names = ["quant_research/study.py", "quant_research/joint_grid.py",
+             "adapters/wind_import.py",
              "financial_analysis/events.py", "risk_research/features.py",
              "risk_research/readiness.py", "quant_research/event_returns.py",
              "quant_research/backtest.py", "quant_research/publish.py",
@@ -276,6 +277,38 @@ def _q1_context(code: str, entity: str, cspec: dict, qspec: dict, financial: dic
     }
 
 
+def _q1_inherited_sources(items: list, raw_by_fact: dict, materials: list,
+                          fallback_label: str) -> list[dict]:
+    """衔接点A（B3 首例）：spec 未给 sources 时，卡片来源继承**所选 Observation** 的原件出处。
+
+    只做既有字段的原地归并（无新提取器）：composition 项的 fact_id/prev_fact_id →
+    冻结前原始观察行（source_url/source_hash/disclosed_at），source_url → 研究输入
+    metadata 里已声明的原件 material_id。缺哪项就少写哪项，不编造来源。
+    """
+    out: dict[tuple, dict] = {}
+    for item in items or []:
+        for fid in (item.get("prev_fact_id"), item.get("fact_id")):
+            fid = str(fid or "")
+            rec = raw_by_fact.get(fid)
+            if not rec:
+                continue
+            url = str(rec.get("source_url") or "")
+            key = (url, str(rec.get("source_hash") or ""), str(rec.get("disclosed_at") or ""))
+            entry = out.setdefault(key, {"source_label": str(rec.get("source_label") or "")
+                                         or fallback_label,
+                                         "sha256": key[1], "url": url,
+                                         "disclosed_at": key[2], "fact_ids": []})
+            if fid and fid not in entry["fact_ids"]:
+                entry["fact_ids"].append(fid)
+    entries = list(out.values())
+    for entry in entries:
+        for m in materials or []:
+            if entry["url"] and str(m.get("url") or "") == entry["url"]:
+                entry["material_id"] = str(m.get("material_id") or "")
+                break
+    return entries
+
+
 def _q1_pct(value) -> str:
     try:
         return f"{float(value) * 100:+.2f}%"
@@ -290,6 +323,15 @@ def _q1_yi(value) -> str:
         return "—"
 
 
+def _q1_yi6(value) -> str:
+    """亿、6 位小数：目标核查显示精度（规划 §18.10:825 锚点 22.060589/100.159300）。
+    只在渲染时取整，冻结值保持原始精度（与 joint_grid._yi 同一纪律）。"""
+    try:
+        return f"{float(value) / 100000000:,.6f} 亿元"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _q1_card_hash(card: dict) -> str:
     """与 mechanisms.short_card 同一算法（排除 generated_at；card_hash 旧值随卡进入新 hash）。"""
     return hashlib.sha256(
@@ -298,12 +340,137 @@ def _q1_card_hash(card: dict) -> str:
     ).hexdigest()
 
 
+def _q1_base_fingerprint(card: dict, comp: dict | None, feature_cutoff: str) -> str:
+    """衔接点B（B3 首例）：主卡**基期实质指纹**（sha256 全量，存 identity.base_fingerprint）。
+
+    绑定（基期实质）：主体（entity_id/entity）、基期年份（t/上期）、feature_cutoff、
+    基期输入来源与事实（来源明细本就被 feature_cutoff 门控，只含披露不晚于截止的原件，
+    故不含后期来源）、参数方法（机制版本/口径/公式状态）、读取判定（E 读数、组成表
+    逐项贡献、恒等式核对、方向符号）。
+    **排除**：后续（follow_up）、评价截止（evaluation_as_of）、全研究ID（study_id/
+    result_hash/card_hash，无环形哈希）——仅推进评价截止或换研究ID不改基期指纹；
+    独立续页引用它说明对照的是哪份冻结基期，外层 study 版本仍可变化。
+    """
+    comp = comp or {}
+    readings = card.get("readings") or {}
+    identity = card.get("identity") or {}
+    substance = {
+        "entity_id": card.get("entity_id"), "entity": card.get("entity"),
+        "caliber": card.get("caliber"),
+        "base_year": readings.get("t"), "prev_year": readings.get("prev_year"),
+        "feature_cutoff": feature_cutoff,
+        "input_sources": [dict(s) for s in (identity.get("sources") or [])],
+        "input_fact_ids": list(identity.get("input_fact_ids") or []),
+        "params_method": {"method_version": identity.get("method_version"),
+                          "formula": identity.get("formula"),
+                          "formula_status": identity.get("formula_status")},
+        "reading_verdict": {
+            "e_t": readings.get("e_t"), "e_prev": readings.get("e_prev"),
+            "delta_e": readings.get("delta_e"),
+            "identity_ok": readings.get("identity_ok"),
+            "composition": [{"metric": i.get("metric"), "prev_value": i.get("prev_value"),
+                             "value": i.get("value"), "delta": i.get("delta"),
+                             "contribution": i.get("contribution")}
+                            for i in (readings.get("composition") or [])],
+            "o_t": readings.get("o_t"), "sign_o": readings.get("sign_o"),
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(substance, ensure_ascii=False, sort_keys=True, default=str)
+        .encode("utf-8")).hexdigest()
+
+
+def _q1_target_followup(tf_spec: dict, idx: dict, raw_by_fact: dict, *,
+                        target: dict | None, entity: str = "",
+                        base_fingerprint: str = "",
+                        materials: list | None = None) -> dict:
+    """§18.10:825 目标期新实际 → 独立续页记录（新读数不回填旧卡）。
+
+    T 已在 joint_grid.target 引用冻结事实；这里补目标期**同属性归母净利**（评价
+    截止门控可见的同口径冻结读数，index_observations 同口径过滤与冲突检测）与 T
+    对照，结论只说研究者目标达到/未达到——不是管理层承诺落空，年报实际也不硬塞
+    为盈利指引事件。缺读数（如三一 2025 年报材料未到）保持待数据、不写实际；
+    同格多值冲突同样不择一。来源逐字透传所选格的 fact_id 对应原始行出处，无新
+    提取器；基期指纹（衔接点B）说明对照的是哪份冻结基期。
+    """
+    metric = str(tf_spec.get("metric") or "net_profit")
+    period = str(tf_spec.get("period") or "")
+    if len(period) != 4 or not period.isdigit():
+        raise ValueError("q1.companies[].target_followup.period 须为四位年度")
+    nature = str(tf_spec.get("nature") or
+                 "研究者设定目标核查：不是管理层指引，也不构成业绩承诺；新读数不回填旧卡")
+    block: dict = {"status": "待数据", "metric": metric,
+                   "metric_label": str(tf_spec.get("metric_label") or metric),
+                   "period": period, "caliber": "合并", "nature": nature,
+                   "entity": entity, "base_fingerprint": base_fingerprint,
+                   "target": None, "actual": None, "gap": None,
+                   "verdict": None, "pending_reason": "", "verified_at": None,
+                   "note": ("新读数只进本续页：不回填旧卡，主卡与 card_hash 不变；"
+                            "结论是研究者目标核查，不是管理层承诺落空；"
+                            "年报实际不硬塞为盈利指引事件。")}
+    cells = (idx or {}).get("cells") or {}
+    conflict = (cells.get(("__conflict__", f"{metric}:{period}")) or {}).get("conflict")
+    cell = cells.get((metric, period))
+    if conflict:
+        block["pending_reason"] = (f"{period} 年同口径同格多值冲突（{metric}）："
+                                   "不择一、不取单值，保持待数据；不写实际读数")
+        return block
+    if cell is None:
+        block["pending_reason"] = (f"评价截止前没有{period}年同口径读数："
+                                   "保持待数据，不写实际读数")
+        return block
+    if not isinstance(target, dict) or target.get("value") is None:
+        block["pending_reason"] = "网格缺目标 T（T 须引用冻结事实）：不核目标"
+        return block
+    a, b = Decimal(str(cell["value"])), Decimal(str(target["value"]))
+    raw = raw_by_fact.get(str(cell.get("fact_id") or ""), {})
+    # 衔接点A 同法：raw 行不带 material_ids——经 source_url 匹配研究输入
+    # metadata 里已声明的原件 material_id（与卡来源继承一致，无新提取器）。
+    mid, url = "", str(raw.get("source_url") or "")
+    for m in materials or []:
+        if url and str(m.get("url") or "") == url:
+            mid = str(m.get("material_id") or "")
+            break
+    block.update({
+        "status": "已记录",
+        "target": {k: target.get(k) for k in ("metric", "period", "value", "unit",
+                                              "source", "goal_note", "nature",
+                                              "passed_as")},
+        "actual": {"period": str(cell.get("period") or period),
+                   "period_end": str(cell.get("period_end") or ""),
+                   "metric": metric, "value": float(a), "unit": "元",
+                   "fact_id": str(cell.get("fact_id") or ""),
+                   "disclosed_at": str(raw.get("disclosed_at") or ""),
+                   "available_at": str(raw.get("available_at") or ""),
+                   "source": str(raw.get("source") or raw.get("source_label") or ""),
+                   "source_url": str(raw.get("source_url") or ""),
+                   "source_hash": str(raw.get("source_hash") or ""),
+                   "source_row": raw.get("source_row"),
+                   "material_ids": ([mid] if mid
+                                    else [str(m) for m in (raw.get("material_ids") or ())]),
+                   "verify_state": str(raw.get("verify_state") or "")},
+        "gap": float(a - b),
+        "verdict": ("达到" if a >= b else "未达到") + f"研究者设定的{period}目标",
+        "verified_at": str(raw.get("disclosed_at") or ""),
+    })
+    return block
+
+
+def _q1_period_label(period) -> str:
+    """显示用周期标签：源值可能已带「年」（如 2023年），去掉尾字避免「2023年 年」重复；
+    只影响渲染文字，不改冻结数值与任何指纹。"""
+    s = str(period or "")
+    return s[:-1] if s.endswith("年") else s
+
+
 def _q1_followup_md(code: str, fu: dict, q1: dict) -> str:
     """独立后续页：原卡方向 → 同口径实际读数 → 支持/削弱/未决；三一缺下年 → pending。"""
     target_year, split_at = q1.get("target_year"), q1.get("split_at")
     lines = [f"# Q1 后续页：{code}（t={target_year}）", "",
              f"- 方法 `{q1.get('method_version')}`；评估 `{q1.get('eval_version')}`；"
              f"结果评价截止 `{q1.get('evaluation_as_of')}`；切分 `{split_at}`。",
+             f"- 基期实质指纹（identity.base_fingerprint，绑定主体/年度/特征截止/基期来源/"
+             f"参数方法/读数判定；排除后续、评价截止与全研究ID）：`{fu.get('base_fingerprint')}`",
              f"- 性质：**{q1.get('provenance_kind')}**（生成时后续年度结果已公开），"
              "不构成事前预测或 alpha 声明。", "",
              f"## 状态：{fu.get('status')}（{fu.get('mechanism_verdict')}）", ""]
@@ -326,6 +493,31 @@ def _q1_followup_md(code: str, fu: dict, q1: dict) -> str:
                       f"实际 Y_op = {_q1_pct(prior.get('y_op'))}（{prior.get('sign_y')}）"
                       f"→ {prior.get('mechanism_verdict')}",
                       "- 上一期如误判，**保留**：误判本身写进负结果，不隐藏、不事后换窗口。", ""]
+    tf = fu.get("target_followup")
+    if isinstance(tf, dict):
+        lines += ["## 研究者目标核查（新实际·独立续页，不回填旧卡）", ""]
+        tgt = tf.get("target") or {}
+        if tgt:
+            lines.append(f"- 研究者目标 T：{_q1_period_label(tgt.get('period'))} 年"
+                         f"{tf.get('metric_label')} {_q1_yi6(tgt.get('value'))}"
+                         f"（{tgt.get('goal_note')}；{tgt.get('nature')}）")
+        if tf.get("status") == "已记录":
+            tact = tf.get("actual") or {}
+            lines.append(f"- 目标期实际：{tf.get('period')} 年"
+                         f"{tf.get('metric_label')} {_q1_yi6(tact.get('value'))}"
+                         f"（{tf.get('caliber')}口径，披露 {tact.get('disclosed_at') or '—'}）")
+            lines.append(f"- 结论：**{tf.get('verdict')}**（实际 − T = {_q1_yi6(tf.get('gap'))}）")
+            mats = "、".join(tact.get("material_ids") or [])
+            lines.append(f"- 来源：{tact.get('source') or '来源未标注'}；"
+                         f"fact_id `{tact.get('fact_id')}`；材料 {mats or '未声明'}；"
+                         f"source_hash `{str(tact.get('source_hash') or '')[:16]}…`；"
+                         f"verify_state `{tact.get('verify_state') or '—'}`")
+            if tact.get("source_url"):
+                lines.append(f"- 原件：<{tact['source_url']}>")
+        else:
+            lines.append(f"- 目标期实际：{tf.get('pending_reason')}")
+        lines.append(f"- 边界：{tf.get('note')}")
+        lines.append("")
     lines += ["## 下一核查", ""] + [f"- {n}" for n in (fu.get("next_check") or [])]
     lines += ["", f"逐公司卡与方向对照见 `q1_cards.md` / `q1_evaluation.md`；研究ID见 study_manifest.json。"]
     return "\n".join(lines)
@@ -356,6 +548,16 @@ def _q1_summary_lines(q1: dict) -> list:
     for code, fu in sorted((q1.get("followups") or {}).items()):
         lines.append(f"- 后续页 {code}：{fu.get('status')}（{fu.get('mechanism_verdict')}）"
                      f"→ `q1_followup_{code}.md`。")
+        tf = fu.get("target_followup")
+        if isinstance(tf, dict):
+            tgt = tf.get("target") or {}
+            if tf.get("status") == "已记录":
+                act = tf.get("actual") or {}
+                lines.append(f"- 目标核查 {code}：T={_q1_yi6(tgt.get('value'))} vs "
+                             f"实际 {_q1_yi6(act.get('value'))} → {tf.get('verdict')}"
+                             "（新读数不回填旧卡）。")
+            else:
+                lines.append(f"- 目标核查 {code}：{tf.get('status')}——{tf.get('pending_reason')}。")
     lines.append("- 逐公司卡与方向对照见 `q1_cards.md` / `q1_evaluation.md`；"
                  "历史重建下不构成事前预测证明。")
     return lines
@@ -389,7 +591,7 @@ def _q1_layer(spec: dict, all_obs: list, financial: dict, risk: dict, *, study_i
     source_label = ((fdesc.get("metadata") or {}).get("source")
                     or "来源未标注（未指定数据来源）")
 
-    base_readings, eval_readings, comps, cards, followups, skipped = {}, {}, {}, {}, {}, {}
+    base_readings, eval_readings, eval_index, comps, cards, followups, skipped = {}, {}, {}, {}, {}, {}, {}
     cases, windows = [], {}
     for code in sorted(companies):
         cspec = companies[code] or {}
@@ -415,6 +617,9 @@ def _q1_layer(spec: dict, all_obs: list, financial: dict, risk: dict, *, study_i
             er = M.readings(eds.as_dict().get("observations") or [], entity_id=code,
                             entity=entity or _q1_entity_name(eobs))
             eval_readings[code] = er
+            # 目标核查用：同一冻结评估观察的同口径索引（冲突格如实留冲突标记）。
+            eval_index[code] = M.index_observations(
+                eds.as_dict().get("observations") or [], caliber="合并")
             erows = EV.build_cases(er, known_at=known_all.get(code, {}), window=code)
             cases.extend(erows)
             windows[code] = [{"window": c["case_id"], "years": [c["t"], c["next_year"]]}
@@ -438,10 +643,26 @@ def _q1_layer(spec: dict, all_obs: list, financial: dict, risk: dict, *, study_i
         ctx = _q1_context(code, base.get("entity"), cspec, qspec, financial, risk,
                           study_id=study_id, feature_cutoff=feature_cutoff,
                           evaluation_as_of=evaluation_as_of, synthetic=synthetic)
+        # 衔接点A（B3 首例）：input_fact_ids 覆盖组成表的本期与上期事实（所选 Observation）；
+        # spec 没带 sources 时，卡来源继承它们的原件出处（fact_id → 原始行 → 已声明材料），
+        # 无新提取器；spec 显式给了则尊重 spec。
+        comp_items = (comp or {}).get("items") or []
         ctx["input_fact_ids"] = sorted(
-            {i.get("fact_id") for i in (comp or {}).get("items") or [] if i.get("fact_id")})
+            {fid for i in comp_items
+             for fid in (i.get("prev_fact_id"), i.get("fact_id")) if fid})
+        if not cspec.get("sources"):
+            fin_row = financial.get(code) or {}
+            raw_by_fact = {str(r.get("fact_id") or ""): r
+                           for r in all_obs if r.get("entity_id") == code}
+            ctx["sources"] = _q1_inherited_sources(
+                comp_items, raw_by_fact,
+                (fdesc.get("metadata") or {}).get("materials") or [], source_label)
         card = M.short_card(base, composition_row=comp, context=ctx)
         card["readings"]["primary_t"] = target_year
+        # 衔接点B（B3 首例）：基期实质指纹写进 identity；只排除 follow_up/评价截止/研究ID，
+        # 仅推进 evaluation_as_of 不改它——独立续页引用同一指纹即可锁定同一份冻结基期。
+        card["identity"]["base_fingerprint"] = _q1_base_fingerprint(
+            card, comp, feature_cutoff)
         case = by_case.get(f"{code}::t={target_year}")
         chain = next((c for c in (eval_readings.get(code) or {}).get("chains", [])
                       if c["t"] == target_year), {})
@@ -453,6 +674,7 @@ def _q1_layer(spec: dict, all_obs: list, financial: dict, risk: dict, *, study_i
             prior = by_case.get(f"{code}::t={prev_t}") if prev_t else None
             followups[code] = {
                 "entity_id": code, "entity": card.get("entity") or base.get("entity"),
+                "base_fingerprint": card["identity"].get("base_fingerprint"),
                 "t": target_year, "verify_by": fu.get("verify_by"),
                 "status": fu.get("status"), "mechanism_verdict": fu.get("mechanism_verdict"),
                 "case_id": case["case_id"],
@@ -473,11 +695,25 @@ def _q1_layer(spec: dict, all_obs: list, financial: dict, risk: dict, *, study_i
             }
         else:
             followups[code] = {
-                "entity_id": code, "t": target_year, "status": "待数据",
+                "entity_id": code, "entity": card.get("entity") or base.get("entity"),
+                "base_fingerprint": card["identity"].get("base_fingerprint"),
+                "t": target_year, "status": "待数据",
                 "mechanism_verdict": "未决",
                 "pending_reason": "切分时点没有成熟结果可核：不写实际读数",
                 "next_check": [str(n) for n in (cspec.get("next_check") or [])],
             }
+        # §18.10:825 目标期新实际（独立续页）：只进 followups[code]["target_followup"]，
+        # 不回填旧卡——card_hash 仍未动；T 来自本家 joint_grid.target（引用冻结事实）。
+        tcfg = cspec.get("target_followup")
+        if isinstance(tcfg, dict):
+            raw_by = {str(r.get("fact_id") or ""): r
+                      for r in all_obs if r.get("entity_id") == code}
+            followups[code]["target_followup"] = _q1_target_followup(
+                tcfg, eval_index.get(code) or {"cells": {}}, raw_by,
+                target=(fin_row.get("joint_grid") or {}).get("target"),
+                entity=str(followups[code].get("entity") or ""),
+                base_fingerprint=str(followups[code].get("base_fingerprint") or ""),
+                materials=(fdesc.get("metadata") or {}).get("materials") or [])
         card["card_hash"] = _q1_card_hash(card)
         cards[code] = card
 
@@ -607,6 +843,20 @@ def _compute_study(spec: dict, sources: dict, previews: dict, source_records: di
                            "unsupported_units": sorted({r.get("unit") for r in source_obs
                                                        if r.get("fact_id") not in
                                                        {o.get("fact_id") for o in obs}})}
+        # B3 组合网格（可选，spec 显式声明才启用）：同一冻结 ds 上逐格调用既有算子。
+        grid_block = fdesc.get("joint_grid")
+        if isinstance(grid_block, dict):
+            gspec = (grid_block.get("grids") or {}).get(code)
+            if isinstance(gspec, dict):
+                from quant_research import joint_grid
+                financial[code]["joint_grid"] = joint_grid.build_grid(
+                    ds, entity_id=code,
+                    growth_values=gspec.get("growth_values", []),
+                    margin_deltas=gspec.get("margin_deltas", []),
+                    collection_days_delta=grid_block.get("collection_days_delta", 10),
+                    inventory_days_delta=grid_block.get("inventory_days_delta", 10),
+                    budget=gspec.get("budget"),
+                    goal_note=str(gspec.get("goal_note") or ""))
         risk[code] = features.build([r for r in all_obs if r.get("entity_id") == code],
                                     entity_id=code, as_of=feature_cutoff)
 
@@ -712,6 +962,9 @@ def summary_markdown(result: dict) -> str:
                     elif unit == "元" and abs(value) >= 10000:
                         value, unit = value / 10000, "万元"
                     lines.append(f"  - {o.get('label', o['metric'])}：{value:,.2f} {unit}")
+        if row.get("joint_grid"):
+            from quant_research import joint_grid
+            lines.extend(["", joint_grid.markdown(row["joint_grid"])])
     lines.extend(["", "## 事件与情绪候选", ""])
     for e in result["events"].get("events", []):
         sentiment = e.get("sentiment") or {}

@@ -279,7 +279,8 @@ class BaselineTests(unittest.TestCase):
 
 
 class IncrementDirectionTests(unittest.TestCase):
-    """B2 纠偏：_increment 必须**分方向**（优/同/差）、同样本比较、零留出不报优势。"""
+    """B2 纠偏 + B3 收紧（q1_eval/1.2.0）：方向只在**留出的共同有效样本**上判——
+    分方向（优/同/差）、同样本比较；留出共同有效 0 例 ⇒ 不报方向；更差如实记 disadvantage。"""
 
     @staticmethod
     def _case(i, *, decision_at, outcome_at, sign_o, sign_y, baseline_profit_sign):
@@ -317,26 +318,26 @@ class IncrementDirectionTests(unittest.TestCase):
         self.assertIn("共同有效样本 5 例", inc["reason"])
 
     def test_better_on_exploration_but_zero_holdout_no_advantage(self):
-        # 方向为优但全部案例都在切分前（探索期）⇒ 不报优势。
+        # q1_eval/1.2.0：方向只在留出上判——探索期再好、留出共同有效 0 例 ⇒ 不报方向也不报优势。
         cases = [self._case(i, decision_at="2024-06-01", outcome_at="2025-04-01",
                             sign_o="正", sign_y="负" if i == 4 else "正",
                             baseline_profit_sign="负")
                  for i in range(5)]
         inc = self._run(cases)
-        self.assertEqual(inc["direction"], "优")
+        self.assertIsNone(inc["direction"])
         self.assertEqual(inc["verdict"], "no_evidence")
-        self.assertIn("留出为 0", inc["reason"])
+        self.assertIn("留出共同有效 0 例", inc["reason"])
         self.assertFalse(inc["three_way_comparable"])
 
     def test_crossing_does_not_substitute_for_holdout(self):
-        # 跨切分案例再多也不算留出：留出=0 ⇒ 优势方向也不报优势。
+        # 跨切分案例再多也不算留出：留出共同有效=0 ⇒ 方向都不报，更谈不上优势。
         cases = [self._case(i, decision_at="2025-04-01", outcome_at="2026-06-01",
                             sign_o="负", sign_y="负", baseline_profit_sign="正")
                  for i in range(5)]
         inc = self._run(cases)
-        self.assertEqual(inc["direction"], "优")
+        self.assertIsNone(inc["direction"])
         self.assertEqual(inc["verdict"], "no_evidence")
-        self.assertIn("留出为 0", inc["reason"])
+        self.assertIn("留出共同有效 0 例", inc["reason"])
         self.assertEqual(inc["per_bucket"]["crossing"]["rule_scored"], 5)
         self.assertEqual(inc["per_bucket"]["holdout"]["rule_scored"], 0)
         self.assertEqual(inc["per_bucket"]["exploration"]["rule_scored"], 0)
@@ -351,6 +352,22 @@ class IncrementDirectionTests(unittest.TestCase):
         self.assertEqual(inc["verdict"], "directional")
         self.assertIn("优势候选", inc["reason"])
         self.assertEqual(inc["holdout_scored"], 5)
+
+    def test_exploration_wins_holdout_loses_not_directional(self):
+        # 探索 6 赢（样本内）+ 留出 5 输 ⇒ 非方向性：样本内赢不算数，留出输如实记 disadvantage。
+        cases = [self._case(i, decision_at="2024-06-01", outcome_at="2025-04-01",
+                            sign_o="正", sign_y="正", baseline_profit_sign="负")
+                 for i in range(6)]
+        cases += [self._case(100 + i, decision_at="2025-06-01", outcome_at="2026-06-01",
+                             sign_o="正", sign_y="负", baseline_profit_sign="负")
+                  for i in range(5)]
+        inc = self._run(cases)
+        self.assertEqual(inc["direction"], "差")
+        self.assertEqual(inc["verdict"], "disadvantage")
+        self.assertIn("留出", inc["reason"])
+        self.assertEqual(inc["holdout_common"]["n"], 5)
+        self.assertEqual(inc["holdout_common"]["rule_miss"], 5)
+        self.assertEqual(inc["holdout_common"]["profit_miss"], 0)
 
     def test_reason_reports_denominator_and_abstains(self):
         # 零预测是弃权，不进胜负分母；理由里必须写明分母与弃权数。

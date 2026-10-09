@@ -8499,8 +8499,9 @@ def _study_preview_payload(result: dict) -> dict:
                      for r in (row.get("runs") or [])],
             "unit_conversion": list(row.get("unit_conversion") or [])[:8],
             "unsupported_units": list(row.get("unsupported_units") or []),
+            "joint_grid": row.get("joint_grid") or None,
         }
-    return {
+    payload = {
         "study_id": str(result.get("study_id") or ""),
         "result_hash": str(result.get("result_hash") or ""),
         "synthetic": bool(man.get("synthetic")),
@@ -8555,6 +8556,72 @@ def _study_preview_payload(result: dict) -> dict:
                      if isinstance(v, list)},
         "limits": list(result.get("limits") or []),
         "summary_markdown": str(result.get("summary_markdown") or ""),
+        "q1": _study_q1_payload(result),
+    }
+    return payload
+
+
+def _study_q1_payload(result: dict) -> dict:
+    """q1 研究层 → 前端窄载荷（卡主因句/后续页状态/评价方向结论；不搬 100KB 全量卡）。
+
+    数据全部来自既有字段：q1.cards/followups/evaluation + financial[code].joint_grid。
+    「最值得补证的条件」不在这里硬编码公司名：载荷给出逐格 profit_state，翻转维度由前端
+    从本格九点里算（哪条轴上出现 达到/未达到 两侧），业务措辞仍标「待核」。
+    """
+    q1 = result.get("q1") or {}
+    if not isinstance(q1, dict) or not q1:
+        return {}
+    ev = q1.get("evaluation") or {}
+    inc = ev.get("increment") or {} if isinstance(ev, dict) else {}
+    fin = result.get("financial") or {}
+    grids = {}
+    for code, row in fin.items():
+        g = (row or {}).get("joint_grid")
+        if not isinstance(g, dict) or not g.get("cells"):
+            continue
+        grids[code] = g
+    followups = {}
+    for code, f in (q1.get("followups") or {}).items():
+        f = f or {}
+        followups[code] = {
+            "status": str(f.get("status") or ""),
+            "mechanism_verdict": str(f.get("mechanism_verdict") or ""),
+            "verify_by": str(f.get("verify_by") or ""),
+            "next_check": [str(x) for x in (f.get("next_check") or [])],
+            "pending_reason": str(f.get("pending_reason") or ""),
+            "base_fingerprint": str(f.get("base_fingerprint") or ""),
+            "actual": f.get("actual") if isinstance(f.get("actual"), dict) else None,
+            "target_followup": (f.get("target_followup")
+                                 if isinstance(f.get("target_followup"), dict) else None),
+        }
+    cards = {}
+    for code, card in (q1.get("cards") or {}).items():
+        card = card or {}
+        jud = card.get("judgement") or {}
+        ident = card.get("identity") or {}
+        cards[code] = {
+            "entity": str(card.get("entity") or ""),
+            "provenance_kind": str(card.get("provenance_kind") or ""),
+            "base_fingerprint": str(ident.get("base_fingerprint") or ""),
+            "primary_cause": str(jud.get("company_primary_cause") or ""),
+            "expected_direction": str(jud.get("expected_direction") or ""),
+        }
+    return {
+        "method_version": str(q1.get("method_version") or ""),
+        "eval_version": str(q1.get("eval_version") or ""),
+        "provenance_kind": str(q1.get("provenance_kind") or ""),
+        "provenance_note": str(q1.get("provenance_note") or ""),
+        "target_year": str(q1.get("target_year") or ""),
+        "split_at": str(q1.get("split_at") or ""),
+        "feature_cutoff": str(q1.get("feature_cutoff") or ""),
+        "evaluation_as_of": str(q1.get("evaluation_as_of") or ""),
+        "eval_direction": str(inc.get("direction") or ""),
+        "eval_verdict": str(inc.get("verdict") or ""),
+        "eval_reason": str(inc.get("reason") or ""),
+        "holdout_common_n": inc.get("holdout_common"),
+        "cards": cards,
+        "followups": followups,
+        "joint_grids": grids,
     }
 
 

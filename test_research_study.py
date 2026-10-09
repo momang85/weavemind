@@ -171,7 +171,8 @@ class ResearchStudyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "布尔"):
             self.run_case(spec)
 
-    def test_q1_block_freezes_2024_card_and_gates_followup_by_evaluation_as_of(self):
+    def _q1_fixture(self, evaluation_as_of: str) -> dict:
+        """Q1 夹具：两公司费用项 + 900001 一条 2025 年度行（2026-04-28 披露）；幂等，可重复调用。"""
         with (self.inputs / "financials.csv").open(encoding="utf-8", newline="") as f:
             rows = list(csv.DictReader(f))
         extras = {("900001.SH", "2023-12-31"): (50, 40, 30, 10),
@@ -181,10 +182,14 @@ class ResearchStudyTest(unittest.TestCase):
         new_rows = []
         for row in rows:
             row = dict(row)
-            selling, admin, rd, taxes = extras[(row["证券代码"], row["报告期"])]
-            row.update({"销售费用": selling, "管理费用": admin,
-                        "研发费用": rd, "税金及附加": taxes})
-            new_rows.append(row)
+            key = (row["证券代码"], row["报告期"])
+            if key in extras:
+                selling, admin, rd, taxes = extras[key]
+                row.update({"销售费用": selling, "管理费用": admin,
+                            "研发费用": rd, "税金及附加": taxes})
+                new_rows.append(row)
+            elif key != ("900001.SH", "2025-12-31"):
+                new_rows.append(row)
         late = next(dict(r) for r in new_rows
                     if (r["证券代码"], r["报告期"]) == ("900001.SH", "2024-12-31"))
         late.update({"报告期": "2025-12-31", "披露日期": "2026-04-28", "下载日期": "2026-04-28",
@@ -198,11 +203,15 @@ class ResearchStudyTest(unittest.TestCase):
             writer.writeheader()
             writer.writerows(new_rows)
         spec = copy.deepcopy(self.spec)
-        spec["evaluation_as_of"] = "2026-06-30"
+        spec["evaluation_as_of"] = evaluation_as_of
         spec["q1"] = {"target_year": "2024", "split_at": "2025-04-30",
                       "provenance_kind": "历史重建",
                       "companies": {"900001.SH": {"company_primary_cause": "夹具主因甲"},
                                     "900002.SH": {"company_primary_cause": "夹具主因乙"}}}
+        return spec
+
+    def test_q1_block_freezes_2024_card_and_gates_followup_by_evaluation_as_of(self):
+        spec = self._q1_fixture("2026-06-30")
         result = self.run_case(spec)
         q1 = result["q1"]
         self.assertEqual((q1["target_year"], q1["split_at"]), ("2024", "2025-04-30"))
@@ -225,6 +234,33 @@ class ResearchStudyTest(unittest.TestCase):
         out = write_study(result, output_dir=self.root / "output")
         self.assertIn("q1.json", verify_study(out)["checked"])
         self.assertTrue(replay_study(out)["ok"])
+
+    def test_base_fingerprint_binds_base_substance_not_study_or_evaluation(self):
+        # 衔接点B（B3 首例）反例：仅推进 evaluation_as_of ⇒ 基期实质指纹不变、card_hash 变；
+        # 指纹排除 follow_up/评价截止/研究ID（无环形哈希），独立续页引用同一指纹，原版不覆盖。
+        base = self._q1_fixture("2026-06-30")
+        r1 = self.run_case(copy.deepcopy(base))
+        self._q1_fixture("2026-10-09")
+        r2 = self.run_case(copy.deepcopy(self.spec) | {"evaluation_as_of": "2026-10-09",
+                                                       "q1": base["q1"]})
+        fp1 = r1["q1"]["cards"]["900001.SH"]["identity"]["base_fingerprint"]
+        fp2 = r2["q1"]["cards"]["900001.SH"]["identity"]["base_fingerprint"]
+        self.assertTrue(fp1)
+        self.assertEqual(fp1, fp2)
+        self.assertNotEqual(r1["q1"]["cards"]["900001.SH"]["card_hash"],
+                            r2["q1"]["cards"]["900001.SH"]["card_hash"])
+        self.assertNotEqual(fp1, r1["q1"]["cards"]["900001.SH"]["card_hash"])
+        # 指纹绑定基期实质：feature_cutoff 收紧到 2024 年报披露前 ⇒ 基期读数变化 ⇒ 指纹变。
+        cut = self._q1_fixture("2026-06-30")
+        cut["feature_cutoff"] = "2025-04-24"
+        r3 = self.run_case(cut)
+        self.assertNotEqual(r3["q1"]["cards"]["900001.SH"]["identity"]["base_fingerprint"], fp1)
+        # 独立续页与 followups 均引用该指纹。
+        out1 = write_study(r1, output_dir=self.root / "out1")
+        fu_md = (out1 / "q1_followup_900001.SH.md").read_text(encoding="utf-8")
+        self.assertIn(fp1, fu_md)
+        self.assertIn("基期实质指纹", fu_md)
+        self.assertEqual(r2["q1"]["followups"]["900001.SH"]["base_fingerprint"], fp1)
 
     def test_q1_block_requires_explicit_year_and_companies(self):
         spec = copy.deepcopy(self.spec)

@@ -52,6 +52,19 @@ interface StudyPayload {
   quant?: Record<string, { status?: string; reason?: string }>
   risk?: Record<string, { status?: string; features?: number; gaps?: number; anomaly_clues?: string[] }>
   label_readiness?: Record<string, { status?: string }>
+  /** Q1 研究层窄载荷（web_ui._study_q1_payload）：卡主因句/后续页/目标核查/3×3 网格；
+   *  数值句来自 ModelRun 读数装配，前端只渲染，不重算、不硬编码公司名。 */
+  q1?: {
+    method_version?: string; eval_version?: string
+    provenance_kind?: string; provenance_note?: string
+    target_year?: string; split_at?: string
+    feature_cutoff?: string; evaluation_as_of?: string
+    eval_direction?: string; eval_verdict?: string; eval_reason?: string
+    holdout_common_n?: number
+    cards?: Record<string, any>
+    followups?: Record<string, any>
+    joint_grids?: Record<string, any>
+  }
   previews?: Record<string, any>
   spec?: any
   limits?: string[]
@@ -78,6 +91,41 @@ function Fold({ title, hint, children, defaultOpen = false }: {
   )
 }
 
+/** 显示格式（亿）：只在渲染时取整，冻结值保持原始精度。与 quant_research.joint_grid._yi 同一语义；
+ *  目标核查（T/实际/gap）按规划锚点用 6 位小数，网格 P/P−T/C 用 4 位小数。 */
+const yi4 = (v: any): string => {
+  const n = Number(v)
+  if (v === null || v === undefined || v === '' || !isFinite(n)) return '—'
+  return (n / 1e8).toLocaleString('zh-CN', { minimumFractionDigits: 4, maximumFractionDigits: 4 })
+}
+const yi6 = (v: any): string => {
+  const n = Number(v)
+  if (v === null || v === undefined || v === '' || !isFinite(n)) return '—'
+  return (n / 1e8).toLocaleString('zh-CN', { minimumFractionDigits: 6, maximumFractionDigits: 6 })
+}
+/** 周期标签：源值可能已带「年」（如 2023年），去掉尾字避免「2023年 年」；与 study._q1_period_label 同一纪律。 */
+const periodLabel = (v: any): string => {
+  const s = String(v ?? '')
+  return s.endsWith('年') ? s.slice(0, -1) : s
+}
+/** g 显示为 %（收入增速），m 显示为 pp（毛利率变化）——与 joint_grid.markdown 同一记法。 */
+const gLabel = (v: number): string => `${v * 100 >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`
+const mLabel = (v: number): string => `${v * 100 >= 0 ? '+' : ''}${(v * 100).toFixed(2)}pp`
+
+/** 翻转轴证据问题（§18.10）：从本格九点里算哪条轴出现「达到/未达到」两侧——
+ *  提示最值得补证的条件；数值全部来自本格敏感性，不外推，业务措辞仍待核。 */
+function axisFlips(grid: any): { gAxis: boolean; mAxis: boolean } {
+  const cells: any[] = (grid?.cells ?? []).filter((c: any) =>
+    c?.profit_state === '达到研究者目标' || c?.profit_state === '未达到研究者目标')
+  let gAxis = false; let mAxis = false
+  for (const a of cells) for (const b of cells) {
+    if (a === b) continue
+    if (a.m === b.m && a.g !== b.g && a.profit_state !== b.profit_state) gAxis = true
+    if (a.g === b.g && a.m !== b.m && a.profit_state !== b.profit_state) mAxis = true
+  }
+  return { gAxis, mAxis }
+}
+
 export default function ResearchStudy() {
   const [sample, setSample] = useState<any>(null)
   const [studies, setStudies] = useState<any[]>([])
@@ -93,6 +141,9 @@ export default function ResearchStudy() {
   const [check, setCheck] = useState<any>(null)
   const [card, setCard] = useState<any>(null)
   const [confirmed, setConfirmed] = useState<string[]>([])
+  /** ⑥ 改参编辑态：预填自 preview.spec.financial[code].joint_grid；留空预算=未设（不自动给可行绿灯）。 */
+  const [gridEdits, setGridEdits] = useState<Record<string,
+    { g: string; m: string; cdays: string; idays: string; budget: string }>>({})
 
   const loadSample = async () => {
     try {
@@ -237,6 +288,66 @@ export default function ResearchStudy() {
   const subjects = preview?.subjects ?? []
   const allConfirmed = subjects.length > 0 && confirmed.length === subjects.length
   const shown = run ?? preview
+
+  /** ⑥ 改参：只覆盖 financial[code].joint_grid（克隆最新 spec），其余冻结不动——
+   *  新参数 → 新 study_id（内容寻址），旧目录不覆盖。 */
+  const gridOf = (code: string): any | null => {
+    const specFin = ((shown ?? preview)?.spec?.financial ??
+      preview?.spec?.financial) as Record<string, any> | undefined
+    const g = specFin?.[code]?.joint_grid
+    if (g && typeof g === 'object' && !Array.isArray(g)) return g
+    const qg = (shown?.q1?.joint_grids ?? {})[code]
+    return (qg && typeof qg === 'object' && !Array.isArray(qg)) ? qg : null
+  }
+  /** 纯读：编辑态优先，否则从网格预填（不在渲染期写 state）。 */
+  const editOf = (code: string) => {
+    if (gridEdits[code]) return gridEdits[code]
+    const g = gridOf(code)
+    if (!g) return null
+    return {
+      g: (g.growth_values ?? []).map((v: number) => `${v * 100}`).join(', '),
+      m: (g.margin_deltas ?? []).map((v: number) => `${v * 100}`).join(', '),
+      cdays: String(g.collection_days_delta ?? 10), idays: String(g.inventory_days_delta ?? 10),
+      budget: g.budget?.value != null ? String(g.budget.value) : '',
+    }
+  }
+  const setEdit = (code: string, patch: Partial<{ g: string; m: string; cdays: string; idays: string; budget: string }>) => {
+    setGridEdits(prev => ({ ...prev, [code]: { ...(editOf(code) ?? { g: '', m: '', cdays: '10', idays: '10', budget: '' }), ...patch } }))
+  }
+  const pctList = (raw: string): number[] | null => {
+    const vs = raw.split(/[,，\s]+/).filter(Boolean).map(s => Number(s) / 100)
+    return (vs.length > 0 && vs.every(v => isFinite(v))) ? vs : null
+  }
+  /** 同一组 spec 带 new joint_grid 重新 run：服务端内容寻址生成新 study_id，旧目录不覆盖。 */
+  const doRerunGrid = async (code: string) => {
+    const g = gridOf(code); const e = editOf(code)
+    if (!g || !e) return
+    const growth = pctList(e.g)
+    const margin = pctList(e.m)
+    if (!growth || !margin) { setErr('g / m 请填逗号分隔的百分数，例如 0, 10, 20（三一：-10, -5, 0）'); return }
+    const cdays = Number(e.cdays); const idays = Number(e.idays)
+    if (!isFinite(cdays) || !isFinite(idays)) { setErr('天数须为数字（回款/库存，-30..30）；0 表示该维度冲击关闭'); return }
+    const budget = e.budget.trim() === '' ? null : Number(e.budget)
+    if (budget !== null && (!isFinite(budget) || budget < 0)) { setErr('预算 B 须为非负数（元）；留空=未设'); return }
+    setBusy('rerun'); setErr('')
+    try {
+      const spec = JSON.parse(JSON.stringify((shown ?? preview)?.spec ?? preview?.spec ?? {}))
+      if (!spec.financial?.[code]) throw new Error('spec 里没有该公司的 financial 节')
+      spec.financial[code].joint_grid = {
+        ...g, growth_values: growth, margin_deltas: margin,
+        collection_days_delta: cdays, inventory_days_delta: idays,
+        budget,
+      }
+      const body: any = { spec, input_id: inputId, confirmed: true, confirmed_subjects: confirmed }
+      if (typeof spec !== 'string') { body.feature_cutoff = cutoff; body.evaluation_as_of = asOf }
+      const { ok, d } = await post('/api/research-study/run', body)
+      if (!ok) {
+        throw new Error(`${d.error || '运行失败'}`
+          + (d.subjects_in_files ? `（文件里读到：${(d.subjects_in_files || []).join('、')}）` : ''))
+      }
+      setRun(d); loadStudies()
+    } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy('') }
+  }
   const summary = useMemo(() => String(shown?.summary_markdown ?? ''), [shown])
 
   return (
@@ -537,7 +648,241 @@ export default function ResearchStudy() {
       </Card>
 
       <Card>
-        <SectionTitle title="④ 已保存的内部研究产物" extra={`${studies.length} 个`} />
+        <SectionTitle icon={<FileText className="w-4 h-4 text-cyan-400" />}
+          title="④ Q1 读数：3×3「利润目标＋天数冲击占用」网格 / 目标核查 / 补证提示"
+          extra="数值句从 ModelRun 读数装配；改一格只重算本格" />
+        {!shown?.q1 || Object.keys(shown.q1.joint_grids ?? {}).length === 0 ? (
+          <EmptyState title="这份产物没有 Q1 网格"
+            description="只有带 q1.joint_grid 块的研究才有 3×3 读数；旧产物保持原样，不回填。" />
+        ) : (
+          <div className="space-y-3">
+            <div className="text-xs text-slate-500">
+              方法 <span className="font-mono">{shown.q1.method_version || '—'}</span>
+              ；评价 <span className="font-mono">{shown.q1.eval_version || '—'}</span>
+              ；特征截止 {shown.q1.feature_cutoff || '—'}；评价截止 {shown.q1.evaluation_as_of || '—'}
+              ；切分 {shown.q1.split_at || '—'}；性质 **{shown.q1.provenance_kind || '—'}**
+              {shown.q1.provenance_note ? `（${shown.q1.provenance_note}）` : ''}
+            </div>
+            {Object.entries(shown.q1.joint_grids ?? {}).map(([code, g]: [string, any]) => {
+              const flips = axisFlips(g)
+              const t = g.target ?? {}
+              return (
+                <Fold key={code} defaultOpen title={`${code}　网格`}
+                  hint={`基期 t=${g.base_period ?? '—'}；${(g.growth_values ?? []).length}×${(g.margin_deltas ?? []).length} 格`}>
+                  <div className="space-y-2">
+                    <div className="text-slate-300">
+                      研究者目标 T：{periodLabel(t.period)} 年 {t.metric} = <span className="tabular-nums">{yi6(t.value)}</span> 亿
+                      （{t.source || '冻结读数'}）——{t.goal_note || '研究者设定'}；
+                      <span className="text-amber-300">{t.nature || '不是管理层指引，也不构成业绩承诺'}</span>。
+                      传入方式：{t.passed_as || '—'}。
+                    </div>
+                    <div className="text-slate-400">
+                      天数冲击：回款 {g.collection_days_delta} 日、库存 {g.inventory_days_delta} 日（使用者假设，可切换 0）
+                      ；毛利线以下净额按基期结构冻结（below_gross_mode={g.below_gross_mode}）。
+                      {g.budget?.value != null
+                        ? <> 预算 B：<span className="tabular-nums">{yi4(g.budget.value)}</span> 亿——{g.budget.label}</>
+                        : ' 预算 B：未设——联合状态记「未设预算」，利润状态照算、不自动给可行绿灯。'}
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead className="text-slate-500">
+                          <tr><th className="text-left">g＼m</th>
+                            {(g.margin_deltas ?? []).map((m: number) => <th key={m} className="text-left">m={mLabel(m)}</th>)}
+                          </tr></thead>
+                        <tbody>
+                          {(g.growth_values ?? []).map((rv: number) => (
+                            <tr key={rv} className="border-t border-slate-800">
+                              <td className="py-1 pr-2 text-slate-400">g={gLabel(rv)}</td>
+                              {(g.margin_deltas ?? []).map((m: number) => {
+                                const c = (g.cells ?? []).find((x: any) => x.g === rv && x.m === m)
+                                if (!c || c.status === 'unavailable') {
+                                  return <td key={m} className="py-1 pr-3 text-slate-600">
+                                    不可算{c?.reason ? `（${String(c.reason).slice(0, 40)}）` : ''}</td>
+                                }
+                                const hit = c.profit_state === '达到研究者目标'
+                                return (
+                                  <td key={m} className={`py-1 pr-3 align-top ${hit ? 'text-emerald-300' : 'text-slate-300'}`}>
+                                    <div className="tabular-nums">P {yi4(c.P)}；P−T {yi4(c.P_minus_T)}；C {yi4(c.C)}</div>
+                                    <div className="text-[11px]">
+                                      {c.profit_state}
+                                      {c.budget_headroom != null
+                                        ? `；B−C ${yi4(c.budget_headroom)}；${c.joint_state}`
+                                        : (c.joint_state ? `；${c.joint_state}` : '')}
+                                    </div>
+                                    {c.status === 'partial' && c.reason
+                                      && <div className="text-[11px] text-amber-400">{String(c.reason).slice(0, 60)}</div>}
+                                  </td>
+                                )
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="text-xs text-slate-400">
+                      单位：亿（P−T、B−C 同单位）；显示才四舍五入，冻结值保持原始精度；
+                      C 只含天数冲击的增量占款，不与利润相加。
+                    </div>
+                    <div className="text-xs text-slate-300">
+                      最值得补证的条件（由本格九点算出的证据问题，不是概率、不是信息价值声明）：
+                      {flips.gAxis && flips.mAxis
+                        ? ' 两条轴上同时出现「达到/未达到」两侧——收入恢复与毛利改善都需要证据；'
+                        : flips.gAxis
+                          ? ' 仅沿收入增速 g 轴翻转：补证聚焦**收入恢复的销量/实现价格**；'
+                          : flips.mAxis
+                            ? ' 仅沿毛利率 m 轴翻转：补证聚焦**毛利改善的产品/出口结构**；'
+                            : ' 九格内未出现状态翻转：本轮敏感性不构成补证提示。'}
+                      <span className="text-slate-500">业务解释仍标待核。</span>
+                    </div>
+                    {(g.notes ?? []).map((n: string, i: number) => (
+                      <div key={i} className="text-[11px] text-slate-500">- {n}</div>
+                    ))}
+                  </div>
+                </Fold>
+              )
+            })}
+
+            {Object.entries(shown.q1.followups ?? {}).map(([code, f]: [string, any]) => {
+              const tf = f.target_followup
+              const act = f.actual ?? {}
+              return (
+                <Fold key={code} title={`${code}　后续页与目标核查`}
+                  hint={`${f.status || '—'}${f.mechanism_verdict ? ` / ${f.mechanism_verdict}` : ''}`}>
+                  <div className="space-y-2">
+                    <div>方向核查：**{f.status}**（{f.mechanism_verdict || '—'}）
+                      {f.verify_by ? `；下一核查时点 ${f.verify_by}` : ''}。</div>
+                    {f.status === '待数据' ? (
+                      <div className="text-amber-400">{f.pending_reason || '下一同口径年度尚未取得：不写实际读数。'}</div>
+                    ) : (
+                      <div className="tabular-nums">同口径实际：
+                        {act.period ?? ''} {act.metric ?? ''} = {yi4(act.value)} 亿
+                        {act.disclosed_at ? `（披露 ${act.disclosed_at}）` : ''}。</div>
+                    )}
+                    {(f.next_check ?? []).length > 0 && (
+                      <ul className="list-disc pl-5 text-slate-400">
+                        {f.next_check.map((x: string, i: number) => <li key={i}>{x}</li>)}
+                      </ul>
+                    )}
+                    {f.base_fingerprint && (
+                      <div className="text-[11px] text-slate-500">基期实质指纹
+                        <span className="font-mono"> {f.base_fingerprint}</span>
+                        ：只绑定主体/年度/特征截止/基期来源/参数方法/读数判定，排除后续与全研究ID。</div>
+                    )}
+
+                    {tf && (
+                      <div className="border-t border-slate-800 pt-2">
+                        <div className="text-slate-300">目标核查（{periodLabel(tf.period)} 年 {tf.metric_label}）：**{tf.status}**</div>
+                        <div className="text-[11px] text-slate-500">{tf.nature}；口径 {tf.caliber}。</div>
+                        {tf.status === '待数据' ? (
+                          <div className="text-amber-400">{tf.pending_reason || '评价截止前没有同口径读数：保持待数据，不写实际读数'}</div>
+                        ) : (
+                          <div className="space-y-1">
+                            <div className="tabular-nums">目标 T（{periodLabel((tf.target ?? {}).period)} 年）：
+                              {yi6((tf.target ?? {}).value)} 亿 —— {(tf.target ?? {}).goal_note || ''}</div>
+                            <div className="tabular-nums">目标期实际（{periodLabel(act.period ?? tf.period)} 年）：
+                              {yi6((tf.actual ?? {}).value)} 亿；差额 P−T 口径的 gap =
+                              <span className="tabular-nums"> {yi6(tf.gap)}</span> 亿</div>
+                            <div className="text-slate-300">结论：**{tf.verdict}**。</div>
+                            <div className="text-[11px] text-slate-500">
+                              来源 {String((tf.actual ?? {}).source || '')}
+                              {(tf.actual ?? {}).fact_id ? <>；事实 <span className="font-mono">{String((tf.actual ?? {}).fact_id)}</span></> : null}
+                              {(tf.actual ?? {}).source_url
+                                ? <>；原件 {(tf.actual ?? {}).source_url}</> : null}
+                              {((tf.actual ?? {}).material_ids ?? []).length > 0
+                                ? <>；材料ID {(tf.actual ?? {}).material_ids.join('、')}</> : null}
+                              {(tf.actual ?? {}).disclosed_at ? `；披露 ${String((tf.actual ?? {}).disclosed_at)}` : ''}
+                              {tf.verified_at ? `；核查 ${String(tf.verified_at)}` : ''}
+                            </div>
+                          </div>
+                        )}
+                        <div className="text-[11px] text-slate-500">{tf.note}</div>
+                        {tf.base_fingerprint && (
+                          <div className="text-[11px] text-slate-500">对照基期指纹
+                            <span className="font-mono"> {tf.base_fingerprint}</span></div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </Fold>
+              )
+            })}
+
+            {Object.entries(shown.q1.cards ?? {}).map(([code, c]: [string, any]) => (
+              <div key={code} className="text-xs text-slate-400">
+                {code}（{c.entity || '—'}）主因句：{c.primary_cause || '—'}
+                ；预期方向 {c.expected_direction || '—'}；性质 {c.provenance_kind || '—'}。
+              </div>
+            ))}
+            <div className="text-[11px] text-slate-500">
+              增量评价：{shown.q1.eval_verdict || '—'}
+              {shown.q1.eval_direction ? `（方向 ${shown.q1.eval_direction}）` : ''}
+              ；共同有效样本 n={String(shown.q1.holdout_common_n ?? '—')}。
+              {shown.q1.eval_reason ? ` 原因：${shown.q1.eval_reason}` : ''}
+              —— 这是机器验收层的读数，不是人工评审结论。
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <SectionTitle icon={<RotateCcw className="w-4 h-4 text-cyan-400" />}
+          title="⑤ 同一入口改参：只改这家的网格假设，产出新版并重放"
+          extra="新版=新研究ID；旧目录与旧卡不回填" />
+        <div className="text-xs text-slate-500 mb-2">
+          改一格只重算那一格：克隆当前 spec 的 financial[code].joint_grid 后覆盖 g/m/天数/预算，
+          再走同一条 run 通道；输入目录与特征截止不动，所以基期实质指纹（base_fingerprint）应与旧版相同。
+          百分比填数：0, 10, 20 表示 0%/+10%/+20%；三一填 -10, -5, 0。预算留空 = 未设。
+        </div>
+        {Object.entries(shown?.q1?.joint_grids ?? {}).map(([code]: [string, any]) => {
+          const e = editOf(code)
+          if (!e) return null
+          return (
+            <div key={code} className="border border-slate-800 rounded-xl p-3 mb-2">
+              <div className="text-sm text-slate-200 mb-2">{code}</div>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                <label className="space-y-1">收入增速 g（%）
+                  <input value={e.g} aria-label={`${code} g`}
+                    onChange={ev => setEdit(code, { g: ev.target.value })}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" /></label>
+                <label className="space-y-1">毛利率变化 m（pp）
+                  <input value={e.m} aria-label={`${code} m`}
+                    onChange={ev => setEdit(code, { m: ev.target.value })}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" /></label>
+                <label className="space-y-1">回款天数冲击（日）
+                  <input value={e.cdays} aria-label={`${code} 回款天数`}
+                    onChange={ev => setEdit(code, { cdays: ev.target.value })}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" /></label>
+                <label className="space-y-1">库存天数冲击（日）
+                  <input value={e.idays} aria-label={`${code} 库存天数`}
+                    onChange={ev => setEdit(code, { idays: ev.target.value })}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" /></label>
+                <label className="space-y-1">预算 B（元，留空=未设）
+                  <input value={e.budget} aria-label={`${code} 预算`}
+                    onChange={ev => setEdit(code, { budget: ev.target.value })}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" /></label>
+              </div>
+              <button onClick={() => doRerunGrid(code)} disabled={busy !== '' || !allConfirmed}
+                title={allConfirmed ? '' : '先预览并逐个确认文件里的公司'}
+                className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 text-xs disabled:opacity-40">
+                <Play className="w-3.5 h-3.5" /> {busy === 'rerun' ? '重算中…' : `以新参数重跑并保存新版（${code}）`}
+              </button>
+              {!allConfirmed && <span className="ml-2 text-xs text-slate-500">需先「文件预览」并确认全部主体</span>}
+            </div>
+          )
+        })}
+        {run?.study_id && (
+          <div className="text-xs text-slate-400 mt-1">
+            新版研究ID <span className="font-mono">{String(run.study_id).slice(0, 16)}…</span>
+            ：下载走 ⑥ 的产物清单（<span className="font-mono">q1.json</span> /
+            <span className="font-mono"> q1_followup_*.md</span> /
+            <span className="font-mono"> financial.json</span>），再点 verify / replay 复算核对。
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <SectionTitle title="⑥ 已保存的内部研究产物" extra={`${studies.length} 个`} />
+
         {studies.length === 0 ? (
           <EmptyState title="还没有产物"
             description="运行一次研究后，内部产物会保存在 tmp/research-studies/<研究ID前16位>/；旧目录不会被覆盖。" />

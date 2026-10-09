@@ -25,7 +25,11 @@ import json
 SCHEMA = "weavemind.q1_evaluation/1"
 # q1_eval/1.1.0：_increment 改为方向感知（优/同/差 + 相同样本 + 池分类），
 # 零 holdout 时不给优越性断言（只保留 no_evidence）。B2 批次起生效。
-EVAL_VERSION = "q1_eval/1.1.0"
+# q1_eval/1.2.0：_increment 优势判定再收紧——**只在留出（holdout）的共同有效样本上**
+# 分方向；留出为 0 ⇒ 直接 no_evidence（探索/跨切分样本内表现不能当验证），
+# 留出共同有效 0 例 ⇒ 同样 no_evidence；更差仍如实记 disadvantage，相同记无增量。
+# B3 批次起生效。
+EVAL_VERSION = "q1_eval/1.2.0"
 VERDICTS = ("支持", "削弱", "未决")
 BASELINES = ("profit_continuation", "exploration_majority")
 BASELINE_LABELS = {"profit_continuation": "归母净利润变化方向延续",
@@ -206,7 +210,7 @@ def evaluate(cases: list[dict], *, pool: list[str], split_at: str,
     increment = _increment(common_rule, common_profit, len(scored_all), overlap,
                            per_bucket=per_bucket, majority_common=majority_common,
                            three_way_comparable=bool(common) and len(common3) == len(common),
-                           rule_all=rule, profit_all=profit)
+                           rule_all=rule, profit_all=profit, common_cases=common)
 
     return {
         "schema": SCHEMA, "eval_version": EVAL_VERSION,
@@ -256,14 +260,15 @@ def _overlap_note(entity_windows: dict) -> dict:
 def _increment(common_rule: dict, common_profit: dict, total: int, overlap: dict,
                *, per_bucket: dict | None = None, majority_common: dict | None = None,
                three_way_comparable: bool = False, rule_all: dict | None = None,
-               profit_all: dict | None = None) -> dict:
-    """增量结论（B2 纠偏）：**先分方向，再问能不能宣称优势**。
+               profit_all: dict | None = None, common_cases: list | None = None) -> dict:
+    """增量结论（B3 再收紧，q1_eval/1.2.0）：**方向只在留出的共同有效样本上判**。
 
-    - 方向只在"规则与基线都能评的同一批案例"（共同有效样本）上按误判次数分 **优／同／差**，
-      分母与两边的弃权数一起写进理由；绝不再把"规则错 5/5、基线错 0/5"说成更优。
-    - 探索／跨切分／留出**分列**（`per_bucket`）：探索=样本内描述，不能当验证；跨切分两边都不算；
-      **只有留出**能支持优势主张——留出为 0 时无论方向如何都**不报优势**。
-    - 方向为差时明确记 `disadvantage`（"当前样本上规则更差"），不把不利证据洗成"无证据"。
+    - 共同有效 = 规则与基线**都能评**、且实际符号非零的同一批案例（`common`）；
+      其中**落在留出（holdout）桶**的才算验证样本——探索是样本内描述、跨切分两边都不算，
+      都不能当验证（q1_eval/1.2.0：留出共同有效 0 例 ⇒ 直接 no_evidence，不报方向）。
+    - 分方向按误判次数：留出上规则更差 ⇒ 如实记 `disadvantage`；相同 ⇒ **没有增量**；
+      严格更优也只在与全队列共同有效样本 ≥5 且无窗口重叠时才是优势候选。
+    - 全队列共同有效样本的误判数保留为**描述性**字段（`rule_miss`/`profit_miss`），不进方向判定。
     - 三向（规则／归母基线／探索期多数方向）只有在**同一交集**上才作同样本比较，否则分列并注记。
     """
     per_bucket = per_bucket or {}
@@ -273,6 +278,12 @@ def _increment(common_rule: dict, common_profit: dict, total: int, overlap: dict
     # 弃权只在"全体可评案例"上有意义：共同覆盖按构造不含弃权。
     rule_abstain_all = int((rule_all or common_rule).get("abstain") or 0)
     profit_abstain_all = int((profit_all or common_profit).get("abstain") or 0)
+    # 衔接点C（B3 首例）：留出 ∩ 共同有效 = 验证样本；由调用方传入共同有效案例明细。
+    holdout_ids = set(holdout.get("case_ids") or [])
+    holdout_valid = [c for c in (common_cases or []) if c.get("case_id") in holdout_ids]
+    holdout_rule_c = _tally(holdout_valid, lambda c: c["sign_o"])
+    holdout_profit_c = _tally(holdout_valid, lambda c: c["baseline_profit_sign"])
+    holdout_n = len(holdout_valid)
     base = {
         "rule_error_rate": common_rule.get("error_rate"),
         "profit_error_rate": common_profit.get("error_rate"),
@@ -282,6 +293,11 @@ def _increment(common_rule: dict, common_profit: dict, total: int, overlap: dict
         "rule_abstain": rule_abstain_all,
         "profit_abstain": profit_abstain_all,
         "common_effective_cases": common_n, "holdout_scored": holdout_scored,
+        "holdout_common": {"n": holdout_n,
+                           "rule_miss": int(holdout_rule_c.get("miss") or 0),
+                           "rule_scored": int(holdout_rule_c.get("scored") or 0),
+                           "profit_miss": int(holdout_profit_c.get("miss") or 0),
+                           "profit_scored": int(holdout_profit_c.get("scored") or 0)},
         "per_bucket": per_bucket,
         "three_way_comparable": bool(three_way_comparable),
         "majority_common": majority_common,
@@ -294,39 +310,40 @@ def _increment(common_rule: dict, common_profit: dict, total: int, overlap: dict
                     reason="没有规则与归母基线**都能评**的共同覆盖案例（规则弃权 {} 例／基线弃权 {} 例）"
                            "⇒ 不存在同样本比较，不报方向、不报优劣".format(
                                base["rule_abstain"], base["profit_abstain"]))
-    denominator = ("共同有效样本 {} 例（规则另弃权 {} 例、归母基线另弃权 {} 例）："
-                   "规则误判 {}/{}，归母基线误判 {}/{}".format(
-                       common_n, base["rule_abstain"], base["profit_abstain"],
-                       base["rule_miss"], common_n, base["profit_miss"], base["profit_scored"]))
-    if base["rule_miss"] < base["profit_miss"]:
-        direction = "优"
-    elif base["rule_miss"] > base["profit_miss"]:
-        direction = "差"
-    else:
-        direction = "同"
-    if direction == "差":
-        return dict(base, direction=direction, verdict="disadvantage",
-                    reason=denominator + " ⇒ 在同一批案例上**规则比基线更差**；"
-                                         "如实记为不利证据（样本仍小，不据此宣称规则无效）")
-    if direction == "同":
-        return dict(base, direction=direction, verdict="no_evidence",
-                    reason=denominator + " ⇒ 同样本上误判次数相同，**没有增量**；"
-                                         "保留为经营解释能力，不叫优势")
-    if holdout_scored == 0:
-        return dict(base, direction=direction, verdict="no_evidence",
-                    reason=denominator + " ⇒ 方向虽优，但**留出为 0**（可评案例全在切分之前或跨切分）："
-                                         "样本内表现不能当预测优势，本批不报优势")
+    if holdout_n == 0:
+        return dict(base, direction=None, verdict="no_evidence",
+                    reason="共同有效样本 {} 例，但**留出共同有效 0 例**：方向只在留出上判"
+                           "（q1_eval/1.2.0），探索/跨切分的样本内表现不能当验证 ⇒ "
+                           "不报方向、不报优劣".format(common_n))
+    holdout_denominator = ("留出共同有效样本 {} 例：规则误判 {}/{}，归母基线误判 {}/{}"
+                           "（全队列共同有效 {} 例：规则 {}/{}、基线 {}/{}，仅描述；"
+                           "规则另弃权 {} 例／基线另弃权 {} 例）".format(
+                               holdout_n, base["holdout_common"]["rule_miss"], holdout_n,
+                               base["holdout_common"]["profit_miss"],
+                               base["holdout_common"]["profit_scored"],
+                               common_n, base["rule_miss"], common_n,
+                               base["profit_miss"], base["profit_scored"],
+                               base["rule_abstain"], base["profit_abstain"]))
+    if base["holdout_common"]["rule_miss"] > base["holdout_common"]["profit_miss"]:
+        return dict(base, direction="差", verdict="disadvantage",
+                    reason=holdout_denominator + " ⇒ 留出上**规则比基线更差**；"
+                           "如实记为不利证据（样本仍小，不据此宣称规则无效）")
+    if base["holdout_common"]["rule_miss"] == base["holdout_common"]["profit_miss"]:
+        return dict(base, direction="同", verdict="no_evidence",
+                    reason=holdout_denominator + " ⇒ 留出同样本上误判次数相同，**没有增量**；"
+                           "保留为经营解释能力，不叫优势")
+    direction = "优"
     if common_n < 5:
         return dict(base, direction=direction, verdict="no_evidence",
-                    reason=denominator + "，留出可评 {} 例 ⇒ 有效样本不足 5 例，"
-                                         "**不报优势**（小样本只作记录）".format(holdout_scored))
+                    reason=holdout_denominator + " ⇒ 留出方向虽优，但有效样本不足 5 例，"
+                                         "**不报优势**（小样本只作记录）")
     if overlap.get("any"):
         return dict(base, direction=direction, verdict="no_evidence",
-                    reason=denominator + "，留出可评 {} 例 ⇒ 窗口来自同一家公司、年份重叠，"
-                                         "**不是独立样本**，不报优势".format(holdout_scored))
+                    reason=holdout_denominator + " ⇒ 留出方向虽优，但窗口来自同一家公司、年份重叠，"
+                                         "**不是独立样本**，不报优势")
     return dict(base, direction=direction, verdict="directional",
-                reason=denominator + "，且留出 {} 例上规则误判少于基线 ⇒ 列为**优势候选**"
-                                     "（仍需真实队列与人工复核，本批不作最终结论）".format(holdout_scored))
+                reason=holdout_denominator + "，且留出上规则误判少于基线 ⇒ 列为**优势候选**"
+                                     "（仍需真实队列与人工复核，本批不作最终结论）")
 
 
 def _negative_table(cases: list[dict]) -> dict:
@@ -422,12 +439,16 @@ def markdown(evaluation: dict, *, title: str = "Q1-v1 方向规则对照（真�
             f"- {label}：{len(b['case_ids'])} 例（{'、'.join(b['case_ids'])}）；"
             f"规则误判 {b['rule_miss']}/{b['rule_scored']}（弃权 {b['rule_abstain']}）；"
             f"归母基线误判 {b['profit_miss']}/{b['profit_scored']}（弃权 {b['profit_abstain']}）")
+    hc = inc.get("holdout_common") or {}
     lines += ["", "## 增量结论（如实）", "",
-              f"- 方向（共同有效样本 {inc.get('common_effective_cases', 0)} 例，"
-              f"规则弃权 {inc.get('rule_abstain', 0)}／基线弃权 {inc.get('profit_abstain', 0)}）："
-              f"**{inc.get('direction') or '不可比'}**——规则误判 "
-              f"{inc.get('rule_miss', 0)}/{inc.get('rule_scored', 0)}，"
-              f"归母基线误判 {inc.get('profit_miss', 0)}/{inc.get('profit_scored', 0)}",
+              f"- 方向（**只在留出共同有效样本 {hc.get('n', 0)} 例上判**：规则误判 "
+              f"{hc.get('rule_miss', 0)}/{hc.get('rule_scored', 0)}，"
+              f"归母基线误判 {hc.get('profit_miss', 0)}/{hc.get('profit_scored', 0)}）："
+              f"**{inc.get('direction') or '不可比'}**",
+              f"- 全队列共同有效 {inc.get('common_effective_cases', 0)} 例（描述性，不进方向判定）："
+              f"规则误判 {inc.get('rule_miss', 0)}/{inc.get('rule_scored', 0)}，"
+              f"归母基线误判 {inc.get('profit_miss', 0)}/{inc.get('profit_scored', 0)}"
+              f"（规则另弃权 {inc.get('rule_abstain', 0)}／基线另弃权 {inc.get('profit_abstain', 0)}）",
               f"- 判定：**{inc['verdict']}**——{inc['reason']}",
               f"- 留出可评 {inc.get('holdout_scored', 0)} 例"
               + ("（**零留出** ⇒ 本批不报任何预测优势）" if not inc.get("holdout_scored") else ""),
