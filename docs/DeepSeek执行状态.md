@@ -1,6 +1,6 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-10-12 · **C5 批：经营判断 × 市场反应（内部研究通路）**，基线 `c85371e`）
+> ## 当前账（2026-10-12 · **C5 批：经营判断 × 市场反应（内部研究通路）**，基线 `c85371e`；2026-10-13 已推送 PR #1）
 >
 > **架构师裁决（约束性）**：C4「公开求值／内容身份／保存重开＋真实历史材料回放」**有限认可**、**用户闭环暂不通过**（真实登录本项目 8091 后在 ⑧「取研究主体」被 entity 要求挡住，未走到求值/保存）
 > → 唯一当前 C5：80% 做**可用新功能**（经营判断×市场反应），≤20% 必要**入口/选版接缝**；**不另开 Bug 阶段、不再加离线样品**。
@@ -29,7 +29,10 @@
 > **⑦ 如实未达/未验**：**GUI 实机点击复核仍未做**——用户真实浏览器里 `127.0.0.1:8091` 现为**登录页**（`c5_gui_8091_login.png`；DOM 探测 `hasPassword=true, hasPanel=false`），本轮**不代填口令、不索要口令、不借他人会话**；
 > 已在该浏览器打开该页（标签组「C5 研究实验台复核」，由用户决定何时关闭），登录后按 ⑧「取研究主体 → 选主体/run →（可选）市场对照 → 求值/保存」走闭环，届时补记。另：C5 判据修订后**用新口径只读重放旧产物会出现有意差异**（现金卡文案、库存口径），**旧冻结 JSON 未被改写**（`8176dca4ade57ed0…` 不变）。
 > 本批必要文件：`web_ui.py`、`financial_analysis/research_experiment.py`、`financial_analysis/continuation.py`、`delivery_pipeline.py`、`research_report_adapter.py`、`frontend/src/pages/ResearchStudy.tsx`、`frontend/dist/*`、
-> `tmp/research-studies/0af20919e6245b88/experiments/80693f9870e8337f394fcf49.{json,md}`、`docs/evidence/20261012-c5-review/`；改动全部未提交（HEAD `c85371e`）。C4 账见下。
+> `tmp/research-studies/0af20919e6245b88/experiments/80693f9870e8337f394fcf49.{json,md}`、`docs/evidence/20261012-c5-review/`；
+> **已提交并推送（2026-10-13）**：分支 `c5-market-comparison`、commit `19b6654`（110 文件，+19523/−781）→ draft PR [#1](https://github.com/momang85/weavemind/pull/1)（base `main`；PR 合并面 361 文件＝本批 ＋ 此前 25 个未推提交，推送前已向用户说明）。推送走本机 7897 代理（`github.com:443` 直连被重置、SSH 公钥未登记）。
+> 未入库（按确认范围）：`tmp/`、`evals/**/materials/**`、`_trial_*`、`probe_batchA.py`、`trial_tasks.json`、`agents.db`、35 个未跟踪 `docs/*.md`、`webui.*.log`。
+> **10-13 环境实情**：本机临时行情缓存（`%TEMP%\agent_workspace\market_history`）被系统清理 ⇒ `c5_market`/`c5_update` 探针**如实停在 exit 2**（不重算、不覆盖已记录 63/63、39/39）；探针已按此加固并改记**相对路径**；`c5_entry` 在实例重启后复跑仍 **10/10**；8091 实例已重启（单实例）。C4 账见下。
 >
 > ## 历史账（2026-10-11 · **C4 批：普通研究页「选研究→挑战判断→新披露更新→保存行动」**，基线 `c85371e`）
 >
