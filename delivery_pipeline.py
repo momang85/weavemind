@@ -807,11 +807,12 @@ def _readings_from_members(members: dict) -> dict:
 
 def _external_note(gate: dict, withheld: dict) -> str:
     lines = [
-        "# 外发限制说明：量化附件已按许可门移出本包",
+        "# 外发限制说明：受限读数附件已按许可门移出本包",
         "",
-        "本交付包**不包含**量化读数附件（`quant/*`）。判据是既有的许可门",
-        "`quant_research.publish.external_delivery_gate()`（按每条读数自带的 "
-        "`delivery_eligible`），不是代理侧自行放行。",
+        "本交付包**不包含**受限读数附件（`quant/*`，以及带市场对照读数的 `analysis/*` 实验成员）。",
+        "判据是既有的许可门 `quant_research.publish.external_delivery_gate()`（按每条读数自带的 "
+        "`delivery_eligible`），市场对照读数按其 `market_comparison.delivery_eligible`（同一家族："
+        "`event_returns` 按数据源许可算），不是代理侧自行放行。",
         "",
         f"- 结论：**不允许对外**。{gate.get('reason') or ''}",
         "- 被移出的成员（sha256 供内部核对，**字节不随包**）：",
@@ -828,34 +829,66 @@ def _external_note(gate: dict, withheld: dict) -> str:
     return "\n".join(lines)
 
 
+def _market_delivery_blocked(members: dict) -> list[str]:
+    """带**市场对照读数**的 `analysis/` 实验成员（C5-4）：按内容判，无 market 段零影响。
+
+    判据＝每块 `market_comparison` 自带的 `delivery_eligible`（与 quant 许可门同一家族：
+    `event_returns` 按数据源许可算），不是代理侧自行放行；这一位判不出/缺失 ⇒ 受限
+    （fail closed）——受限数不得从 `analysis/`、实验 JSON 绕许可门外发，也不改许可口径。
+    """
+    blocked: list[str] = []
+    for arc in sorted(str(a) for a in (members or {})):
+        if not (str(arc).startswith("analysis/") and str(arc).endswith(".json")):
+            continue
+        try:
+            blob = json.loads(bytes(members[arc]).decode("utf-8"))
+        except Exception:                        # noqa: BLE001 - 坏文件按"没有市场段"处理
+            continue
+        if not (isinstance(blob, dict) and isinstance(blob.get("market_comparison"), dict)):
+            continue
+        if (blob.get("market_comparison") or {}).get("delivery_eligible") is not True:
+            blocked.append(arc)
+    return blocked
+
+
 def external_delivery_projection(members: dict) -> tuple[dict, dict | None]:
     """**外发投影**：按现有许可判据决定量化附件能不能随交付包出门（复核 §3D）。
 
-    - 没有量化附件 ⇒ 原样返回、**不产任何结论**（`None`）：没有量化读数的工作区，
-      包内成员一字不变（与 Y2 接入时的零存量影响契约一致）；
+    - 没有量化附件、也没有带市场对照读数的 analysis 成员 ⇒ 原样返回、**不产任何结论**
+      （`None`）：没有受限读数的工作区，包内成员一字不变（零存量影响契约不变）；
     - 判据复用 `quant_research.publish.external_delivery_gate()`（不另写一套许可解释）；
-    - **不允许对外**（含"判不出来"）⇒ 所有 `quant/*` 成员移出本包，换成一份限制说明
+      C5-4：带 `market_comparison` 的 analysis/experiment 成员按每块自带的
+      `delivery_eligible` 判（同一家族），`False`/判不出 ⇒ 同样移出本包；
+    - **不允许对外**（含"判不出来"）⇒ 受限成员移出本包，换成一份限制说明
       （列出被移出成员与 sha256），其余成员原样保留；
     - 允许对外 ⇒ 原样保留，只在清单里记一条结论。
     """
     q = _quant_arcs(members)
-    if not q:
+    ma = _market_delivery_blocked(members)
+    if not q and not ma:
         return dict(members or {}), None
-    try:
-        from quant_research import publish as _qpub
-        gate = _qpub.external_delivery_gate(_readings_from_members(members))
-    except Exception as exc:                     # noqa: BLE001 - 判不出就 fail closed
-        gate = {"allowed": False, "blocked_by": q,
-                "reason": f"许可门不可用（{str(exc)[:80]}）⇒ 不默认放行，量化附件不随包外发"}
+    if q:
+        try:
+            from quant_research import publish as _qpub
+            gate = _qpub.external_delivery_gate(_readings_from_members(members))
+        except Exception as exc:                 # noqa: BLE001 - 判不出就 fail closed
+            gate = {"allowed": False, "blocked_by": q,
+                    "reason": f"许可门不可用（{str(exc)[:80]}）⇒ 不默认放行，量化附件不随包外发"}
+    else:
+        gate = {"allowed": False, "blocked_by": ma,
+                "reason": ("带市场对照读数的 analysis 成员 `delivery_eligible=False`"
+                           "（数据源许可仅内部试验）⇒ 不随包外发")}
     info: dict = {"schema": "weavemind.external_delivery/1", "applied": True,
-                  "allowed": bool(gate.get("allowed")), "checked": q,
-                  "basis": "quant_research.publish.external_delivery_gate",
+                  "allowed": bool(gate.get("allowed")), "checked": q or ma,
+                  "basis": ("quant_research.publish.external_delivery_gate" if q else
+                            "market_comparison.delivery_eligible（event_returns 按数据源许可算）"),
                   "reason": str(gate.get("reason") or "")}
     out = dict(members or {})
-    if gate.get("allowed"):
+    if gate.get("allowed") and not ma:
         return out, info
-    withheld = {arc: hashlib.sha256(bytes(out[arc])).hexdigest() for arc in q}
-    for arc in q:
+    withheld = {arc: hashlib.sha256(bytes(out[arc])).hexdigest()
+                for arc in list(q) + list(ma) if arc in out}
+    for arc in list(q) + list(ma):
         out.pop(arc, None)
     out[EXTERNAL_NOTE_ARC] = _external_note(gate, withheld).encode("utf-8")
     info["withheld"] = withheld
@@ -1210,6 +1243,17 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
             # 正文只留三条摘要；底稿是"可展开"的那一层，缺了它就只剩摘要无处可查。
             for p in sorted((ws / "analysis").glob("*.md")):
                 files.append((p, f"analysis/{p.name}"))
+            # 冻结研究输入（B4 研究直连）：research_inputs.json 原名随包。
+            # 按名存在才进包：旧任务没有这个文件名，行为零变化；manifest 同步收录。
+            _fi = ws / "analysis" / "research_inputs.json"
+            if _fi.exists():
+                files.append((_fi, "analysis/research_inputs.json"))
+            # C4 研究实验（现金回撤/机制卡/披露更新）：**完整实验 JSON 同版随包**——
+            # `company_view.realization.c3_experiment.exact_values_in` 指向的就是它，
+            # 此前只进了渲染后的 .md、JSON 成员缺失（C4-3 接缝修）。
+            # 按名存在才进包：旧任务没有这个文件名，行为零变化。
+            for _c3 in sorted((ws / "analysis").glob("c3_experiment_*.json")):
+                files.append((_c3, f"analysis/{_c3.name}"))
         except Exception as exc:                 # noqa: BLE001 - 输入读不到就不进包
             logger.warning("打包：分析输入读取失败：%s", str(exc)[:100])
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）

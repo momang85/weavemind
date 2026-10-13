@@ -801,6 +801,94 @@ def run_study(spec: dict, *, input_dir) -> dict:
     return _compute_study(spec, sources, previews, source_records)
 
 
+def _market_binding(spec: dict, evaluation_as_of: str) -> dict:
+    """spec 钉住的行情数据集/交易日历 → 实际加载并记录绑定（C2c 唯一来源接缝）。
+
+    规则（架构师 2026-10-11）：新候选 spec **显式写**已用的行情 dataset_id 与日历 calendar_id；
+    生成路径按这些 id 真加载一次，把「要求什么、实取什么、内容指纹、来源标注」写进冻结底稿；
+    id 不一致/加载失败时如实标 `refused`／`unpinned` 并给原因，**绝不替换成别的数据集**。
+    老 spec（没有 `market_pin`、没有 `market.dataset_id`）一律记 `unpinned`，不回写、不改旧研究。
+    """
+    mkt = spec.get("market_pin") if isinstance(spec.get("market_pin"), dict) else {}
+    mkt = mkt or (spec.get("market") if isinstance(spec.get("market"), dict) else {})
+    ds_id = str(mkt.get("price_dataset_id") or mkt.get("dataset_id") or "").strip()
+    cal_id = str(mkt.get("calendar_id") or "").strip()
+    out: dict = {"schema": "weavemind.market_binding/1",
+                 "evaluation_as_of": str(evaluation_as_of or ""),
+                 "price_dataset_id": ds_id,
+                 "price_dataset_id_source": "spec" if ds_id else "unpinned",
+                 "calendar_id": cal_id,
+                 "calendar_id_source": "spec" if cal_id else "unpinned",
+                 "source_note": str(mkt.get("note") or ""),
+                 "price": {}, "calendar": {}, "reasons": []}
+    if not ds_id and not cal_id:
+        out["status"] = "unpinned"
+        out["reasons"].append("spec 没有钉住行情数据集/交易日历：下游按默认来源取，"
+                             "换环境的默认值就会换读数")
+        return out
+    try:
+        from adapters import market_history as mh
+        from adapters import trading_calendar as tcal
+    except Exception as exc:                             # noqa: BLE001 - 算子不可用如实报
+        out["status"] = "refused"
+        out["reasons"].append(f"行情/日历模块不可用：{str(exc)[:120]}")
+        return out
+    if ds_id:
+        try:
+            payload = mh.load(ds_id)
+        except Exception as exc:                          # noqa: BLE001
+            payload, err = {}, str(exc)[:120]
+        else:
+            err = ""
+        got = str(payload.get("dataset_id") or "")
+        if not got or got != ds_id or str(payload.get("source") or "") == "unavailable":
+            out["price"] = {"requested": ds_id, "loaded": got,
+                            "reason": str(payload.get("reason") or err or "id 不同或不可用")}
+            out["reasons"].append(f"行情数据集不一致（要求 {ds_id[:16]}…，实取 "
+                                  f"{(got or '空')[:16]}…，{err or payload.get('reason') or 'id 不同'}）："
+                                  "不替换、不读数")
+        else:
+            rows_file = Path(mh.data_dir()) / ds_id / "rows.csv"
+            out["price"] = {"requested": ds_id, "loaded": got or ds_id,
+                            "source": str(payload.get("source") or ""),
+                            "license": str(payload.get("license") or ""),
+                            "adj_basis": str(payload.get("adj_basis") or ""),
+                            "rows": payload.get("rows"),
+                            "date_range": list(payload.get("date_range") or []),
+                            "instruments": list(payload.get("instruments") or []),
+                            "rows_file_sha256": (hashlib.sha256(rows_file.read_bytes()).hexdigest()
+                                                 if rows_file.is_file() else "")}
+    if cal_id:
+        try:
+            payload = tcal.load(cal_id)
+        except Exception as exc:                          # noqa: BLE001
+            payload, err = {}, str(exc)[:120]
+        else:
+            err = ""
+        got = str(payload.get("dataset_id") or "")
+        # 适配层取不到时返回 `source=unavailable` 且**没有** dataset_id——不能把"没取到"
+        # 记成"已绑定"（这正是要防的假绑定）。
+        if not got or got != cal_id or str(payload.get("source") or "") == "unavailable":
+            out["calendar"] = {"requested": cal_id, "loaded": got,
+                               "reason": str(payload.get("reason") or err or "id 不同或不可用")}
+            out["reasons"].append(f"交易日历不一致（要求 {cal_id[:16]}…，实取 "
+                                  f"{(got or '空')[:16]}…，{err or payload.get('reason') or 'id 不同'}）："
+                                  "不替换成最近一份日历")
+        else:
+            sessions_file = Path(tcal.data_dir()) / cal_id / "sessions.csv"
+            out["calendar"] = {"requested": cal_id, "loaded": got,
+                               "source": str(payload.get("source") or ""),
+                               "market": str(payload.get("market") or ""),
+                               "rows": payload.get("rows"),
+                               "range": list(payload.get("range") or []),
+                               "sessions_file_sha256": (
+                                   hashlib.sha256(sessions_file.read_bytes()).hexdigest()
+                                   if sessions_file.is_file() else "")}
+    ok = (not out["reasons"]) and bool(out["price"] or out["calendar"])
+    out["status"] = "pinned" if ok else "refused"
+    return out
+
+
 def _compute_study(spec: dict, sources: dict, previews: dict, source_records: dict) -> dict:
     """The same numerical path serves file ingestion and replay of frozen inputs."""
     from financial_analysis import dataset, events, runner
@@ -870,6 +958,9 @@ def _compute_study(spec: dict, sources: dict, previews: dict, source_records: di
     calendar = (_calendar(source_records["calendar"], _descriptor(spec["calendar"]),
                           sources["calendar"]["raw_sha256"]) if "calendar" in sources else None)
     quant = {}
+    # 来源接缝（C2c，2026-10-11）：spec 显式钉住的行情数据集/交易日历要在**生成路径**里真的
+    # 被消费并留下可复核的绑定（id ＋ 实取内容指纹），而不是让下游按环境默认另取一份。
+    quant["market_binding"] = _market_binding(spec, evaluation_as_of)
     market_payload = None
     if "market" in previews:
         market_payload, excluded["market"] = _market_payload(previews["market"], evaluation_as_of)
@@ -924,7 +1015,15 @@ def _compute_study(spec: dict, sources: dict, previews: dict, source_records: di
                               evaluation_as_of=evaluation_as_of),
               "previews": previews, "excluded": excluded,
               "frozen_inputs": {"spec": spec, "previews": previews,
-                                "source_records": source_records},
+                                "source_records": source_records,
+                                # C2d 唯一持久化接缝（§18.15 接缝③）：`market_binding` 是
+                                # **研究元数据**（来源绑定＋内容指纹），不是量化读数——此前它
+                                # 只进 `quant`，被 `publish.store_reading` 白名单拒写，冻结
+                                # 目录里就**没有**这份绑定，恢复（load_frozen_result）与报告
+                                # 拿不到。现在随 inputs.json（既有文件，不加新类型/新平台）
+                                # 冻结，冻结→恢复→报告消费**同一份**绑定；老研究 inputs.json
+                                # 里没有这个键，照旧不回填、不补造。
+                                "market_binding": quant.get("market_binding") or {}},
               "limits": ["仅值/时间/口径有效的材料参与计算；首次披露日不能证明最新重述值当时可得",
                          "事件与情绪为有引用的规则候选，未用人工标注评估中文准确率",
                          "事件收益为事后价格反应观察；组合账本为既有内部原型，未验证策略有效性",
@@ -973,7 +1072,28 @@ def summary_markdown(result: dict) -> str:
     lines.append(f"候选 {len(result['events'].get('events', []))}；排除/待原文 "
                  f"{len(result['events'].get('excluded', []))}。")
     lines.extend(["", "## 历史检验", ""])
+    _mb = result["quant"].get("market_binding") if isinstance(result["quant"], dict) else None
+    if isinstance(_mb, dict):
+        _p, _c = _mb.get("price") or {}, _mb.get("calendar") or {}
+        lines.append(f"- 来源绑定：{_mb.get('status')}（行情 id 来源 "
+                     f"{_mb.get('price_dataset_id_source')}、日历 id 来源 "
+                     f"{_mb.get('calendar_id_source')}）")
+        if _p:
+            lines.append(f"  - 行情数据集：{_p.get('loaded') or _p.get('requested')}"
+                         f"（来源 {_p.get('source') or '未标注'}；许可 {_p.get('license') or '未标注'}；"
+                         f"复权 {_p.get('adj_basis') or '未标注'}；{_p.get('rows')} 行，"
+                         f"{_p.get('date_range')}；内容指纹 "
+                         f"{str(_p.get('rows_file_sha256') or '')[:16]}…）")
+        if _c:
+            lines.append(f"  - 交易日历：{_c.get('loaded') or _c.get('requested')}"
+                         f"（来源 {_c.get('source') or '未标注'}；{_c.get('rows')} 个交易日，"
+                         f"{_c.get('range')}；内容指纹 "
+                         f"{str(_c.get('sessions_file_sha256') or '')[:16]}…）")
+        for _why in (_mb.get("reasons") or []):
+            lines.append(f"  - 未绑定原因：{_why}")
     for name, r in result["quant"].items():
+        if name == "market_binding":
+            continue
         lines.append(f"- {name}：{r.get('status')}" + (f"；{r['reason']}" if r.get("reason") else ""))
         if name == "event_returns":
             lines.append("  下一交易日为第1日；以下为收盘价格反应，未模拟成交。")
@@ -1035,6 +1155,11 @@ def write_study(result: dict, *, output_dir) -> Path:
             (target / f"q1_followup_{code}.md").write_text(text, encoding="utf-8")
     from quant_research import publish
     for name, reading in result["quant"].items():
+        if name == "market_binding":
+            # 研究元数据而非量化读数：已随 inputs.json 冻结（见 _compute_study 的
+            # frozen_inputs）。不塞进 quant/ 读数面，也不在 store_reading 里扩白名单
+            # ——那是给 event_returns/backtest 这类**读数**的位置（§18.15 接缝③）。
+            continue
         publish.store_reading(target, name, reading)
     publish.payload_bytes(target)  # existing quant attachment manifest; still internal
     artifacts = {str(p.relative_to(target)).replace("\\", "/"):
@@ -1086,3 +1211,137 @@ def replay_study(path) -> dict:
     return {"ok": result["result_hash"] == manifest.get("result_hash"),
             "expected_hash": manifest.get("result_hash"), "actual_hash": result["result_hash"],
             "study_id": result["study_id"], "what_this_verifies": "同冻结输入重算同实质结果"}
+
+
+def restore_study(path) -> dict:
+    """按**研究身份**复用冻结 inputs 重算完整结果（接缝②，2026-10-11 §18.12）。
+
+    冷页面/原上传文件不在时：用 study_id 选定的冻结目录恢复 spec／previews／
+    source_records／sources，走与 replay 相同的 `_compute_study`（同一数值路径），
+    **不要求重新上传、不借用旧上传目录的输入状态**。产物身份校验照旧：
+    冻结文件 hash 不符 → 不恢复；实现已改变 → **不重算**（避免用新实现造新数字），
+    改走 `load_frozen_result` 直接读冻结产物。返回值与 `run_study` 同形
+    （financial/previews/manifest/quant/…），另带 `restored_from`、
+    `result_hash_matches`、`restore_basis` 三条恢复事实。"""
+    root = Path(path)
+    integrity = verify_study(root)
+    if not integrity["ok"]:
+        return {"ok": False, "reason": "冻结文件hash不符（不恢复，须重新上传或重跑）",
+                "integrity": integrity}
+    manifest = json.loads((root / "study_manifest.json").read_text(encoding="utf-8"))
+    if manifest["implementation_hashes"] != _implementations():
+        return {"ok": False, "implementation_changed": True,
+                "reason": "实现已改变；不重算（不给旧版本背书，也不造新数字）——直接读冻结产物",
+                "frozen": load_frozen_result(path)}
+    frozen = json.loads((root / "inputs.json").read_text(encoding="utf-8"))
+    result = _compute_study(frozen["spec"], manifest["sources"], frozen["previews"],
+                            frozen["source_records"])
+    result["restored_from"] = str(root)
+    result["result_hash_matches"] = result["result_hash"] == manifest.get("result_hash")
+    result["restore_basis"] = ("按 study_id 选定冻结目录恢复（冻结 inputs + 原 _compute_study）；"
+                               "未借用旧上传目录，未重新上传")
+    return result
+
+
+_MISSING = object()
+
+
+def _spec_diff(base: dict, new: dict, *, _path: str = "") -> list[str]:
+    """两个 spec 的**逐路径差异**（可读字符串列表）：只为人读，不参与任何计算。"""
+    out: list[str] = []
+    keys = sorted(set(base) | set(new))
+    for k in keys:
+        p = f"{_path}.{k}" if _path else str(k)
+        b, n = base.get(k, _MISSING), new.get(k, _MISSING)
+        if isinstance(b, dict) and isinstance(n, dict):
+            out += _spec_diff(b, n, _path=p)
+        elif b is _MISSING:
+            out.append(f"{p}: 新增 {json.dumps(n, ensure_ascii=False)}")
+        elif n is _MISSING:
+            out.append(f"{p}: 删除（原 {json.dumps(b, ensure_ascii=False)}）")
+        elif b != n:
+            out.append(f"{p}: {json.dumps(b, ensure_ascii=False)} → "
+                       f"{json.dumps(n, ensure_ascii=False)}")
+    return out
+
+
+def reparam_frozen_study(path, spec: dict) -> dict:
+    """冻结输入 ＋ 改参 → **新候选**（§18.13 C2b 接缝：与「查看原版」严格分开）。
+
+    与 `restore_study` 的区别：这里**故意换 spec**（改预算/天数就是改假设），所以：
+    ① 身份必须变——`params_hash=_hash(新spec)` → 内容寻址自然给出**新 study_id**
+       （若算出同一身份 ⇒ 拒绝，不冒充新候选）；
+    ② 输入侧复用**已校验**的冻结 `previews`/`source_records`/`sources`（不重新上传、
+       不借旧上传目录、不读原始文件），数值路径仍是**同一个** `_compute_study`；
+    ③ 实现用**当前实现**（新候选只对自己的 spec 负责，不给旧版本背书）；
+       旧目录**只读**保留，本函数不写、不改、不删它。
+    返回 run_study 同形结果，另带 `reparam_from`/`reparam_spec_diff`/`reparam_basis`。"""
+    root = Path(path)
+    integrity = verify_study(root)
+    if not integrity["ok"]:
+        return {"ok": False, "reason": "冻结文件hash不符（不取冻结输入，须重新上传或重跑）",
+                "integrity": integrity}
+    if not isinstance(spec, dict) or spec.get("schema", SPEC_SCHEMA) != SPEC_SCHEMA:
+        return {"ok": False, "reason": "改参必须给出完整 spec（schema 不支持）"}
+    manifest = json.loads((root / "study_manifest.json").read_text(encoding="utf-8"))
+    frozen = json.loads((root / "inputs.json").read_text(encoding="utf-8"))
+    base = frozen.get("spec") or {}
+    diff = _spec_diff(base if isinstance(base, dict) else {}, spec)
+    if not diff:
+        return {"ok": False, "code": "spec_unchanged",
+                "reason": "给出的 spec 与冻结 spec 逐字段相同：这是「查看原版」，"
+                          "不新建候选（要改参数就改一个值再提交）"}
+    result = _compute_study(json.loads(json.dumps(spec, ensure_ascii=False)),
+                            dict(manifest.get("sources") or {}),
+                            frozen.get("previews") or {}, frozen.get("source_records") or {})
+    old_id = str(manifest.get("study_id") or root.name)
+    new_id = str(result.get("study_id") or "")
+    if new_id == old_id:
+        return {"ok": False, "code": "identity_unchanged",
+                "reason": "改参后研究身份没有变：拒绝把同一身份冒充成新候选"}
+    result["reparam_from"] = {"study_id": old_id, "dir": str(root),
+                              "result_hash": str(manifest.get("result_hash") or ""),
+                              "frozen_integrity_ok": True,
+                              "frozen_impl_version": str(manifest.get("impl_version") or "")}
+    result["reparam_spec_diff"] = diff
+    result["reparam_basis"] = ("冻结输入（已校验）＋改参 → 新候选：同一 `_compute_study` 数值路径、"
+                               "当前实现、内容寻址新身份；旧目录只读未动")
+    result["spec"] = json.loads(json.dumps(spec, ensure_ascii=False))
+    return result
+
+
+def load_frozen_result(path) -> dict:
+    """把冻结产物**原样**重装成 run_study 同形的结果（不重算、不背书）。
+
+    实现已改变时用这条：`_study_preview_payload` 需要的每块（financial/previews/
+    events/risk/label_readiness/quant/manifest）都从冻结文件读，数值一字不改；
+    `recomputed` 恒为 False，调用方照实标「直接读冻结产物」。"""
+    from quant_research import publish
+    root = Path(path)
+
+    def _rd(name):
+        p = root / name
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+        except (ValueError, OSError):
+            return {}
+
+    man = _rd("study_manifest.json")
+    frozen = _rd("inputs.json")
+    # C2d 接缝③：来源绑定随 inputs.json 冻结，恢复时**原样送回** `quant`，让冻结—恢复—
+    # 报告消费同一份绑定。老研究没有这个键 ⇒ 照旧缺席（不补造、不拿 spec 现算冒充冻结值）。
+    quant = publish.load_readings(root)
+    _mb = frozen.get("market_binding") or {}
+    if _mb:
+        quant["market_binding"] = _mb
+    return {"ok": True, "recomputed": False,
+            "financial": _rd("financial.json"), "previews": _rd("previews.json"),
+            "events": _rd("events.json"), "risk": _rd("risk.json"),
+            "label_readiness": _rd("label_readiness.json"),
+            "quant": quant,
+            "study_id": str(man.get("study_id") or root.name),
+            "result_hash": str(man.get("result_hash") or ""),
+            "manifest": man,
+            "restored_from": str(root),
+            "result_hash_matches": True,
+            "restore_basis": "实现已改变：直接读冻结产物（不重算、不冒充重算结果）"}

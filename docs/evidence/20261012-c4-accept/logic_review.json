@@ -1,0 +1,79 @@
+{
+  "review_date": "2026-10-12",
+  "scope": "C4 new public evaluate and stored open replay, read only; no full suites/API auth/GUI/new delivery",
+  "decision": "limited_accept_pure_calculation_and_freeze; C4 normal-user entry blocked by verified frontend-backend bootstrap contract, actual selected-experiment ZIP path unverified",
+  "independent_checks": {
+    "open_stored_content_hash": true,
+    "replay_same_id": true,
+    "replay_same_content": true,
+    "experiment_bytes_unchanged": true,
+    "old_study_files_unchanged": true,
+    "selected_params_equal": true,
+    "non_default_metric_applied": true,
+    "non_default_identity_distinct": true
+  },
+  "artifact": {
+    "path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies\\0af20919e6245b88\\experiments\\245bcd5e56ef7c5eafaf11e2.json",
+    "byte_sha256": "8176dca48ade57ed0a7da86d976597a09007a5d7c3e8767815848471f723f245",
+    "bytes": 142709,
+    "experiment_id": "245bcd5e56ef7c5eafaf11e2",
+    "replay_identity": {
+      "experiment_id": "245bcd5e56ef7c5eafaf11e2",
+      "content_sha256": "245bcd5e56ef7c5eafaf11e272f75fa3eda93d906ed89b4f9692304c49adc201",
+      "criteria_sha256": "c2aa6f49211015df5066f23c6d9b5b8927e380b86e8b9258a9bfe0cbad54be81"
+    },
+    "selection": {
+      "fractions": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "metric": "operating_payable_increase",
+      "note": "指定视角用显式候选项，另一视角按既有默认（与 C 同向的最大带符号项）",
+      "view": "current"
+    },
+    "stored_saved_at": null
+  },
+  "structural_seam": [
+    {
+      "file": "research_report_adapter.py",
+      "line": 1995,
+      "issue": "Implicit newest experiment selector sorts saved_at then content ID; save sets saved_at None for all, therefore selection is lexical content ID, not user chosen experiment or save chronology. _stage_candidate resolves again rather than receiving selected immutable artifact. Explicit experiment_id should flow to report and staging once."
+    },
+    {
+      "file": "docs/evidence/20261011-c4-review/c4_review.py",
+      "line": 217,
+      "issue": "Real JSON in package check creates temporary staging member, then merely detects source glob; no repack/ZipFile actual package. review_fingerprints explicitly says no new delivery packages."
+    },
+    {
+      "file": "financial_analysis/research_experiment.py",
+      "line": 758,
+      "issue": "Old selected material is resolved then snapshotted under caller company/cutoff without counterpart check of old subject==entity and disclosed_at<=cutoff. New selected material has these checks. API permits arbitrary well-formed registered material ID while UI old candidates filter is only presentation. Put both sides through one qualified-material check before frozen experiment; no new validator platform."
+    }
+  ],
+  "minimal_next_acceptance": "One explicit selected experiment ID (two saved variants) through evaluate-save-open-export and actual manifest ZIP byte comparison; preserve old study/package. No new platform or rerun old financial algorithms.",
+  "unverified": [
+    "Authenticated normal browser action including save/reopen",
+    "Actual ZIP export includes precisely chosen experiment and matching content identity; C4 evidence only staging plus source check",
+    "Two saved experiments normal selection/export does not silently select lexicographic hash",
+    "Arbitrary material pairing eligibility beyond current known-good Yanghe annual/H1 case",
+    "New hypotheses financial predictive or real economic causal validity"
+  ],
+  "ui_contract_blocker": {
+    "severity": "blocks_first_normal_use",
+    "live_observation_source": "parent root authenticated web_ui8091 browser, 2026-10-12; selected Sany 4dba42a6, clicked section8 first button, error returned",
+    "observed_error": "需要entity_id（从已选研究的主体里选）",
+    "repro_steps": [
+      "Login authorized local account",
+      "Select qualified Sany study 4dba42a6",
+      "Click ⑧ ①取这家研究的主体",
+      "options request omits entity_id by design; backend rejects before returning entities; no subject selector can be populated"
+    ],
+    "source_contract": {
+      "frontend": "frontend/src/pages/ResearchStudy.tsx:520 expLoadEntities sends study_id/result_hash/action=options only, expects d.entities; subject selection is later step",
+      "backend": "web_ui.py:9058 _post_research_study_experiment requires nonempty entity_id before action=options, although experiment_options returns entities only after entity path"
+    },
+    "minimum_fix_one_place": "In _post_research_study_experiment, after validated study/result_hash and financial.json load, handle action=options with no entity_id by returning metadata and entities=sorted(financial.keys()) only. Do not choose first entity/run, do not scan materials or evaluate. Leave nonempty entity_id requirement on entity-specific options/evaluate/save unchanged. Existing TS then works without change.",
+    "minimum_acceptance": "One authenticated first-click returns entities then explicitly choose one subject/run and evaluate/save/open; one endpoint bootstrap contract check if needed, no old suite."
+  }
+}

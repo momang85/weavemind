@@ -1,0 +1,329 @@
+{
+  "sany": {
+    "study_id": "4dba42a6bdde92276c4dabe428e9e4e77c1a31d39f3959b8631e0f6061ae8548",
+    "zip": "deliverables_20261011_183959_f38391.zip",
+    "zip_sha256": "d443e59c0201fea5d00630f67efc87af2c70778bb25941f8c5e2ee0087ece437",
+    "c3_source_json": "tmp\\research-studies\\4dba42a6bdde9227\\c3_experiment_600031.SH.json",
+    "checks": [
+      {
+        "check": "四格与 innovation_reference 精确一致（run/base/item/三点/λ*/可达性）",
+        "ok": true,
+        "detail": {
+          "current": {
+            "same_as_reference": true,
+            "run_id": "5d4b99ccb64c21fa…",
+            "zero_lambda": "2.6487868269…",
+            "reach": false
+          },
+          "yoy": {
+            "same_as_reference": true,
+            "run_id": "5d4b99ccb64c21fa…",
+            "zero_lambda": "0.7841137465…",
+            "reach": true
+          }
+        }
+      },
+      {
+        "check": "λ* 域外语义在场（范围不可达/不夹逼/λ∈[0,1]）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "现金主因与回撤实验前置节位于经营结论之前（现金主因前置）",
+        "ok": true,
+        "detail": {
+          "before_section_1": true
+        }
+      },
+      {
+        "check": "run 身份在包内（5d4b99ccb64c21fa…）且正文引用同一身份",
+        "ok": true,
+        "detail": {
+          "run_id": "5d4b99ccb64c21fa…"
+        }
+      },
+      {
+        "check": "三一机制卡 1 张、无法判断、pending（不为凑成功取数）",
+        "ok": true,
+        "detail": {
+          "cards": [
+            "cash_from_working_capital"
+          ]
+        }
+      },
+      {
+        "check": "三一正文无白酒字样（L2218 泛化后仍无残留）",
+        "ok": true,
+        "detail": {
+          "hits": []
+        }
+      },
+      {
+        "check": "研究详情视图（company_view.c3_experiment）与正文/附件同一结果（可回撤项 0/50/100%）",
+        "ok": true,
+        "detail": {
+          "candidates": 17,
+          "item_yi": "55.92854000000",
+          "attachment": true
+        }
+      },
+      {
+        "check": "附件 `analysis/c3_experiment_*.md` 随包且含三点精确值与全部候选回撤项",
+        "ok": true,
+        "detail": {
+          "attachment_lines": 85
+        }
+      },
+      {
+        "check": "包内附件内容 == 研究目录同一 JSON 的确定性渲染（行规范化）",
+        "ok": true,
+        "detail": {
+          "bytes_equal": false,
+          "attachment_bytes": 10761,
+          "fresh_bytes": 10676
+        }
+      },
+      {
+        "check": "三态（state=not_applicable／未复核／仅内部）",
+        "ok": true,
+        "detail": {
+          "state": "not_applicable"
+        }
+      },
+      {
+        "check": "本版机器验收 pass",
+        "ok": true,
+        "detail": {
+          "overall": "pass",
+          "zip_has_acc": false
+        }
+      },
+      {
+        "check": "附件 JSON 的 run_ref 与 company_view.run_ref 相同（同一入口）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "旧包 sha256 不变（C2e 两包＋C2c 基线）",
+        "ok": true,
+        "detail": {
+          "deliverables_20261011_17…": true,
+          "deliverables_20261011_14…": true
+        }
+      }
+    ]
+  },
+  "yanghe": {
+    "study_id": "0af20919e6245b888974ee17321f327f99580ab745687e80aca6dae6921e7f4f",
+    "zip": "deliverables_20261011_184706_13b232.zip",
+    "zip_sha256": "c06a409b6f80f5fce8f3f9a9f3138cbe6f0610c7a22c197dbf51ef925a92f7a2",
+    "c3_source_json": "tmp\\research-studies\\0af20919e6245b88\\c3_experiment_002304.SZ.json",
+    "checks": [
+      {
+        "check": "四格与 innovation_reference 精确一致（run/base/item/三点/λ*/可达性）",
+        "ok": true,
+        "detail": {
+          "current": {
+            "same_as_reference": true,
+            "run_id": "370dba92a40e36a3…",
+            "zero_lambda": "0.1673922751…",
+            "reach": true
+          },
+          "yoy": {
+            "same_as_reference": true,
+            "run_id": "370dba92a40e36a3…",
+            "zero_lambda": "1.2047345689…",
+            "reach": false
+          }
+        }
+      },
+      {
+        "check": "λ* 域外语义在场（范围不可达/不夹逼/λ∈[0,1]）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "现金主因与回撤实验前置节位于经营结论之前（现金主因前置）",
+        "ok": true,
+        "detail": {
+          "before_section_1": true
+        }
+      },
+      {
+        "check": "run 身份在包内（370dba92a40e36a3…）且正文引用同一身份",
+        "ok": true,
+        "detail": {
+          "run_id": "370dba92a40e36a3…"
+        }
+      },
+      {
+        "check": "洋河机制卡 5 张（税费缓冲/销量/库存/现金方向/单位收入）",
+        "ok": true,
+        "detail": [
+          [
+            "profit_mechanism_and_buffer",
+            "加强"
+          ],
+          [
+            "volume_contraction",
+            "加强"
+          ],
+          [
+            "finished_goods_inventory_build",
+            "削弱"
+          ],
+          [
+            "cash_from_working_capital",
+            "加强"
+          ],
+          [
+            "unit_revenue_not_proof_of_pricing",
+            "削弱"
+          ]
+        ]
+      },
+      {
+        "check": "cash_buffer_structure 不重复计卡（随更新页呈现）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "披露更新历史重建（旧截止 2025-04-30 → 新截止 2025-08-19，based_on 为同研究已登记版本）",
+        "ok": true,
+        "detail": {
+          "old": "2025-04-30",
+          "new": "2025-08-19",
+          "rebuild": true,
+          "based_on": "a4ee5912b0772126",
+          "registered": true
+        }
+      },
+      {
+        "check": "两侧材料身份（f42e747c→2ce860dd，2025-08-19 公开）",
+        "ok": true,
+        "detail": {
+          "materials": [
+            [
+              "earlier",
+              "f42e747c73850b59"
+            ],
+            [
+              "later",
+              "2ce860dddd94e5a6"
+            ]
+          ]
+        }
+      },
+      {
+        "check": "H1 同比读数入正文：销量 -32.35%、库存量 -33.96% 且不年度相减/乘二",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "一支持一削弱（销量收缩加强、库存累积削弱）在卡状态里",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "研究详情视图（company_view.c3_experiment）与正文/附件同一结果（可回撤项 0/50/100%）",
+        "ok": true,
+        "detail": {
+          "candidates": 16,
+          "item_yi": "-45.58396295730",
+          "attachment": true
+        }
+      },
+      {
+        "check": "附件 `analysis/c3_experiment_*.md` 随包且含三点精确值与全部候选回撤项",
+        "ok": true,
+        "detail": {
+          "attachment_lines": 116
+        }
+      },
+      {
+        "check": "包内附件内容 == 研究目录同一 JSON 的确定性渲染（行规范化）",
+        "ok": true,
+        "detail": {
+          "bytes_equal": true,
+          "attachment_bytes": 14373,
+          "fresh_bytes": 14373
+        }
+      },
+      {
+        "check": "三态（state=not_applicable／未复核／仅内部）",
+        "ok": true,
+        "detail": {
+          "state": "not_applicable"
+        }
+      },
+      {
+        "check": "本版机器验收 pass",
+        "ok": true,
+        "detail": {
+          "overall": "pass",
+          "zip_has_acc": false
+        }
+      },
+      {
+        "check": "附件 JSON 的 run_ref 与 company_view.run_ref 相同（同一入口）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "旧包 sha256 不变（C2e 两包＋C2c 基线）",
+        "ok": true,
+        "detail": {
+          "deliverables_20261011_17…": true,
+          "deliverables_20261011_14…": true
+        }
+      }
+    ]
+  },
+  "guards": {
+    "checks": [
+      {
+        "check": "护栏：未知视角 → applicable=False 且原因含「未知视角」（不造数）",
+        "ok": true,
+        "detail": {
+          "reason": "未知视角 `next`（只支持 current/yoy）"
+        }
+      },
+      {
+        "check": "护栏：λ 越域 → applicable=False 且原因含「越域」（不造数）",
+        "ok": true,
+        "detail": {
+          "reason": "回撤比例越域（本函数只在 λ∈[0,1] 内取值）"
+        }
+      },
+      {
+        "check": "护栏：指定项缺项 → applicable=False 且原因含「不在该 run 的候选里」（不造数）",
+        "ok": true,
+        "detail": {
+          "reason": "指定项 `no_such_item` 不在该 run 的候选里（缺项不造数）"
+        }
+      },
+      {
+        "check": "护栏：全零项（无同向项） → applicable=False 且原因含「同向」（不造数）",
+        "ok": true,
+        "detail": {
+          "reason": "没有与现金同向的带符号项（默认项无法确定；可用 metric 显式指定）"
+        }
+      },
+      {
+        "check": "护栏：无诊断块 → applicable=False（不拿别的 run 数）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "冻结重读确定性（同一 run 两次调用逐字相同）",
+        "ok": true,
+        "detail": {}
+      },
+      {
+        "check": "λ* 与 C/a 精确一致（Decimal，容差 1e-20）",
+        "ok": true,
+        "detail": {}
+      }
+    ]
+  }
+}

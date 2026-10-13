@@ -429,6 +429,167 @@ class TestStudyEntryIdentityAndTimeGuards(_Base):
         self.assertIn("summary.md", ver["failed"])
 
 
+class TestStudyRestoreByIdentity(_Base):
+    """接缝②（2026-10-11 §18.12）：`POST /api/research-study/run {study_id}` 的**恢复**分支。
+
+    冷页面（`input_id` 仍停在 `__sample__`）选旧版时，按研究身份复用**冻结 inputs**：
+    不重新上传、不借用旧上传目录；身份与主体按同一硬门槛校验；实现已改变时
+    **不重算**（不给旧实现背书、也不造新数字），改为直接读冻结产物并如实标注。
+    """
+
+    def _restore(self, sid: str, **over):
+        import web_ui
+        body = {"study_id": sid, "confirmed": True,
+                "confirmed_subjects": ["900001.SH", "900002.SH"]}
+        body.update(over)
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(h, h.path, body, {"user": "admin"})
+        return h.last
+
+    def test_restore_reuses_frozen_inputs_without_reupload(self):
+        payload, status = self._run()
+        sid = payload["study_id"]
+        # 冷入口反例：页面没有上传目录，input_id 仍是样例
+        res, status = self._restore(sid)
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["study_id"], sid)
+        self.assertEqual(res["status"], "restored")
+        self.assertTrue(res["result_hash_matches"], res)
+        self.assertTrue(str(res["input_id"]).startswith("frozen:"), res["input_id"])
+        self.assertIn("未重新上传", res["restore_basis"])
+        self.assertEqual(sorted(res["subjects"]), ["900001.SH", "900002.SH"])
+        # 生效参数来自冻结 spec，而不是页面上的样例 spec
+        self.assertEqual(res["spec"]["feature_cutoff"], payload["spec"]["feature_cutoff"])
+        self.assertEqual(res["spec"]["evaluation_as_of"], payload["spec"]["evaluation_as_of"])
+        self.assertFalse(res["adopted"], "恢复不等于采纳")
+
+    def test_restore_refuses_unknown_study_and_wrong_hash(self):
+        payload, _ = self._run()
+        res, status = self._restore("ffffffffffffffff")
+        self.assertEqual(status, 404, res)
+        self.assertEqual(res["code"], "study_not_found")
+        res, status = self._restore(payload["study_id"], result_hash="0" * 64)
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "result_hash_mismatch")
+
+    def test_restore_refuses_subjects_not_in_the_frozen_record(self):
+        payload, _ = self._run()
+        res, status = self._restore(payload["study_id"],
+                                    confirmed_subjects=["900001.SH"])
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "subjects_unconfirmed")
+        self.assertEqual(res["subjects_in_files"], ["900001.SH", "900002.SH"])
+
+    def test_restore_reads_frozen_artifacts_when_implementation_changed(self):
+        import quant_research.study as study
+        payload, _ = self._run()
+        sid = payload["study_id"]
+        before = (Path(payload["dir"]) / "financial.json").read_text(encoding="utf-8")
+        with mock.patch.object(study, "_implementations",
+                               lambda: {"changed.py": "deadbeef"}):
+            res, status = self._restore(sid)
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["status"], "restored_frozen")
+        self.assertFalse(res["recomputed"], "实现已改变时不得冒充重算结果")
+        self.assertIn("冻结产物", res["restore_basis"])
+        self.assertEqual(sorted(res["subjects"]), ["900001.SH", "900002.SH"])
+        # 数值一字不改：盘上冻结产物未被重算覆盖
+        self.assertEqual((Path(payload["dir"]) / "financial.json")
+                         .read_text(encoding="utf-8"), before)
+
+    def test_restore_refuses_tampered_frozen_record(self):
+        payload, _ = self._run()
+        d = Path(payload["dir"])
+        (d / "summary.md").write_text("被改过的摘要", encoding="utf-8")
+        res, status = self._restore(payload["study_id"])
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "restore_refused")
+
+
+class TestStudyReparamFromFrozenInputs(_Base):
+    """C2b 接缝②分叉（2026-10-11 §18.13）：`{study_id, spec}` → **冻结输入＋改参新候选**。
+
+    与「查看原版」（只带 `study_id` → restore/读冻结产物）严格分开：
+    - 改的是**假设**（本测试改 `financial.params.cash_pressure.collection_days_delta`）；
+    - 输入与截止是**冻结选择**：改 `feature_cutoff` → 409（换截止＝换输入，不是改假设）；
+    - 身份由内容寻址给出新 `study_id`；spec 未改 → 400（那是「查看原版」，不新建候选）；
+    - 旧目录只读保留：候选落新目录，旧目录字节不变。
+    """
+
+    def _reparam(self, sid: str, spec: dict, **over):
+        import web_ui
+        body = {"study_id": sid, "spec": spec, "confirmed": True,
+                "confirmed_subjects": ["900001.SH", "900002.SH"]}
+        body.update(over)
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(h, h.path, body, {"user": "admin"})
+        return h.last
+
+    def _spec_with_days(self, payload, days: int) -> dict:
+        spec = json.loads(json.dumps(payload["spec"]))
+        spec["financial"]["params"]["cash_pressure"]["collection_days_delta"] = days
+        return spec
+
+    def test_reparam_creates_a_new_candidate_from_frozen_inputs(self):
+        payload, status = self._run()
+        self.assertEqual(status, 200, payload)
+        sid = payload["study_id"]
+        old_files = {p.name: p.read_bytes()
+                     for p in Path(payload["dir"]).iterdir() if p.is_file()}
+        res, status = self._reparam(sid, self._spec_with_days(payload, 20))
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertNotEqual(res["study_id"], sid, "改参必须得到新研究身份")
+        self.assertTrue(str(res["input_id"]).startswith("frozen:"), res["input_id"])
+        self.assertEqual(res["reparam_from"]["study_id"], sid)
+        self.assertEqual(res["reparam_spec_diff"],
+                         ["financial.params.cash_pressure.collection_days_delta: 10 → 20"])
+        self.assertNotEqual(res["result_hash"], payload["result_hash"])
+        self.assertFalse(res["adopted"], "新候选不等于采纳")
+        # 旧目录只读保留：字节不变、路径不变
+        self.assertEqual({p.name: p.read_bytes()
+                          for p in Path(payload["dir"]).iterdir() if p.is_file()}, old_files)
+        # 新候选的生效 spec 就是改过的 spec（不是样例、不是冻结原件）
+        self.assertEqual(res["spec"]["financial"]["params"]["cash_pressure"]
+                         ["collection_days_delta"], 20)
+        # 新候选自己能复算（同一 _compute_study、当前实现）
+        import quant_research.study as study
+        rt = study.restore_study(res["dir"])
+        self.assertTrue(rt["result_hash_matches"], rt)
+        self.assertEqual(rt["study_id"], res["study_id"])
+
+    def test_reparam_refuses_unchanged_spec_and_changed_cutoff(self):
+        payload, _ = self._run()
+        sid = payload["study_id"]
+        res, status = self._reparam(sid, json.loads(json.dumps(payload["spec"])))
+        self.assertEqual(status, 400, res)
+        self.assertEqual(res["code"], "spec_unchanged")
+        spec = self._spec_with_days(payload, 20)
+        spec["feature_cutoff"] = "2024-04-30"
+        res, status = self._reparam(sid, spec)
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "cutoff_frozen")
+        self.assertEqual(res["frozen_value"], payload["spec"]["feature_cutoff"])
+        res, status = self._reparam(sid, self._spec_with_days(payload, 20),
+                                    result_hash="0" * 64)
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "result_hash_mismatch")
+
+    def test_restore_still_wins_when_no_spec_is_sent(self):
+        """只带 study_id ＝「查看原版」：恢复分支照旧，不被改参分叉抢走。"""
+        payload, _ = self._run()
+        import web_ui
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(
+            h, h.path, {"study_id": payload["study_id"], "confirmed": True,
+                        "confirmed_subjects": ["900001.SH", "900002.SH"]}, {"user": "admin"})
+        res, status = h.last
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["status"], "restored")
+        self.assertEqual(res["study_id"], payload["study_id"])
+        self.assertNotIn("reparam_spec_diff", res)
+
+
 class TestStudyFileDownload(_Base):
     """§17.10 第 4 项「可下载」：`GET /api/research-study/file` 缝。
 

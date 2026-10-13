@@ -1,0 +1,144 @@
+{
+  "captured_at": "2026-10-11T20:34:01+08:00",
+  "head": "c85371e22040d439d2ed77113f152f87ccdc026d B3: 3×3 利润目标×天数冲击网格 + 洋河目标核查续页 + 同一入口改参",
+  "instruction": {
+    "path": "docs/evidence/20261011-c3-accept/dsh-c4-instruction.txt",
+    "sha256": "47ac7dec1c8cd777673e14add5a0c5fa4db0ab32ddf77508acca87d6c9056280"
+  },
+  "previous_evidence": "docs/evidence/20261011-b4-c3-review/",
+  "implementation": {
+    "tracked_modified": {
+      "web_ui.py": {
+        "sha256": "cc9c388800bdb4a0e95b64eba75aa2c49e61d337af856b86c71939004cf1b870",
+        "diff_numstat": "107\t0\tweb_ui.py"
+      },
+      "delivery_pipeline.py": {
+        "sha256": "f40f3f48510747c4de8ea1c6a231bdea9b5cdf44793d743fbdbe8bf6406fc87a",
+        "diff_numstat": "11\t0\tdelivery_pipeline.py"
+      },
+      "financial_analysis/continuation.py": {
+        "sha256": "6e138547c590e81be9cf565fac111daeec5923ca7cd87bd23c0e8ed66aaa6992",
+        "diff_numstat": "26\t14\tfinancial_analysis/continuation.py"
+      },
+      "financial_analysis/operators/cash_reconciliation.py": {
+        "sha256": "fd929f9ff7e2aecde0ccc507de497771053e348758abbdfe9d4fd1c8a2c0d60f",
+        "diff_numstat": "254\t0\tfinancial_analysis/operators/cash_reconciliation.py"
+      },
+      "frontend/src/pages/ResearchStudy.tsx": {
+        "sha256": "f23b7f9414893e01baada08711c68d9418a3f10d860c4935f7cb12cdc3ef0596",
+        "diff_numstat": "678\t53\tfrontend/src/pages/ResearchStudy.tsx"
+      },
+      "docs/DeepSeek执行状态.md": {
+        "sha256": "b0fa21c5623e26f9864fe0bbc21e5025cbab902c1c6435d1ebc2fe8ccbcbecb5",
+        "diff_numstat": "372\t1\tdocs/DeepSeek执行状态.md"
+      }
+    },
+    "untracked_new": {
+      "financial_analysis/research_experiment.py": {
+        "sha256": "04b021d6c2bdb532a8d0e6aef4ac684f5892f1bb3ee91c6ef8b15d4aa6f66561",
+        "lines": 1193
+      },
+      "research_report_adapter.py": {
+        "sha256": "428c9a43f7090bcdbca9d890bd36fc95b32d94230c685ac6a6b8fa4c191d4647",
+        "lines": 3154
+      },
+      "scripts/c3_experiment.py": {
+        "sha256": "a012cd35de7b2d345a40e3d55d78909bd3263f2f86a1ef725d546c1367a41eee",
+        "lines": 177
+      }
+    },
+    "frontend_dist": {
+      "frontend/dist/assets\\index-CdohwtMb.css": "27ac8758197241008261799511fe37b5459c8398f26d025efa9f0cfc2885870a",
+      "frontend/dist/assets\\index-DTzMwCGp.js": "5bbd9d739a82f257882fe99cf28970584fbdb8c30e9675fa2e35b400af201170",
+      "frontend/dist/assets\\ResearchStudy-DhGqIhJq.js": "39b5f04da9227ebf471b30a56a548f581890acd709c2ce271a1a4c277e042f73"
+    },
+    "note": "diff_numstat 是相对 HEAD c85371e 的**累计**改动（含 C3 会话遗留：cash_reconciliation.py/continuation.py），C4 本会话新增为 web_ui.py 的窄 POST＋路由、delivery_pipeline.py 的 glob 收录、ResearchStudy.tsx 的实验区，以及三个新文件。"
+  },
+  "study_files": {
+    "yanghe_c4_experiment": {
+      "files": {
+        "0af20919e6245b88/experiments/245bcd5e56ef7c5eafaf11e2.json": "8176dca48ade57ed0a7da86d976597a09007a5d7c3e8767815848471f723f245",
+        "0af20919e6245b88/experiments/245bcd5e56ef7c5eafaf11e2.md": "a567dcd468b26a83cf213e5d0519274fbb8d720caf880b52847c4380f7e70d36",
+        "0af20919e6245b88/experiments/245bcd5e56ef7c5eafaf11e2.pdf": "6554651999f9a3f270bbb99100827d9385067965903f8112ab6e1f86a3741386"
+      }
+    },
+    "c3_baselines": {
+      "files": {
+        "0af20919e6245b88/c3_experiment_002304.SZ.json": "2c4451fc81fe76a23eb8120c84de15e630c2111e5310b2a455b4f35d0e8c85fd",
+        "4dba42a6bdde9227/c3_experiment_600031.SH.json": "101dca966aa39b2eb7cbc99d564bb6752d0f5486d5e24487f02f48142cdac9f6"
+      }
+    },
+    "c3_accepted_packages": {
+      "files": {
+        "c3_sany: deliverables_20261011_183959_f38391.zip": {
+          "sha256": "d443e59c0201fea5d00630f67efc87af2c70778bb25941f8c5e2ee0087ece437",
+          "bytes": 5210401
+        },
+        "c3_yanghe: deliverables_20261011_184706_13b232.zip": {
+          "sha256": "c06a409b6f80f5fce8f3f9a9f3138cbe6f0610c7a22c197dbf51ef925a92f7a2",
+          "bytes": 5263914
+        },
+        "c2e_sany: deliverables_20261011_171519_344cb4.zip": {
+          "sha256": "d6d6b7def6b6ce44ad637d5df1d3ce648d81105c3e3081426cb3a05ff60db4bf",
+          "bytes": 5196940
+        },
+        "c2c_yanghe: deliverables_20261011_142232_080384.zip": {
+          "sha256": "f79861e758f570affdea023c14602444a906e636f937afa617554a0c31e774df",
+          "bytes": 5219121
+        }
+      }
+    }
+  },
+  "review_evidence": {
+    "c4_api_probe.py": "53d793e1124c315359c569af590cb3580e340e4e93f09eec3bf7c83a71c06f10",
+    "c4_probe2.py": "49ab30b17b64d8764767c2d6219adc8b52ec9e96355ab000454d7077a09ed569",
+    "c4_review.py": "9967a2c395899bb45e3acd2521f6c50e48ca0815aedaceee518a4b240c2b1ca0",
+    "c4_seam_probe.py": "5a30a0be06911d1d482133a5d9e5ff495d4053a416d4227a0866414c6bf763cc",
+    "results.json": "666c2f7a073b28fadfb28c61431055a5fe47a4e71830d019c5eced859524c8ca"
+  },
+  "protected_untouched_this_session": {
+    "README.md": {
+      "sha256": "07f315d57c0d460e1485208e5a03fe156c70ab6ef0571e0218a5f89bda8831c8"
+    },
+    "README.en.md": {
+      "sha256": "bc2d72672520aaabec1dafe3d5bee4002ef152fee2575d5efa964a767cc2b79a"
+    },
+    "acceptance_checker.py": {
+      "sha256": "23185477325b2708cbd9b8c5753e94754fef841e6ad41574b7e0ed960260fb62"
+    },
+    "financial_analysis/dataset.py": {
+      "sha256": "26c78eb7cc78f88ccd7de3daf3ed2c8f2d2791b9467ba6ad871aac6cc52b56fa"
+    },
+    "docs/M0完成复核与下一步修订_20260916.md": {
+      "sha256": "4bdd9d9473ff1123251d5ee69168a07e57bb05fcc72abdb180db493f302132fa"
+    },
+    "docs/总架构师执行指令.md": {
+      "sha256": "bfaedb745339d145f7736c90f4c1a8f429cc1d71b47d9bbf6b15bb32aad303c0"
+    },
+    "docs/架构监督记录.md": {
+      "sha256": "daf798d382727eb7e874899740fe2b701614231fe23fc24f7cbd0f08c9ef2614"
+    },
+    "evals/cases/auto_grown.json": {
+      "sha256": "9412b1f0bf03aa3c6f2aeaca7ad378f75fccbf6d0f710ff3081049efc5f18b68"
+    },
+    "templates.json": {
+      "sha256": "677b93fd37333744d8bcc0659c007394ca97abd15cb8df7826d328434378b2a4"
+    },
+    "trial_tasks.json": {
+      "sha256": "9636888ce9bce8ec06949d1bc7bf3d82cd801b42427111f6d7efbfee085d822d"
+    },
+    "financial_analysis/operators/operating_drivers.py": {
+      "sha256": "2b4911c4fe0d63fecd9ba3d28fb09407b84e7b49b02a56d6e43b0cc2f562986b"
+    },
+    "test_research_study_entry.py": {
+      "sha256": "2e17cb731913f3379ffd5b3aed9c1851bf36b81d122712a794fdb83bd23ae698"
+    },
+    "quant_research/study.py": {
+      "sha256": "27791806f5e07379a532bef31974d532024da0842fd17f57b3361e5c3cf8b2b5"
+    },
+    "adapters/wind_import.py": {
+      "sha256": "b1778105d8aae27a6a15aa8c397993c27b6033033776b46bdf154a000d080ca7"
+    }
+  },
+  "new_delivery_packages": "无（C4 不新增报告交付/离线样品/模型；C3 两包原样保留）"
+}

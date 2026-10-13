@@ -9010,6 +9010,176 @@ def _fmt_card_reading(name: str, value) -> str:
     return f"{name}={value:,.2f}"
 
 
+def _post_research_study_experiment(self, p, body, admin):
+    """`POST /api/research-study/experiment`：研究实验台**唯一窄入口**（C4，§18.18）。
+
+    body：`{action: "options"|"evaluate"|"save"|"open", study_id, result_hash, entity_id,
+            run_id?, view?, metric?, old_material_id?, new_material_id?, experiment_id?}`。
+
+    纪律：浏览器只传**标识与枚举**（研究/主体/run/视角/候选项/材料/已存实验 id）——
+    数字、阈值、路径与公式一律由服务端从冻结结果与登记材料解析（不传任意路径，
+    不按第一条 cash 取数）；装配走 `financial_analysis.research_experiment`（数值在
+    `reversion_ladder`、更新在 `continuation`，本接口只装配）；保存只写研究目录的
+    `experiments/`（独立内容身份，不回写 study manifest、不改 result_hash）；
+    三态原样透传，本接口不代签。
+    """
+    import financial_analysis.research_experiment as _rx
+    from pathlib import Path
+    from workspace import task_workspace
+
+    sid = str(body.get("study_id") or "").strip()
+    rh = str(body.get("result_hash") or "").strip()
+    d = _study_dir_of(sid)
+    if not d:
+        return self._json({"error": "找不到该研究产物目录"}, 404)
+    study_dir = Path(d)
+    action = str(body.get("action") or "options").strip().lower()
+    if action == "open":
+        try:
+            doc = _rx.load_experiment(study_dir=study_dir,
+                                      experiment_id=str(body.get("experiment_id") or ""))
+        except ValueError as exc:
+            return self._json({"error": f"experiment_id 形态不合法：{exc}"}, 404)
+        if not doc:
+            return self._json({"error": "没有这个已保存实验（experiment_id 为 24 位十六进制）"}, 404)
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/open",
+                  result="ok",
+                  detail=f"experiment={str((doc.get('identity') or {}).get('experiment_id'))[:12]}")
+        return self._json(doc)
+    if not rh:
+        return self._json({"error": "需要显式 result_hash（与已选研究一起传，不做隐式取最近）",
+                           "code": "selection_required"}, 400)
+    man = _rx._load_json(study_dir / "study_manifest.json")
+    if man.get("result_hash") and str(man.get("result_hash")) != rh:
+        return self._json({"error": "result_hash 与该研究的冻结登记不一致", "code": "hash_mismatch"}, 409)
+    if action not in ("options", "evaluate", "save"):
+        return self._json({"error": "action 只支持 options/evaluate/save/open"}, 400)
+    eid = str(body.get("entity_id") or "").strip()
+    if not eid:
+        # C5 入口契约（架构师 2026-10-12，§18.19）：**无主体的 `options` 只回登记主体与元数据**
+        # ——不默认取第一个主体、不扫材料、不求值、不建候选工作区；其余动作仍要显式主体。
+        # 循环的根因是「先要 entity、后给主体清单」；这里只把清单交回去，判断仍由人做。
+        if action != "options":
+            return self._json({"error": "需要 entity_id（从已选研究的主体里选）",
+                               "code": "entity_required"}, 400)
+        fin0 = _rx._load_json(study_dir / "financial.json") or {}
+        ents = sorted(str(k) for k, v in fin0.items() if isinstance(v, dict))
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/entities", result="ok",
+                  detail=f"entities={len(ents)}（无主体：只返主体与元数据）")
+        return self._json({
+            "schema": "weavemind.c3_experiment_options/1",
+            "study_id": str(man.get("study_id") or sid),
+            "result_hash": rh,
+            "entities": ents,
+            "entity_required": True,
+            "study": {
+                "schema": str(man.get("schema") or ""),
+                "feature_cutoff": str(man.get("feature_cutoff") or ""),
+                "evaluation_as_of": str(man.get("evaluation_as_of") or ""),
+                "research_state": _rx._state_of(man),
+                "human_review": man.get("human_review"),
+                "external_delivery": bool((man.get("external_delivery") or {}).get("allowed")),
+                "registered_materials": len(
+                    (((man.get("sources") or {}).get("financial") or {}).get("metadata") or {}
+                     ).get("materials") or []),
+            },
+            "next": "显式选一个主体后再取候选 run／登记材料／求值",
+        })
+    fin = _rx._load_json(study_dir / "financial.json")
+    if eid not in fin:
+        return self._json({"error": f"研究 {sid[:16]} 里没有主体 {eid}"}, 400)
+    sid16 = str(man.get("study_id") or sid)[:16]
+    # 候选工作区名＝`study-report-<sid16>-<entity_id>`（与 research_report_adapter
+    # 同一推导，带交易所后缀；不存在就不创建，候选里如实只有研究冻结 run）。
+    ws = task_workspace(f"study-report-{sid16}-{eid}", project="default")
+    if action == "options":
+        try:
+            opts = _rx.experiment_options(study_dir=study_dir, entity_id=eid,
+                                          run_id=str(body.get("run_id") or "") or None,
+                                          view=str(body.get("view") or "current"),
+                                          workspace_dir=ws)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            return self._json({"error": f"候选解析失败：{exc}", "code": "options_failed"}, 400)
+        return self._json(opts)
+    if action not in ("evaluate", "save"):
+        return self._json({"error": "action 只支持 options/evaluate/save/open"}, 400)
+    run_id = str(body.get("run_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", run_id):
+        return self._json({"error": "需要显式 run_id（从候选 run 里选；不按第一条 cash 取数）",
+                           "code": "run_required"}, 400)
+    view = str(body.get("view") or "current").strip()
+    if view not in ("current", "yoy"):
+        return self._json({"error": "view 只支持 current（本期额）或 yoy（同比贡献）"}, 400)
+    metric = str(body.get("metric") or "").strip() or None
+    if metric and not re.fullmatch(r"[a-z_]{2,48}", metric):
+        return self._json({"error": "metric 形态不合法（从候选项里选，不自由填写）"}, 400)
+    old_mid = str(body.get("old_material_id") or "").strip() or None
+    new_mid = str(body.get("new_material_id") or "").strip() or None
+    for mid, what in ((old_mid, "old_material_id"), (new_mid, "new_material_id")):
+        if mid and not re.fullmatch(r"[0-9a-f]{16}", mid):
+            return self._json({"error": f"{what} 形态不合法（登记材料 id 为 16 位十六进制）"}, 400)
+    # C5-3：显式原版实验（沿冻结读数/判据更新）。要给就只给 id，读数与判据由服务端从
+    # 冻结 JSON 读（不从材料现场重建，不用"现在的重建"冒充原假说）。
+    base_eid = str(body.get("baseline_experiment_id") or "").strip()
+    if base_eid and not re.fullmatch(r"[0-9a-f]{24}", base_eid):
+        return self._json({"error": "baseline_experiment_id 形态不合法（24 位十六进制，"
+                                    "从该研究已保存实验里选）"}, 400)
+    # C5-2：可选市场对照段。五件都从枚举/id 里选：披露事件＝登记材料 id、
+    # 行情集/日历＝已登记清单 id、评价时点＝YYYY-MM-DD；缺件在装配层如实 pending。
+    mk_in = body.get("market") if isinstance(body.get("market"), dict) else None
+    market = None
+    if mk_in:
+        market = {
+            "material_id": str(mk_in.get("material_id") or "").strip(),
+            "price_dataset_id": str(mk_in.get("price_dataset_id") or "").strip(),
+            "calendar_id": str(mk_in.get("calendar_id") or "").strip(),
+            "evaluation_as_of": str(mk_in.get("evaluation_as_of") or "").strip(),
+            "benchmark": str(mk_in.get("benchmark") or "").strip(),
+        }
+        if market["material_id"] and not re.fullmatch(r"[0-9a-f]{16}", market["material_id"]):
+            return self._json({"error": "market.material_id 形态不合法（登记材料 id 为 16 位十六进制）"}, 400)
+        for k in ("price_dataset_id", "calendar_id"):
+            if market[k] and not re.fullmatch(r"[0-9a-f]{64}", market[k]):
+                return self._json({"error": f"market.{k} 形态不合法（从已登记清单里选的 64 位十六进制）"}, 400)
+        if market["evaluation_as_of"] and not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
+                                                          market["evaluation_as_of"]):
+            return self._json({"error": "market.evaluation_as_of 需要 YYYY-MM-DD（用户显式选）"}, 400)
+        if market["benchmark"] and not re.fullmatch(r"[0-9]{6}", market["benchmark"]):
+            return self._json({"error": "market.benchmark 形态不合法（六位代码，可留空让服务端取唯一解）"}, 400)
+    try:
+        art = _rx.prepare_company_research_experiment(
+            study_dir=study_dir, study_id=str(man.get("study_id") or sid),
+            result_hash=rh, entity_id=eid, run_id=run_id, view=view, metric=metric,
+            old_material_id=old_mid, new_material_id=new_mid, workspace_dir=ws,
+            version_workspace=ws, version_task_id=f"study-report-{sid16}-{eid}",
+            baseline_experiment_id=base_eid or None, market=market)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/{eid}",
+                  result="reject", detail=str(exc)[:160])
+        return self._json({"error": f"装配未完成：{exc}", "code": "experiment_failed"}, 400)
+    if action == "save":
+        saved = _rx.save_experiment(art, study_dir=study_dir)
+        art["saved"] = saved
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/{eid}",
+                  result="ok",
+                  detail=f"experiment={saved['experiment_id'][:12]} run={run_id[:12]} "
+                         f"view={view} metric={metric or 'default'}"
+                         + (f" baseline={base_eid[:12]}" if base_eid else "")
+                         + (" market=on" if market else ""))
+    else:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/{eid}",
+                  result="ok",
+                  detail=f"evaluate run={run_id[:12]} view={view} metric={metric or 'default'}"
+                         + (f" baseline={base_eid[:12]}" if base_eid else "")
+                         + (" market=on" if market else ""))
+    return self._json(art)
+
+
 def _post_research_study_hypothesis_card(self, p, body, admin):
     """`POST /api/research-study/hypothesis-card`：把冻结产物里的读数写成**待人工确认**的假说卡。
 
@@ -9181,6 +9351,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/research-study/verify", _post_research_study_verify),
     (lambda self, p: self.path == "/api/research-study/replay", _post_research_study_replay),
     (lambda self, p: self.path == "/api/research-study/hypothesis-card", _post_research_study_hypothesis_card),
+    (lambda self, p: self.path == "/api/research-study/experiment", _post_research_study_experiment),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/recompute"), _post_task_analysis_recompute),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/adopt"), _post_task_analysis_adopt),

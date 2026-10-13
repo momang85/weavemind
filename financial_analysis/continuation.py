@@ -35,6 +35,10 @@ STATUS_UNKNOWN = "无法判断"
 # 与缓冲结构（本页自己的 ID，不在旧 judgments 目录里——它由 `compare` 随现金行一并生成）。
 J_CASH_BUFFER = "cash_buffer_structure"
 
+# 现金桥主导项身份 → 中文标签（10-11 C4：**求值与文案共用这一份**，不各写一套；
+# 旧主导项由 `readings_of.cash_driver` 给出，不是标题猜的）。
+CASH_DRIVER_LABEL = {"net_profit": "利润项", "working_capital": "营运资本项"}
+
 # 同比变化在 1 个百分点以内视为"基本不变"（不硬说方向）；分段离散度比值容差 20%
 TOLERANCE_PP = 1.0
 SPREAD_TOL = 0.2
@@ -60,7 +64,9 @@ HYPOTHESES: dict[str, dict] = {
     },
     _jd.J_CASH_WORKING_CAPITAL: {
         "title": "现金来源的**方向**延续（利润主导／营运资本主导）",
-        "condition": ("下一期同口径经营现金流变化的**主导项**是否仍是利润"
+        # 10-11 C4：主导项身份由**旧快照读数**给出（readings_of.cash_driver）——
+        # 条件不假定「仍是利润」；三一原主导是营运资本，就问营运资本。
+        "condition": ("下一期同口径经营现金流变化的**主导项**是否与上一期一致"
                       "（主导项换了才叫方向改变；缓冲大小不改变主导项身份）"),
     },
     # 10-08 复核 §2：缓冲结构是**另一项子判断**——「主导方向延续」与「缓冲是否只来自
@@ -693,9 +699,13 @@ def _decide(jid: str, e: dict, l: dict, *, tol: float,
                 return (STATUS_STRONGER,
                         f"本期半年库存量同比仍为正（{_pct(b)}）——累积未转向消化"
                         f"（上期全年 {_pct(a)}，**不作半年与全年差值**）")
+            # C5（C4 机制复核 nonblocking）：单窗口削弱**不等于**消化。本期转负只说
+            # 「本窗口不再累积」，写成消化要两窗口持续确认（判据里就是这么分开的）。
             return (STATUS_WEAKER,
-                    f"本期半年库存量同比转负（{_pct(b)}）——由上期全年的累积转为下降，"
-                    "消化出现（企业口径，不代表渠道库存）")
+                    f"本期半年库存量同比转负（{_pct(b)}）——**本窗口不再累积**"
+                    "（单窗口削弱）；是否写成库存消化要看**持续确认**：下一同口径窗口仍为负／"
+                    f"不再累积才算（上期全年 {_pct(a)}，**不作半年与全年差值**；"
+                    "企业口径，不代表渠道库存）")
         if a is None:
             return STATUS_UNKNOWN, "上期没有同口径库存量同比：不比较"
         if a > 0 and b > 0:
@@ -709,29 +719,32 @@ def _decide(jid: str, e: dict, l: dict, *, tol: float,
     if jid == _jd.J_CASH_WORKING_CAPITAL:
         # **只判方向延续**（主导项身份）；缓冲结构由 `J_CASH_BUFFER` 单独判
         # （10-08 复核 §2：别用一个整体"削弱"覆盖两者）。
+        # 10-11 C4：旧主导项是**旧快照读数**给的（洋河＝利润项、三一＝营运资本项），
+        # 条件与文案都要问「是否仍是**那一项**」——不假定利润，也不拿别家公司的身份。
         a, b = e.get("cash_driver"), l.get("cash_driver")
         if not b:
             return STATUS_UNKNOWN, "本期没有同口径的现金桥主导项：方向不比较"
-        if same_kind:
-            if a and b and a != b:
-                return (STATUS_WEAKER,
-                        f"主导项换了（{a} → {b}）：ΔOCF {_yi(e.get('ocf_change'))} → "
-                        f"{_yi(l.get('ocf_change'))} 亿元")
-            if a and b and a == b:
-                return (STATUS_STRONGER,
-                        f"主导项同向延续（{a} → {b}）：ΔOCF {_yi(e.get('ocf_change'))} → "
-                        f"{_yi(l.get('ocf_change'))} 亿元")
+        if not a:
             return STATUS_UNKNOWN, "上期没有同口径的现金桥主导项：方向不比较"
-        # 期间长度不同（全年 vs 半年）：**不作差值**，只按本期同口径读主导项身份
-        if b == "net_profit":
+        la, lb = CASH_DRIVER_LABEL.get(str(a), str(a)), CASH_DRIVER_LABEL.get(str(b), str(b))
+        if same_kind:
+            if a != b:
+                return (STATUS_WEAKER,
+                        f"主导项换了（{la} → {lb}）：ΔOCF {_yi(e.get('ocf_change'))} → "
+                        f"{_yi(l.get('ocf_change'))} 亿元")
             return (STATUS_STRONGER,
-                    f"本期半年同口径仍是**利润项主导**（{l.get('cash_np_caliber') or '净利项'} "
+                    f"主导项同向延续（{la} → {lb}）：ΔOCF {_yi(e.get('ocf_change'))} → "
+                    f"{_yi(l.get('ocf_change'))} 亿元")
+        # 期间长度不同（全年 vs 半年）：**不作差值**，只按本期同口径读主导项身份
+        if a == b:
+            return (STATUS_STRONGER,
+                    f"本期半年同口径主导项仍是**{la}**（{l.get('cash_np_caliber') or '净利项'} "
                     f"{_yi(l.get('cash_np'))} 亿元 vs 营运资本项 "
-                    f"{_yi(l.get('cash_wc'))} 亿元）——上期全年的利润主导方向延续"
+                    f"{_yi(l.get('cash_wc'))} 亿元）——上期全年（{la}）的主导方向延续"
                     "（**不作半年与全年差值**）")
         return (STATUS_WEAKER,
-                f"本期半年主导项是 {b}（净利项 {_yi(l.get('cash_np'))}、"
-                f"营运资本项 {_yi(l.get('cash_wc'))} 亿元）：上期全年的利润主导方向未延续")
+                f"本期半年主导项是 {lb}（净利项 {_yi(l.get('cash_np'))}、"
+                f"营运资本项 {_yi(l.get('cash_wc'))} 亿元）：上期全年的 {la} 主导方向未延续")
     if jid == J_CASH_BUFFER:
         # **缓冲结构**：本期**发生额**（不是同期调节项变化）指向"只靠应付"是否还成立。
         lines = l.get("wc_lines") or {}
@@ -857,6 +870,85 @@ def compare(earlier: dict, later: dict, *, limit: int = 3,
     }
 
 
+def compare_frozen(frozen: dict, later: dict, *, tolerance_pp: float = TOLERANCE_PP,
+                   baseline_ref: dict | None = None) -> dict:
+    """**原判断沿已冻结实验**（C5-3）：较早一侧不从材料现场重建，而是照抄冻结页里的
+    `readings.earlier` 与每行 basis/materials/next_watch/alternatives/判据；只对较新
+    快照算同口径读数并重新判定（`_decide` 与 `compare()` 同源）。这样不会用
+    "现在的重建"冒充用户当时存下的原假说；判据哈希沿用冻结值，可逐位核对。
+
+    `frozen` ＝已冻结实验的 `disclosure_update.page`（weavemind.research_continuation/1）；
+    `later` ＝新材料的 snapshot（与 `compare()` 的 `later` 同型）。
+    """
+    frozen_rows = {str(r.get("judgment_id") or ""): r
+                   for r in (frozen.get("hypotheses") or [])}
+    e_read = dict((frozen.get("readings") or {}).get("earlier") or {})
+    l_read = readings_of(later)
+    same_kind = str(e_read.get("period_kind") or "") == str(l_read.get("period_kind") or "")
+    rows: list[dict] = []
+
+    def _frozen_row(jid: str, f: dict) -> dict:
+        spec = HYPOTHESES.get(jid) or {}
+        status, reason = _decide(jid, e_read, l_read, tol=tolerance_pp,
+                                 same_kind=same_kind)
+        return {
+            "judgment_id": jid,
+            "proposition": proposition_of(jid),
+            "hypothesis": str(f.get("hypothesis") or spec.get("title") or ""),
+            "basis": str(f.get("basis") or ""),
+            "basis_readings": list(f.get("basis_readings") or ())[:2],
+            "observation_condition": str(f.get("observation_condition") or spec.get("condition") or ""),
+            "basis_source": dict(f.get("basis_source") or frozen.get("earlier") or {}),
+            "new_readings": _new_readings(jid, l_read),
+            "new_locators": _new_locators(jid, l_read),
+            "status": status,
+            "status_reason": reason,
+            "decision_basis": ("同期同口径：原判据沿**已冻结实验**（baseline_experiment_id 显式沿用）"
+                               if same_kind else
+                               "期间长度不同：只按本期同口径读数对假说判方向，不相减；"
+                               "原判据沿**已冻结实验**"),
+            "next_watch": [str(x) for x in (f.get("next_watch") or ())][:3],
+            "alternatives": [str(a) for a in (f.get("alternatives") or ())][:2],
+            "materials": str(f.get("materials") or ""),
+            "criteria": dict(f.get("criteria") or {}),
+            "criterion_sha256": str(f.get("criterion_sha256") or ""),
+            "earlier_side_source": "experiments 冻结读数（不现场重建）",
+        }
+
+    for jid in frozen_rows:
+        if not HYPOTHESES.get(jid):                    # 目录里没有的 ID 不硬编
+            continue
+        rows.append(_frozen_row(jid, frozen_rows[jid]))
+        if jid == _jd.J_CASH_WORKING_CAPITAL and (l_read.get("wc_lines") or {}):
+            _buf = _frozen_row(J_CASH_BUFFER, frozen_rows.get(J_CASH_BUFFER) or
+                               frozen_rows[jid])
+            _buf["proposition"] = proposition_of(jid)
+            rows.append(_buf)
+    return {
+        "schema": "weavemind.research_continuation/1",
+        "baseline": dict(baseline_ref or {}),
+        "propositions": [{"name": n, "judgment_ids": list(ids)} for n, ids in PROPOSITIONS],
+        "period_kind": {"earlier": e_read.get("period_kind"),
+                        "later": l_read.get("period_kind"), "same": same_kind},
+        "earlier": dict(frozen.get("earlier") or {}),
+        "later": {"label": later.get("label"), "source": later.get("source"),
+                  "dataset": later.get("dataset"),
+                  "runs": {k: str(_jd._attr(v, "run_id"))
+                           for k, v in (later.get("runs") or {}).items()}},
+        "hypotheses": rows,
+        "overlap_check": {"skipped": True,
+                          "reason": ("较早一侧来自冻结读数（无现场快照），不重算重叠检查；"
+                                     "重叠口径沿用基线实验自己冻结的那份")},
+        "readings": {"earlier": e_read, "later": l_read},
+        "historical_note": ("原判断沿**已冻结实验**（显式 baseline_experiment_id）：较早一侧的"
+                            "读数、判据与下一观察都照抄冻结页，不由本次重放重建；本期读数只改变"
+                            "「压力/结构是否延续」，不推翻已发生的事实；上期年度值与本期半年值"
+                            "**不相减**（期间长度不同）。"),
+        "limits": list(LIMITS),
+        "next_watch": [w for r in rows for w in (r.get("next_watch") or [])][:5],
+    }
+
+
 def _old_version_identity(ws, task_id: str) -> dict:
     """**旧选版/旧冻结判断的身份**——更新的"较早侧"由它决定，不由标题猜。
 
@@ -881,7 +973,10 @@ def _old_version_identity(ws, task_id: str) -> dict:
                                      or v.identity_id()),
             "body_sha256": str(getattr(v, "version_id", "") or ""),
             "accepted_body_sha256": str(acc.get("report_sha256") or ""),
-            "acceptance_ok": (bool(acc.get("pass")) if acc else None),
+            # 10-11 C4：验收判定用**真实字段**（acceptance.overall == "pass"），
+            # 不再误读不存在的 `pass` 键而恒为 False。
+            "acceptance_ok": (str(acc.get("overall") or "") == "pass") if acc else None,
+            "acceptance_overall": str(acc.get("overall") or ""),
             "created_at": float(getattr(v, "created_at", 0) or 0),
         })
     try:

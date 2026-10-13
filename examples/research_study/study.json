@@ -1,0 +1,38 @@
+{
+  "schema": "weavemind.study_spec/1",
+  "name": "模拟两公司经营、事件与风险研究",
+  "synthetic": true,
+  "feature_cutoff": "2025-04-30",
+  "evaluation_as_of": "2025-06-30",
+  "benchmark": "900300.SH",
+  "financial": {
+    "file": "financials.csv",
+    "metadata": {"source": "synthetic_fixture", "synthetic": true, "license": "synthetic_internal_only"},
+    "periods": [2023, 2024],
+    "models": ["scenario_sensitivity", "cash_pressure", "cash_quality"],
+    "scenario_params": {"revenue_growth": 0.0, "gross_margin_delta": 0.0},
+    "params": {"cash_pressure": {"collection_days_delta": 10, "inventory_days_delta": 10}}
+  },
+  "market": {
+    "file": "daily_prices.csv",
+    "metadata": {
+      "source": "synthetic_fixture",
+      "currency": "CNY",
+      "unit": "元",
+      "adj_basis": "不复权",
+      "license": "synthetic_internal_only"
+    }
+  },
+  "calendar": {"file": "calendar.csv"},
+  "events": {"file": "news.json"},
+  "allow_unadjusted": true,
+  "event_windows": [1, 5, 20],
+  "backtest": {
+    "universe": ["900001.SH", "900002.SH"],
+    "rebalance": "buy_and_hold",
+    "initial_cash": 100000,
+    "holdout_start": "2025-05-15"
+  },
+  "credit_labels": {"file": "credit_labels.json"},
+  "fraud_labels": {"file": "fraud_labels.json"}
+}

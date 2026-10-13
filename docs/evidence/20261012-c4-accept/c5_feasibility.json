@@ -1,0 +1,230 @@
+{
+  "reviewed_at": "2026-10-12",
+  "scope": "只读C5产品可行性；直接读取缓存行情/日历/官方材料并调用现有event_calendar/event_returns两个事件一次；未改实现、未联网、未操作UI、未重跑旧算法测试",
+  "decision": "C4普通用户闭环验收后，C5以内部真实研究先形成“经营证据×市场反应”实验页。当前真实行情足够两个事件，但无机构授权集；不让Wind等待阻断内部新能力，也不把许可改写成已授权外发。",
+  "innovation": {
+    "name": "判断更新与市场错位观察",
+    "reader_value": "把旧假说、披露怎样支持/削弱它、市场到底涨跌还是仅随大盘、下一条该核资料放在同一研究中；研究者能看到“经营事实有变化，但股价表象可能只是市场因素”。",
+    "first_real_example": "洋河2025H1：销量同比−32.35%支持收缩延续，企业成品库存同比−33.96%削弱累积；5日股价+1.1428%、沪深300+5.4273%、相对−4.0639%。单看股价上涨会遮住相对落后；库存减少只指企业成品，不能外推渠道去库存。",
+    "second_real_example": "洋河2025年报：实际利润/现金下滑与冻结目标未实现的年度兑现另页；1/5/20日相对−0.5238%/−4.6894%/−10.8154%。与H1对照保持两事件、两财务期间，不把年度信息倒灌到H1。",
+    "boundary": "支持/削弱是对具体机制假说的证据状态，绝不是利好/利空信号，更不是买卖判断；市场相对表现不是机制因果或alpha。"
+  },
+  "actual_data": {
+    "market": {
+      "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+      "source": "akshare",
+      "license": "免费源·仅内部试验",
+      "adj_basis": "前复权(qfq)",
+      "date_range": [
+        "2023-01-03",
+        "2026-09-30"
+      ],
+      "rows": 2724,
+      "instruments": [
+        "000300",
+        "002304",
+        "600031"
+      ],
+      "imported_at": "2026-10-05T16:24:59+08:00"
+    },
+    "rows_sha256": "1a6e5d7c008cf9b63cc99ca9d4d3c40365f221490ce552a4b63eb1eade34c4e1",
+    "calendar_id": "49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435",
+    "calendar_range": [
+      "1990-12-19",
+      "2026-12-31"
+    ],
+    "institutional_authorized_dataset_found": false,
+    "coverage": "2025-08-19和2026-04-28锚点、其后第1/5/20交易日股票002304与基准000300全部有行；不存在需猜停牌的缺行。",
+    "evidence": "c5_market_window_check.json",
+    "events": [
+      {
+        "material_id": "2ce860dddd94e5a6",
+        "date": "2025-08-19",
+        "anchor": {
+          "date": "2025-08-19",
+          "close": 70.88
+        },
+        "points": [
+          {
+            "offset": -1,
+            "date": "2025-08-19",
+            "close": 70.88,
+            "return": null,
+            "benchmark_return": null,
+            "excess_return": null,
+            "state": "anchor",
+            "note": "锚点（价格起点）：无收益读数，仅用于定位",
+            "unavailable": ""
+          },
+          {
+            "offset": 0,
+            "date": "2025-08-20",
+            "close": 70.69,
+            "return": -0.002681,
+            "benchmark_return": 0.011371,
+            "excess_return": -0.013894,
+            "state": "observed",
+            "unavailable": ""
+          },
+          {
+            "offset": 4,
+            "date": "2025-08-26",
+            "close": 71.69,
+            "return": 0.011428,
+            "benchmark_return": 0.054273,
+            "excess_return": -0.040639,
+            "state": "observed",
+            "unavailable": ""
+          },
+          {
+            "offset": 19,
+            "date": "2025-09-16",
+            "close": 69.17,
+            "return": -0.024125,
+            "benchmark_return": 0.071024,
+            "excess_return": -0.088839,
+            "state": "observed",
+            "unavailable": ""
+          }
+        ],
+        "window_state": "observed",
+        "coverage_gaps": {
+          "002304": [],
+          "000300": []
+        },
+        "reading_hash": "b6b00be22c57924603aab47d407582b2cd529f787dfb985a3b5b1d94e787dccc",
+        "delivery_eligible": false
+      },
+      {
+        "material_id": "ee4429eecac66f50",
+        "date": "2026-04-28",
+        "anchor": {
+          "date": "2026-04-28",
+          "close": 47.68
+        },
+        "points": [
+          {
+            "offset": -1,
+            "date": "2026-04-28",
+            "close": 47.68,
+            "return": null,
+            "benchmark_return": null,
+            "excess_return": null,
+            "state": "anchor",
+            "note": "锚点（价格起点）：无收益读数，仅用于定位",
+            "unavailable": ""
+          },
+          {
+            "offset": 0,
+            "date": "2026-04-29",
+            "close": 47.95,
+            "return": 0.005663,
+            "benchmark_return": 0.010958,
+            "excess_return": -0.005238,
+            "state": "observed",
+            "unavailable": ""
+          },
+          {
+            "offset": 4,
+            "date": "2026-05-08",
+            "close": 46.53,
+            "return": -0.024119,
+            "benchmark_return": 0.023896,
+            "excess_return": -0.046894,
+            "state": "observed",
+            "unavailable": ""
+          },
+          {
+            "offset": 19,
+            "date": "2026-05-29",
+            "close": 43.72,
+            "return": -0.083054,
+            "benchmark_return": 0.028144,
+            "excess_return": -0.108154,
+            "state": "observed",
+            "unavailable": ""
+          }
+        ],
+        "window_state": "observed",
+        "coverage_gaps": {
+          "002304": [],
+          "000300": []
+        },
+        "reading_hash": "3948004ceb245b8429dc13de35bf1046bc6828ad057b9ce4546cf14a2b62f389",
+        "delivery_eligible": false
+      }
+    ]
+  },
+  "minimal_interfaces": {
+    "input": "显式study_id/result_hash/entity_id/experiment_id/new_material_id/price_dataset_id/calendar_id/evaluation_as_of；服务端取已登记材料和冻结数据，不接浏览器数字或任意路径。",
+    "analysis_reuse": "financial_analysis.research_experiment.prepare_company_research_experiment承接C4旧/新快照和判据，选材料→quant_research.event_calendar.from_records/to_event_list→event_returns.compute。只增加小装配对象，不在report_adapter增公式；不能重用现company_view.price的固定目标年度年报事件来冒充H1。",
+    "price_reuse": "沿quant_research.study._market_binding已明确的读取/哈希协议，冻结选定数据id、rows.csv字节hash、日历sessions.csv字节hash、许可/复权/来源、benchmark=000300与offsets=[0,4,19]；market_history.load与trading_calendar.load按id，不隐式latest。报告adapter.price_observation已有冻结绑定逻辑可作为复用接缝，别搬它整块或再建引擎。",
+    "time_semantics": "旧财务依据截止2025-04-30；材料公开事件日2025-08-19或2026-04-28；行情评价截止2026-09-30（当前缓存上界）分别保存。价格特征锚点只取事件日或前最后交易日，事件后第1/5/20交易日窗口；日级公开时间不猜盘中，使用保守下一交易日。当前生成时刻2026-10-12与历史公开时间分开，标历史重建。",
+    "relative_formula": "沿现算子excess_return=(1+stock_return)/(1+benchmark_return)-1（不是简单两百分比相减）；首屏2位，原读数/实际交易日/锚点保底稿。",
+    "ui": "现ResearchStudy实验区增加一个折叠“市场对照”；选择H1或年报已登记材料，点击计算，展示同一三列股票/基准/相对的1/5/20日表或小图，旁边保留机制支持/削弱与一项下一核查。不给支持状态套看多颜色，不新增导航页。",
+    "save": "C4独立实验identity/save/load扩一块可选market_comparison，hash覆盖所选材料/旧快照/行情绑定/公式版本/实际窗口；重开显示同版。原study/result/旧包不回写。内部研究快照可留完整受限读数。quant.publish.store_reading/event_returns及external_delivery_gate继续唯一许可门，不旁路通过analysis实验JSON把受限行情读数带进外发包。",
+    "delivery": "当前免费源仅内部视图和研究快照。对外投影必须将市场读数及其摘要/JSON从新增analysis或报告成员一并去除/写待适用授权，沿现许可门；不能只移quant目录却让同数从新experiment或正文泄露。未来适用授权CSV到达后明确选择新数据集生成新身份，不修改旧集license。"
+  },
+  "finite_execution": [
+    "先C4真实UI交审，若GUI具体阻塞，只允许一次窄恢复；已完成计算/身份/冻结不重复复测。",
+    "第一有限实现：一个可选market_comparison装配，H1事件一次正门求值；复用旧算子，前端同页三窗口及支持/削弱上下文。",
+    "第二个实际读数：同页选择年报事件，显示不同反应，年度兑现与H1分开；允许三一续页仍pending，不为凑异行业案例取数或伪造新材料。",
+    "保存/重开绑定同一读数；有限验两个材料错配/两公司错配拒绝、已成熟缺点不补0、一份未授权外发投影无重复泄露，禁止全仓测试和重复原日历收益算法。",
+    "完成一页内部行动记录与外发安全投影，停等验收；别开放泛回测/选股/撮合/新数据库阶段。"
+  ],
+  "follow_on": "C5能正常使用后再用少量已缓存且窗口完整的披露扩成6–10个历史研究实验，以同一可检验机制与基准观察比较，先报告异同与缺项而不做策略收益宣传。授权Wind到达再接选定行情，信用/反欺诈仍由真实标签与合作客户触发。",
+  "not_verified": [
+    "C4普通GUI闭环由root单独验证",
+    "当前行情来源crosscheck是历史账，未联网重校市场价格",
+    "未来机构授权权限、Wind字段与日期范围未收到",
+    "真正事前信号/策略有效性/经济因果/用户省时未证明"
+  ],
+  "optional_baseline_case": {
+    "evidence": "c5_sany_optional_window.json",
+    "purpose": "三一旧2024年报的既有基线市场对照，非新材料更新；不阻断C5两事件正门完成",
+    "points": [
+      {
+        "offset": -1,
+        "date": "2025-04-18",
+        "close": 18.38,
+        "return": null,
+        "benchmark_return": null,
+        "excess_return": null,
+        "state": "anchor",
+        "note": "锚点（价格起点）：无收益读数，仅用于定位",
+        "unavailable": ""
+      },
+      {
+        "offset": 0,
+        "date": "2025-04-21",
+        "close": 18.42,
+        "return": 0.002176,
+        "benchmark_return": 0.003276,
+        "excess_return": -0.001096,
+        "state": "observed",
+        "unavailable": ""
+      },
+      {
+        "offset": 4,
+        "date": "2025-04-25",
+        "close": 18.29,
+        "return": -0.004897,
+        "benchmark_return": 0.003836,
+        "excess_return": -0.0087,
+        "state": "observed",
+        "unavailable": ""
+      },
+      {
+        "offset": 19,
+        "date": "2025-05-21",
+        "close": 18.21,
+        "return": -0.009249,
+        "benchmark_return": 0.038133,
+        "excess_return": -0.045642,
+        "state": "observed",
+        "unavailable": ""
+      }
+    ],
+    "note": "2025-04-18年报事件，现金营运资本主导而市场价格反应单列；不能因相对上涨称营运资本机制获得市场因果证明。"
+  }
+}

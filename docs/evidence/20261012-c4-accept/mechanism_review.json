@@ -1,0 +1,54 @@
+{
+  "reviewed_at": "2026-10-12",
+  "reviewer": "c4_mechanism_accept_1012",
+  "scope": "C4 mechanism assembly, continuation incremental changes, frozen Yanghe experiment 245bcd5e56ef7c5eafaf11e2, and C4 submitted evidence. Read-only implementation review; one minimal pure-function counterexample; no old suites, GUI, network, credentials, or implementation writes.",
+  "verdict": "Accept the current historical-material replay sample with explicitly bounded claims. Two concrete seams should accompany the next useful capability; do not declare preserved-user-hypothesis updating or a single executable criteria definition complete.",
+  "verified": [
+    {
+      "check": "Frozen artifact independent content identity",
+      "result": "pass",
+      "detail": "experiment_identity(artifact).content_sha256 independently equals stored identity.content_sha256; experiment_id=245bcd5e56ef7c5eafaf11e2. No rewrite occurred."
+    },
+    {
+      "check": "Chronological same-company source identity",
+      "result": "pass",
+      "detail": "Old FY2024 material f42e747c73850b59 is Yanghe 002304.SZ, disclosed 2025-04-29, periods 2023/2024, text_sha256 a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0. New H1 material 2ce860dddd94e5a6 is the same company, disclosed 2025-08-19, text_sha256 972893976794d56dd4ce9922d220561710a4196346d0b22adeb395f21797e1e9. Local registered doc.json exists for each and matches recorded source metadata. Old cutoff is 2025-04-30."
+    },
+    {
+      "check": "Real supported and weakened observations",
+      "result": "pass_with_existing_validation_scope",
+      "detail": "Frozen sample reports tax-buffer, sales-contraction, and profit cash-driver persistence as strengthened; enterprise inventory accumulation and payable-only buffer as weakened. H1 inventory -33.96% with source locator p11 and sales -32.35% p11 are explicit newer readings. H1 profit cash component -36.12 yi (1 yi = 100 million yuan) versus working capital +24.01 yi preserves the prior profit driver; cash buffer weakens because current receivable adjustment releases +6.86 yi while payable consumes 56.68 yi. Annual versus H1 amounts are not directly subtracted. This review checked identity and rule linkage; it did not redo prior C3 source extraction/calculation validation."
+    },
+    {
+      "check": "Company-specific old cash-driver identity",
+      "result": "pass",
+      "detail": "continuation._decide uses old_readings.cash_driver, not fixed profit text. Same-kind and different-duration paths compare old and new identities. mechanism_criteria names old working-capital driver for Sany and old profit driver for Yanghe."
+    }
+  ],
+  "actionable_findings": [
+    {
+      "priority": "necessary_seam",
+      "title": "Displayed cash weakening condition and evaluator disagree",
+      "files": ["financial_analysis/research_experiment.py:327", "financial_analysis/continuation.py:715"],
+      "evidence": "For old={cash_driver:working_capital, ocf_change:1000000000}, new={cash_driver:working_capital, ocf_change:-1000000000}, mechanism_criteria.weaken_single includes 'or delta OCF turns from positive to negative', but continuation._decide(..., same_kind=True) returns strengthened because the driver identity remains working_capital.",
+      "impact": "A research user can see a weakening threshold satisfied while the machine calls the same hypothesis strengthened. Current Yanghe frozen sample is unaffected because its old delta OCF is already negative.",
+      "recommended_minimum": "Keep this cash card about driver identity alone and remove the extra unevaluated delta-OCF sign weakening clause. If a cash-growth-direction hypothesis is later valuable, give it its own explicit research identity; do not overload this card or build a new general rules framework. Add only the reproduced seam check."
+    },
+    {
+      "priority": "capability_scope",
+      "title": "Old snapshot means reconstructed material snapshot, not a selected prior frozen hypothesis",
+      "files": ["financial_analysis/research_experiment.py:503", "financial_analysis/research_experiment.py:744", "web_ui.py:9013", "frontend/src/pages/ResearchStudy.tsx:1450"],
+      "evidence": "Ordinary API accepts old_material_id/new_material_id only. _mechanism_block calls _snap_of(old_doc) and recomputes old judgments with current code. No old_snapshot_id input is consumed and no previously saved old hypothesis/criterion state is loaded. The result stores a snapshot hash but not the full original baseline snapshot. UI 'old mechanism snapshot' currently selects a material ID.",
+      "impact": "The sample is a reproducible historical-material replay with current algorithms. It is not yet a user-preserved original-hypothesis update. A later algorithm change can reconstruct different old judgments from the same old material.",
+      "recommended_minimum": "Label the current action as historical material replay. For the next user capability, reuse the existing content-addressed experiment file to freeze a small baseline readings + hypothesis + criteria + source identity object, accept its explicit baseline ID, then compare new disclosure to that immutable baseline without recomputing the old judgment. No new database, worker, service, or DSL."
+    }
+  ],
+  "nonblocking_observation": "The inventory update reason still says 'digestion appears' for a single H1 decline while the displayed confirmed threshold requires two windows. Prefer 'this window no longer accumulates; confirmation pending' as part of the same concise user-capability pass. Do not turn this into a standalone broad wording campaign.",
+  "unverified": [
+    "Actual authenticated browser sequence and user comprehension",
+    "Prospective user-authored hypothesis freezing and updating",
+    "New independent source-number extraction or prior C3 cash-model recalculation",
+    "Two-window confirmation tracking; current artifact has one update window and explanatory confirmation text"
+  ],
+  "next_stage_value": "Use the accepted historical replay to ship a preserved-baseline research action: choose a mechanism, freeze it, ingest a new disclosure, show exactly which unchanged criterion is supported or weakened, and expose the existing cash reversion boundary. This yields a durable research workflow rather than additional static reports."
+}

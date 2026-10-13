@@ -1,0 +1,10 @@
+[
+  {
+    "record_id": "mock-fraud-1", "account_id": "mock-account-1",
+    "decision_at": "2025-01-15", "synthetic": true,
+    "features": [{"name": "transaction_count_1h", "value": 8, "account_id": "mock-account-1", "available_at": "2025-01-14"}],
+    "label": 1, "label_available_at": "2025-02-20", "outcome_end": "2025-02-15",
+    "label_definition": "模拟人工调查确认交易欺诈", "horizon_days": 31,
+    "authorization": {"internal": true, "training": true, "reference": "synthetic_fixture_only"}
+  }
+]

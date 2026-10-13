@@ -1,0 +1,170 @@
+{
+ "scope": "C5-4 探针：显式选版实际内部导出（两次）＋许可门覆盖 market 读数",
+ "export_c4_frozen": {
+  "experiment_id": "245bcd5e56ef7c5eafaf11e2",
+  "zip": "deliverables_20261012_115504_387b7f.zip",
+  "zip_exists": true,
+  "produced_now": false,
+  "matched_existing": [
+   "deliverables_20261012_115427_9434fb.zip",
+   "deliverables_20261012_115504_387b7f.zip"
+  ],
+  "contains_full_json": true
+ },
+ "export_c5_update": {
+  "experiment_id": "80693f9870e8337f394fcf49",
+  "zip": "deliverables_20261012_115505_6b1386.zip",
+  "zip_exists": true,
+  "produced_now": false,
+  "matched_existing": [
+   "deliverables_20261012_114516_71c308.zip",
+   "deliverables_20261012_115505_6b1386.zip"
+  ],
+  "withheld": true
+ },
+ "checks": [
+  {
+   "check": "B0 选中的新实验确实带 market 段且免费源不可对外",
+   "ok": true,
+   "detail": "delivery_eligible=False"
+  },
+  {
+   "check": "A1 无 quant／无 market 段 → 原样返回、不产结论",
+   "ok": true,
+   "detail": "info=None"
+  },
+  {
+   "check": "B1 market 读数受限 → 该成员移出包外",
+   "ok": true,
+   "detail": "members=['analysis/q1_followup_002304.SZ.md', 'quant/EXTERNAL_DELIVERY_RESTRICTION.md', 'report/README.md']"
+  },
+  {
+   "check": "B2 其余成员原样保留（逐字节）",
+   "ok": true,
+   "detail": "['analysis/q1_followup_002304.SZ.md', 'quant/EXTERNAL_DELIVERY_RESTRICTION.md', 'report/README.md']"
+  },
+  {
+   "check": "B3 限制说明随包并列出被移出成员与 sha256",
+   "ok": true,
+   "detail": "note arcs=['quant/EXTERNAL_DELIVERY_RESTRICTION.md']"
+  },
+  {
+   "check": "B4 判据＝market_comparison 自带的 delivery_eligible（不改许可口径）",
+   "ok": true,
+   "detail": "market_comparison.delivery_eligible（event_returns 按数据源许可算）"
+  },
+  {
+   "check": "C1 market 段缺 delivery_eligible ⇒ fail closed（不默认放行）",
+   "ok": true,
+   "detail": "members=['analysis/q1_followup_002304.SZ.md', 'quant/EXTERNAL_DELIVERY_RESTRICTION.md', 'report/README.md']"
+  },
+  {
+   "check": "C2 无 market 段的 analysis 成员零影响",
+   "ok": true,
+   "detail": "info=None"
+  },
+  {
+   "check": "D1 显式选 C4 冻结实验：包真实存在且机器验收 pass（首次由本探针现出包）",
+   "ok": true,
+   "detail": "zip=deliverables_20261012_115504_387b7f.zip fresh=False hits=2"
+  },
+  {
+   "check": "D2 包内完整实验 JSON 与 experiments/245bcd….json **逐字节相同**",
+   "ok": true,
+   "detail": "8176dca48ade57ed vs 8176dca48ade57ed"
+  },
+  {
+   "check": "D3 manifest 同源：PACKAGE_MANIFEST.files 记下同一 sha256",
+   "ok": true,
+   "detail": "8176dca48ade57ed"
+  },
+  {
+   "check": "D4 正文同源：包内 report.md 字节哈希＝manifest 的 delivered_md_sha256",
+   "ok": true,
+   "detail": "794d886e548eee07"
+  },
+  {
+   "check": "D5 附件 md 随包（同一实验渲染稿）且无许可门限制说明（无 market 段不触发）",
+   "ok": true,
+   "detail": "md=True note=False"
+  },
+  {
+   "check": "D6 三态如实：未采纳/未复核/不对外",
+   "ok": true,
+   "detail": "fresh=False ext=None"
+  },
+  {
+   "check": "D7 版本账本：包内正文 → 交付记录 → 该版机器验收 overall=pass",
+   "ok": true,
+   "detail": "overall=pass aligned=True"
+  },
+  {
+   "check": "E1 显式选 C5 新实验：包真实存在且机器验收 pass（首次由本探针现出包）",
+   "ok": true,
+   "detail": "zip=deliverables_20261012_115505_6b1386.zip fresh=False hits=2"
+  },
+  {
+   "check": "E2 受限实验 JSON 成员被许可门拦下（不在包内）",
+   "ok": true,
+   "detail": "['analysis/analysis_runs.json', 'analysis/c3_experiment_002304.SZ.md', 'analysis/context.json', 'analysis/dataset.json', 'analysis/q1_followup_002304.SZ.md', 'analysis/research_inputs.json']"
+  },
+  {
+   "check": "E3 限制说明在包内并记下被移出成员与 sha256",
+   "ok": true,
+   "detail": "True"
+  },
+  {
+   "check": "E4 manifest 记录 withheld 该成员 sha256（受限逐条可核，不静默）",
+   "ok": true,
+   "detail": "allowed=False withheld=['analysis/c3_experiment_002304.SZ.json']"
+  },
+  {
+   "check": "E5 工作区 staging 的实验 JSON 与 experiments/80693f….json **逐字节相同**（内部保存成立）",
+   "ok": true,
+   "detail": "b46e63fbba824495 vs b46e63fbba824495"
+  },
+  {
+   "check": "E6 context.json/公司视图同一实验 id（一次选定贯穿正文/附件/视图）",
+   "ok": true,
+   "detail": "ctx=80693f9870e8337f394fcf49 src=显式 experiment_id（解析一次贯穿正"
+  },
+  {
+   "check": "E7 附件 md 与同一实验同源（同 run＋新截止 2026-04-28／历史重建=False）",
+   "ok": true,
+   "detail": "True: # C3 研究实验台附件（洋河股份 002304）\n\n- schema：`weavemind.c3_experiment/1`\n- run：`370dba92a"
+  },
+  {
+   "check": "E8 C5 不另开未设门的路：context/附件 md 不含 market 块或窗口标签",
+   "ok": true,
+   "detail": "ctx has mc=False md leaks=[]"
+  },
+  {
+   "check": "E9 C2b 既有价格窗表带许可边界声明（如实标注，非 C5 新增旁路）",
+   "ok": true,
+   "detail": "许可边界=True"
+  },
+  {
+   "check": "E10 正文同源：包内 report.md 字节哈希＝manifest 的 delivered_md_sha256",
+   "ok": true,
+   "detail": "4539d9be59a6edb2"
+  },
+  {
+   "check": "E11 版本账本：包内正文 → 交付记录 → 该版机器验收 overall=pass",
+   "ok": true,
+   "detail": "overall=pass aligned=True"
+  },
+  {
+   "check": "F1 既有包逐个不动（sha256 前后一致；同版重跑诚实复用）",
+   "ok": true,
+   "detail": "before=14 after=14 new=[]"
+  },
+  {
+   "check": "F2 无 market 段的实验字节过门零影响（C4 冻结原版不被拦）",
+   "ok": true,
+   "detail": "info=None"
+  }
+ ],
+ "total": 28,
+ "passed": 28,
+ "fails": []
+}

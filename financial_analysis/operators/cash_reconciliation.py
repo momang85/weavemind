@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+import decimal
+import re
 from decimal import Decimal
 
 from ..contracts import (
@@ -132,6 +134,14 @@ def _d(value) -> Decimal:
 
 def _q(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.01")))
+
+
+_YI = Decimal("100000000")
+
+
+def _yi_str(value: Decimal) -> str:
+    """亿元字面（到 0.001 元：1e-11 亿元；只改显示，精确输入仍以元为键）。"""
+    return str((value / _YI).quantize(Decimal("0.00000000001")))
 
 
 def _split(total: Decimal, first: Decimal) -> tuple[float, float]:
@@ -451,3 +461,247 @@ def components_gold(dataset, params: dict | None = None) -> dict:
         "change_in_net_profit_negated": (_q(-d_np), unit),
     }
     return out
+
+
+# ---------------------------------------------------------------- 回撤实验台（C3，规划 §18.17）
+#
+# **同一个带符号公式，四个不同判断**：C′(λ)=C−λa，λ∈[0,1]。
+# 本期 C＝披露经营现金流，a＝所选**本期带符号调节项**；同比 C＝Δ经营现金流，a＝所选**同比带符号贡献**。
+# 其他项目固定。λ*=C/a 只在域内作为归零阈值；域外**范围不可达**（照实写，不夹逼到 0/1）；
+# a=0、缺项、口径不一**不造数**。解除负项＝去掉拖累的静态反事实，**不是**下一期改善预测、
+# 期末余额、融资缺口、供应商条款或因果证明。
+#
+# 计算只在本层（消费**选定 ModelRun**），报告装配层只装配同一份 JSON，不再堆公式。
+
+REVERSION_SCHEMA = "weavemind.cash_reversion_experiment/1"
+REVERSION_FRACTIONS = (0.0, 0.5, 1.0)
+REVERSION_LAMBDA_LABEL = "回撤比例 λ"
+_VIEW_CURRENT = "current"
+_VIEW_YOY = "yoy"
+_VIEW_LABELS = {_VIEW_CURRENT: "本期额（披露 OCF）", _VIEW_YOY: "同比贡献（ΔOCF）"}
+
+REVERSION_BOUNDARY = (
+    "本实验是**已披露现金构成的条件敏感度**（会计反事实）：其余调节项固定，只把**一项**带符号"
+    "贡献按比例回撤，看既有现金水平／同比变化是否仍成立——**不是**下一期现金预测、期末余额、"
+    "融资缺口、概率或投资结论。",
+    "回撤负贡献＝撤掉该负项后的静态反事实，不是下一期改善预测；撤回／解除都**不能判断**"
+    "供应商账期、结算条款、回款质量或因果。合计行是会计位置，不是供应商条款证据。",
+    "λ∈[0,1]，本函数只在域内取值；λ*=C/a 只在 [0,1] 内作为归零阈值报告，域外写"
+    "「范围不可达」（不夹逼）；a=0、缺项或口径不一**不造数**。",
+)
+
+
+def _reversion_diag(run) -> tuple[dict, list[dict]]:
+    """run（dict 或 ModelRun）→ `(diagnostics, outputs)`；取不到诊断块就给空 dict。"""
+    outs = list(getattr(run, "outputs", None) or (run.get("outputs") if isinstance(run, dict) else ()) or ())
+    norm: list[dict] = []
+    for o in outs:
+        if isinstance(o, dict):
+            comps = [c if isinstance(c, dict) else
+                     {"component_id": getattr(c, "component_id", ""),
+                      "label": getattr(c, "label", ""), "value": getattr(c, "value", None)}
+                     for c in (o.get("components") or ())]
+            norm.append({**o, "components": comps})
+            continue
+        d = getattr(o, "diagnostics", None)
+        norm.append({"metric": getattr(o, "metric", ""), "value": getattr(o, "value", None),
+                     "components": [c if isinstance(c, dict) else
+                                    {"component_id": getattr(c, "component_id", ""),
+                                     "label": getattr(c, "label", ""), "value": getattr(c, "value", None)}
+                                    for c in (getattr(o, "components", None) or ())],
+                     "diagnostics": dict(d) if d else None})
+    diag = {}
+    for o in norm:
+        if o.get("diagnostics"):
+            diag = dict(o["diagnostics"])
+            break
+    return diag, norm
+
+
+def _reversion_periods(rec: dict) -> tuple[str, str] | None:
+    """两期标签：(上年, 本期)。按**年份数值**排序，不假定字典顺序（标签顺序不可依赖）。"""
+    keys: list[str] = []
+    for k in (rec or {}):
+        m = re.match(r"\s*(\d{4})", str(k))
+        if m:
+            keys.append((int(m.group(1)), str(k)))
+    if len(keys) < 2:
+        return None
+    keys.sort()
+    return keys[0][1], keys[-1][1]
+
+
+def _reversion_candidates(diag: dict, view: str, outs: list[dict], cur_p: str) -> dict:
+    """候选回撤项 `{metric: {...}}`（带符号，符号照披露/算子）。"""
+    out: dict[str, dict] = {}
+    if view == _VIEW_CURRENT:
+        block = ((diag.get("reconciliation") or {}).get(cur_p) or {})
+        for it in (block.get("items") or []):
+            v = _d(it.get("value_yuan"))
+            out[str(it.get("metric"))] = {
+                "metric": str(it.get("metric")), "label": str(it.get("label") or ""),
+                "group": str(it.get("group") or ""), "value_yuan": v,
+                "source": "本期带符号调节项（现金流量表补充资料，逐项）",
+            }
+        return out
+    # 同比：单项贡献（cash_change_items 的 delta_yuan）＋组成部分贡献（operating_cashflow_change）
+    _gl = {"non_cash": "非现金调节项", "working_capital": "营运资本项", "other": "其他调节项"}
+    for g, entries in (diag.get("cash_change_items") or {}).items():
+        for it in (entries or []):
+            out[str(it.get("metric"))] = {
+                "metric": str(it.get("metric")), "label": str(it.get("label") or ""),
+                "group": str(g), "value_yuan": _d(it.get("delta_yuan")),
+                "source": f"同比带符号贡献（{_gl.get(str(g), str(g))}单项 Δ）",
+            }
+    for o in outs:
+        if str(o.get("metric") or "") != "operating_cashflow_change":
+            continue
+        for c in (o.get("components") or ()):
+            cid = str(c.get("component_id") or "")
+            if not cid:
+                continue
+            out[cid] = {"metric": cid, "label": str(c.get("label") or ""),
+                        "group": "change", "value_yuan": _d(c.get("value")),
+                        "source": "同比带符号贡献（桥的组成部分 Δ）"}
+    return out
+
+
+def _reversion_default(cands: dict, base: Decimal) -> str:
+    """默认回撤项＝**与现金同向的最大带符号项**（既有贡献排序：正现金取最大支持、负现金取最大拖累）。"""
+    want_pos = base > 0
+    pick, best = "", None
+    for m, c in cands.items():
+        v = _d(c.get("value_yuan"))
+        if want_pos and v <= 0:
+            continue
+        if (not want_pos) and v >= 0:
+            continue
+        if best is None or abs(v) > best:
+            pick, best = m, abs(v)
+    return pick
+
+
+def reversion_ladder(run, *, view: str = _VIEW_CURRENT, metric: str | None = None,
+                     fractions=REVERSION_FRACTIONS) -> dict:
+    """**纯函数**：选定 cash_reconciliation run → 一项带符号贡献的回撤阶梯（普通 dict）。
+
+    `view='current'`：C＝本期披露经营现金流，a＝本期所选带符号调节项；
+    `view='yoy'`：C＝Δ经营现金流（本期−上年），a＝所选同比带符号贡献。
+    `metric=None` 时默认取**与 C 同向的最大带符号项**；两条 run 的四格按同一公式、本期与同比不混用。
+    返回含精确输入（run_id/dataset_hash/期间/单位）、0/50/100% 三点、λ*、可达性与边界；
+    不可用情形（无诊断块／C=0／a=0／缺项／λ 越域）返回 `applicable=False` ＋原因，**不造数**。
+    """
+    diag, outs = _reversion_diag(run)
+    rid = str((run.get("run_id") if isinstance(run, dict) else getattr(run, "run_id", "")) or "")
+    refs = {
+        "run_id": rid,
+        "model_id": str((run.get("model_id") if isinstance(run, dict) else getattr(run, "model_id", "")) or ""),
+        "impl_version": str((run.get("impl_version") if isinstance(run, dict)
+                             else getattr(run, "impl_version", "")) or ""),
+        "dataset_hash": str((run.get("dataset_hash") if isinstance(run, dict)
+                             else getattr(run, "dataset_hash", "")) or ""),
+        "params_hash": str((run.get("params_hash") if isinstance(run, dict)
+                            else getattr(run, "params_hash", "")) or ""),
+    }
+    head = {"schema": REVERSION_SCHEMA, "view": str(view), "view_label": _VIEW_LABELS.get(str(view), ""),
+            "refs": refs, "lambda_label": REVERSION_LAMBDA_LABEL}
+
+    def _na(reason: str) -> dict:
+        return {**head, "applicable": False, "reason": reason,
+                "domain": {"fractions": [str(f) for f in fractions], "within_0_1": True}}
+
+    if str(view) not in (_VIEW_CURRENT, _VIEW_YOY):
+        return _na(f"未知视角 `{view}`（只支持 current/yoy）")
+    try:
+        fs = [Decimal(str(f)) for f in fractions]
+    except Exception:                                        # noqa: BLE001
+        return _na("回撤比例不是可解析的数")
+    if any(f < 0 or f > 1 for f in fs):
+        return _na("回撤比例越域（本函数只在 λ∈[0,1] 内取值）")
+    if not diag:
+        return _na("该 run 没有诊断块（不是 cash_reconciliation 的已验证运行）")
+    rec = diag.get("reconciliation") or {}
+    pers = _reversion_periods(rec)
+    if not pers:
+        return _na("对账块不足两期，无法定 C（不猜上年/本期）")
+    prev_p, cur_p = pers
+    np_cur, np_prev = _d(rec[cur_p].get("net_profit_yuan")), _d(rec[prev_p].get("net_profit_yuan"))
+    cf_cur, cf_prev = _d(rec[cur_p].get("cashflow_yuan")), _d(rec[prev_p].get("cashflow_yuan"))
+    base = cf_cur if view == _VIEW_CURRENT else (cf_cur - cf_prev)
+    cands = _reversion_candidates(diag, str(view), outs, cur_p)
+    if not cands:
+        return _na("该 run 没有可回撤的带符号项（候选为空）")
+    if metric is None:
+        metric = _reversion_default(cands, base)
+        if not metric:
+            return _na("没有与现金同向的带符号项（默认项无法确定；可用 metric 显式指定）")
+        picked_by = "默认＝与现金同向的最大带符号项（既有贡献排序）"
+    else:
+        if str(metric) not in cands:
+            return _na(f"指定项 `{metric}` 不在该 run 的候选里（缺项不造数）")
+        picked_by = "调用方显式指定"
+    ch = cands[str(metric)]
+    a = _d(ch.get("value_yuan"))
+    if a == 0:
+        return _na(f"指定项 `{metric}` 的带符号值为 0，回撤无意义")
+    points = []
+    for f in fs:
+        v = base - f * a
+        points.append({"reversion_fraction": str(f), "reversion_percent": str(f * 100),
+                       "value_yuan": str(v), "value_yi": _yi_str(v)})
+    with decimal.localcontext() as ctx:
+        ctx.prec = 28
+        lam = base / a
+    reach = (lam >= 0) and (lam <= 1)
+    return {
+        **head, "applicable": True,
+        "metric": str(metric), "label": str(ch.get("label") or ""), "group": str(ch.get("group") or ""),
+        "item_source": str(ch.get("source") or ""), "selected_by": picked_by,
+        "periods": [prev_p, cur_p],
+        "period_kind": "同比" if view == _VIEW_YOY else "本期",
+        "unit": str(diag.get("unit") or ""), "currency": str(diag.get("currency") or ""),
+        "caliber": str(diag.get("caliber") or ""), "entity_id": str(diag.get("entity_id") or ""),
+        "entity": str(diag.get("entity") or ""),
+        "inputs_exact": {"base_yuan": str(base), "item_yuan": str(a),
+                         "net_profit_cur_yuan": str(np_cur), "net_profit_prev_yuan": str(np_prev),
+                         "cashflow_cur_yuan": str(cf_cur), "cashflow_prev_yuan": str(cf_prev)},
+        "base_yuan": str(base), "base_yi": _yi_str(base),
+        "item_yuan": str(a), "item_yi": _yi_str(a),
+        "formula": "C′(λ) = C − λ·a",
+        "points": points,
+        "zero_lambda": str(lam), "zero_lambda_pct": str((lam * 100).quantize(Decimal("0.0001"))),
+        "reachable_within_0_1": bool(reach),
+        "threshold_note": ("λ* 落在 [0,1] 内：归零阈值可在本节范围内代入"
+                           if reach else "λ* 落在 [0,1] 之外：**范围不可达**（照实写，不夹逼）"),
+        "boundary": list(REVERSION_BOUNDARY),
+        "candidates": sorted(
+            ({"metric": m, "label": str(c.get("label") or ""), "group": str(c.get("group") or ""),
+              "item_yuan": str(_d(c.get("value_yuan"))), "item_yi": _yi_str(_d(c.get("value_yuan"))),
+              "source": str(c.get("source") or ""),
+              "zero_lambda": str(_safe_div(base, _d(c.get("value_yuan")))),
+              "reachable_within_0_1": _reachable(base, _d(c.get("value_yuan"))),
+              "points": [{"reversion_fraction": str(f),
+                          "value_yuan": str(base - f * _d(c.get("value_yuan"))),
+                          "value_yi": _yi_str(base - f * _d(c.get("value_yuan")))}
+                         for f in fs],
+              "selected": m == str(metric)}
+             for m, c in cands.items()),
+            key=lambda x: -abs(_d(x["item_yuan"]))),
+    }
+
+
+def _safe_div(base: Decimal, a: Decimal) -> Decimal | str:
+    if a == 0:
+        return "不适用（该项为 0）"
+    with decimal.localcontext() as ctx:
+        ctx.prec = 28
+        return base / a
+
+
+def _reachable(base: Decimal, a: Decimal) -> bool | None:
+    if a == 0:
+        return None
+    with decimal.localcontext() as ctx:
+        ctx.prec = 28
+        lam = base / a
+    return bool(lam >= 0 and lam <= 1)

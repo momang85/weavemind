@@ -43,10 +43,18 @@ def _decimal_or_none(value):
 
 
 def _observation_of(row: dict, *, as_of: str, restatement: str) -> Observation:
-    """一行原始记录 → 观察（状态由**事实本身**决定，不靠调用方声明）。"""
+    """一行原始记录 → 观察（状态由**事实本身**决定，不靠调用方声明）。
+
+    单位**照抄来源**（不在这里换算）：底稿与数据集都保留来源自己的单位，
+    显示侧由共享格式器按 `unit` 换算（`charts._yi`/`narrative._yi`/`judgments._yi`）。
+    为什么不在这里统一：同一份底稿里官方三表是元、结构化 API 是亿元，逐条换算是"静默
+    改数"；而模型各自消费的指标组内单位是自洽的（官方三表内部一致、结构化内部一致），
+    比率算子另有 `amount_scale` 做量纲归一。
+    """
     metric = str(_attr(row, "metric") or "")
     period = str(_attr(row, "period") or "")
     value = _attr(row, "value", None)
+    unit = str(_attr(row, "unit") or "")
     num = _decimal_or_none(value)
     state, note = State.OK, ""
     if num is None:
@@ -70,7 +78,7 @@ def _observation_of(row: dict, *, as_of: str, restatement: str) -> Observation:
         metric_label=str(_attr(row, "metric_label") or ""),
         dimension=str(_attr(row, "dimension") or ""),
         currency=str(_attr(row, "currency") or ""),
-        unit=str(_attr(row, "unit") or ""),
+        unit=unit,
         caliber=str(_attr(row, "caliber") or ""),
         period_type=str(_attr(row, "period_type") or ""),
         period_start=str(_attr(row, "period_start") or ""),

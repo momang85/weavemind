@@ -1,0 +1,89 @@
+{
+  "note": "Optional existing baseline disclosure comparison only; not claimed a subsequent new disclosure or mechanism update",
+  "event": {
+    "code": "600031",
+    "date": "2025-04-18",
+    "date_precision": "day",
+    "date_basis": "source_url_format",
+    "title": "三一重工股份有限公司2024年年度报告",
+    "category": "定期报告",
+    "matched": "年度报告",
+    "rule": "title:年度报告",
+    "material_id": "0c3e82056e977adc",
+    "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF",
+    "raw_sha256": "09b21df2cef24fd85b4efa625579138241ae1de4fa7ad4f2c9fcef0c694a0d1a",
+    "period": "2024"
+  },
+  "reading_hash": "eb1f52e0f0e7c16ec10549b3c811996387ec8e61e283d6ca6e37673b939a21bf",
+  "readings": [
+    {
+      "label": "定期报告｜三一重工股份有限公司2024年年度报告",
+      "code": "600031",
+      "event_date": "2025-04-18",
+      "feature_cutoff": "2025-04-18",
+      "evaluation_as_of": "2026-09-30",
+      "anchor": {
+        "date": "2025-04-18",
+        "close": 18.38
+      },
+      "t0_date": "2025-04-21",
+      "affected_window": [
+        "2025-04-18",
+        "2025-05-21"
+      ],
+      "benchmark": "000300",
+      "points": [
+        {
+          "offset": -1,
+          "date": "2025-04-18",
+          "close": 18.38,
+          "return": null,
+          "benchmark_return": null,
+          "excess_return": null,
+          "state": "anchor",
+          "note": "锚点（价格起点）：无收益读数，仅用于定位",
+          "unavailable": ""
+        },
+        {
+          "offset": 0,
+          "date": "2025-04-21",
+          "close": 18.42,
+          "return": 0.002176,
+          "benchmark_return": 0.003276,
+          "excess_return": -0.001096,
+          "state": "observed",
+          "unavailable": ""
+        },
+        {
+          "offset": 4,
+          "date": "2025-04-25",
+          "close": 18.29,
+          "return": -0.004897,
+          "benchmark_return": 0.003836,
+          "excess_return": -0.0087,
+          "state": "observed",
+          "unavailable": ""
+        },
+        {
+          "offset": 19,
+          "date": "2025-05-21",
+          "close": 18.21,
+          "return": -0.009249,
+          "benchmark_return": 0.038133,
+          "excess_return": -0.045642,
+          "state": "observed",
+          "unavailable": ""
+        }
+      ],
+      "benchmark_missing": [],
+      "aggregate_eligible": true,
+      "aggregate_exclusion_reason": "",
+      "window_state": "observed",
+      "suspension_suspect": [],
+      "suspension_dates": [],
+      "suspension_basis": "日历判定为交易日、但标的当日无行情行 ⇒ 停牌或该标的缺数据",
+      "suspension_certain": true
+    }
+  ],
+  "delivery_eligible": false
+}
