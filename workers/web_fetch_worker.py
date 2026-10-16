@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 import urllib.request
 from html.parser import HTMLParser
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -41,16 +42,22 @@ def _encode_iri(url: str) -> str:
 
 
 def _clean_url(url: str) -> str:
-    """抓取用的 URL 清洗：**在第一个中日韩字符处截断**，再去掉尾部标点。
+    """抓取用的 URL 清洗：**NFKC 归一 → 在第一个非 ASCII 文本字符处截断** → 去尾部标点。
 
     实机（`ui-17947f055b`）：指令里是「…1223370519.PDF；本次…」，中文尾句紧跟 URL、
     中间**没有空格**，`https?://\\S+` 会把整段中文都吃进去；urllib 编码后变成一条不存在的
     路径 → 404。这里按 CJK 边界切开，只保留真正的 URL 部分。
+
+    任务14（P1）补两点（与 orchestrator_v2._clean_fetch_url 保持同一实现）：
+    - **NFKC 归一**：全角字母/数字/标点（`．` `；` `ｗｗｗ`、`（`）在 LLM 抄写的链接里常见，
+      归一成 ASCII 后才可能构成合法 host/path，也避免截断切出半条地址；
+    - **箭头也要截断**：实测 `URL→说明` 这种写法里 U+2192 `→` 不在原 CJK 字符类内，
+      残留下来直接拼成非法 host（NFKC 对箭头**没有**兼容分解，只能靠字符类解决）。
     """
-    s = str(url or "").strip()
+    s = unicodedata.normalize("NFKC", str(url or "")).strip()
     if not s:
         return ""
-    m = re.search(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]", s)
+    m = re.search(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f\u2190-\u21ff]", s)
     if m:
         s = s[:m.start()]
     return re.sub(r"[)\]>,.;:!?'\"】）》」]+$", "", s).strip()

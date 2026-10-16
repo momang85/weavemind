@@ -17,6 +17,7 @@ import re
 import shutil
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -240,17 +241,34 @@ _FACTS_BLOCK_MAX_ROWS = 40
 _FETCH_ROLE_BY_STEP = {"2": "annual_report", "2b": "notes"}
 
 
+# 任务14（P1）：net_policy 对内容派生 URL 的**确定性策略拒绝**文案标记。
+# 命中即把该 URL 记入死链（`fetch_document` 的校验是纯函数级确定性：
+# 同一 URL 再抓一次只会再花 6-8s DNS 解析得到同一拒绝）。与 net_policy.py
+# validate_public_url 的拒绝文案一一对应（测试 test_task14_dispatch_routing
+# 用真实 net_policy 校验逐条核对标记覆盖面）。
+_FETCH_POLICY_REJECT_MARKS = (
+    "URL 无法解析", "协议不允许", "不得携带用户凭据", "缺少主机名",
+    "目标是本机/元数据服务", "解析到非公网地址",
+)
+
+
 def _clean_fetch_url(url: str) -> str:
-    """抓取 URL 清洗：**在第一个中日韩字符处截断**，再去掉尾部标点。
+    """抓取 URL 清洗：**NFKC 归一 → 在第一个非 ASCII 文本字符处截断** → 去尾部标点。
 
     实机（`ui-17947f055b`）：目标文本里的参考直链后面紧跟中文「；本次…」且没有空格，
     `https?://\\S+` 会把中文一起吃进 URL，worker 编码后抓到 404（同一坏地址抓了两次）。
     派发侧先切干净；worker 侧同样再切一次（两道都做，任一侧漏了也不会把中文带进请求）。
+
+    任务14（P1）补两点：
+    - **NFKC 归一**：全角字母/数字/标点（`．` `；` `ｗｗｗ`、`（`）在 LLM 抄写的链接里常见，
+      归一成 ASCII 后才可能构成合法 host/path，也避免截断切出半条地址；
+    - **箭头也要截断**：实测 `URL→说明` 这种写法里 U+2192 `→` 不在原 CJK 字符类内，
+      残留下来直接拼成非法 host（NFKC 对箭头**没有**兼容分解，只能靠字符类解决）。
     """
-    s = str(url or "").strip()
+    s = unicodedata.normalize("NFKC", str(url or "")).strip()
     if not s:
         return ""
-    m = re.search(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]", s)
+    m = re.search(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f\u2190-\u21ff]", s)
     if m:
         s = s[:m.start()]
     return re.sub(r"[)\]>,.;:!?'\"】）》」]+$", "", s).strip()
@@ -647,6 +665,23 @@ KNOWN_CAPABILITIES = {
     "web_search", "web_fetch", "data_loader", "data_analyzer", "model_trainer",
     "report_generator", "content_summary", "code_execution", "file_io", "package",
     "react_agent",
+}
+
+# 任务14（P1 编排 dispatch 错配修复，设计见 docs/arch_phase2_p1_dispatch_routing.md）：
+# 能力 → **该能力的合法执行者**（worker 注册的 agent_id）。
+# 实机（任务12 复盘 `agents.db` 822 步 capability×executor 交叉表）：web_search 有
+# 19 步由 content_summarizer、5 步由 codeexecworker 执行；web_fetch 有 8 步由
+# content_summarizer 执行——这些"由别人代做"的步骤被记到原能力名下，把
+# by_capability 的成功率与真实能力健康度混在一起，且检索质量不可信却静默成功。
+# 不在键里的能力（content_summary / package 等）**不设限**：按现有实现自由执行。
+# 执行者名单以 worker 注册值为准（workers/*_worker.py 的 capabilities/agent_id）。
+CAPABILITY_WORKER_MAP = {
+    "web_search": {"search_agent"},
+    "web_fetch": {"webfetchworker"},
+    "code_execution": {"codeexecworker"},
+    "react_agent": {"reactagentworker"},
+    "report_generator": {"reportgeneratorworker"},
+    "data_analyzer": {"dataanalyzerworker"},
 }
 
 # P1-2：仅外部检索/报告等步骤允许 human_in_loop（执行前需用户确认）；
@@ -1088,6 +1123,97 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if agent:
             return agent
         return self._sqlite_reg.find_capable_agent(capability)
+
+    def _find_agent_in(self, allowed) -> str | None:
+        """在**指定名单**里找一个在册且空闲的执行者（任务14：按名字查，不按能力查）。
+
+        用于错配改路由：能力 `web_search` 的合法执行者是 `search_agent`，而
+        `_find_agent("web_search")` 只保证"某个注册了该能力的人"，不保证是它。
+        名字→状态要按名字查注册表（Redis `agent:{id}` / SQLite agents 行），
+        两边都拿不到就返回 None（调用方按"降级派发 + 记账"处理，不阻断任务）。
+        判据与注册表自己的 idle 约定一致：`idle*` 或 `active:*`。
+        """
+        names = {str(n or "").strip() for n in (allowed or set())} - {""}
+        if not names:
+            return None
+
+        def _idle(status) -> bool:
+            s = str(status or "")
+            return s.startswith("idle") or s.startswith("active:")
+
+        # 注册表按**存在与否**参与查询：单测/降级路径可能只有其中一个，
+        # 甚至一个都没建（`object.__new__` 构造的实例）——缺的跳过，不抛
+        regs = [(getattr(self, "_redis_reg", None), "get_agent_info"),
+                (getattr(self, "_sqlite_reg", None), "get_agent")]
+        for name in sorted(names):
+            # 名单里的名字逐个问注册表：任一注册表报 idle/active 即命中；
+            # 报"忙"则继续问下一个注册表（Redis 掉线/状态陈旧时 SQLite 还有账）
+            for reg, getter in regs:
+                fn = getattr(reg, getter, None)
+                if not callable(fn):
+                    continue
+                try:
+                    info = fn(name)
+                except Exception:                 # noqa: BLE001 - 查不到就换下一个
+                    info = None
+                if isinstance(info, dict) and info and _idle(info.get("status")):
+                    return name
+        return None
+
+    @staticmethod
+    def _routing_mismatch(capability: str, agent_id: str) -> bool:
+        """能力是否有**指定执行者**、而实际执行者不在其中（任务14 的唯一判据）。
+
+        不在 `CAPABILITY_WORKER_MAP` 里的能力不设限（content_summary/package 等）；
+        执行者为空 = 还没派发出去（超时/取消/协议错误的记账残渣），是另一类问题，
+        不算错配（`_step_bucket` 口径里它们落 other/gate，见任务13 的披露）。
+        """
+        agent = str(agent_id or "").strip()
+        if not agent:
+            return False
+        allowed = CAPABILITY_WORKER_MAP.get(str(capability or ""))
+        if not allowed:
+            return False
+        return agent not in allowed
+
+    def _mark_step_routing(self, capability: str, step_id: str, result,
+                           task_id: str, stage: str = "") -> dict:
+        """错配记账（任务14）：给结果打标记 + 告警，**不改状态、不改正文**。
+
+        - `worker_mismatch: true` + `mismatch_capability`/`mismatch_agent`：
+          受限能力被别的执行者代做（重规划换能力、react 降级、降级派发都会走到）；
+        - `search_degraded: true`：**web_search 步由非检索执行者完成** → 检索质量
+          不可信：结果只是摘要/代码执行者的转述，不是检索证据。终态按有缺口交付
+          （`task_state.derive_status` 的 step_degraded 入参），不再静默 SUCCESS。
+
+        只按**原步骤能力**核对：重规划把步交给别的能力本身不违规，违规的是
+        "原能力该由谁做"被悄悄换掉后仍按原能力记账。
+        """
+        if not isinstance(result, dict):
+            return result
+        agent = str(result.get("agent_id") or "")
+        if not agent or not self._routing_mismatch(capability, agent):
+            return result
+        if not result.get("worker_mismatch"):     # 幂等：重试路径会多次进入
+            result["worker_mismatch"] = True
+            result["mismatch_capability"] = str(capability or "")
+            result["mismatch_agent"] = agent
+            if str(capability or "") == "web_search":
+                result["search_degraded"] = True
+            _msg = (f"能力-执行者错配：{capability} 步骤 {step_id} 由 {agent} 执行"
+                    + (f"（{stage}）" if stage else ""))
+            logger.warning("worker mismatch: %s（task=%s）", _msg, task_id)
+            try:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "warning", "agent": "orchestrator",
+                               "message": _msg + (
+                                   "；检索质量不可信，任务按有缺口交付"
+                                   if result.get("search_degraded")
+                                   else "；已按降级派发记账"),
+                               "timestamp": self._now_iso()})
+            except Exception:                     # noqa: BLE001 - 告警失败不阻断派发
+                pass
+        return result
 
     def _now_iso(self):
         import datetime
@@ -2512,11 +2638,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         reflection_unavailable: str,
         llm_degraded: dict,
         draft_reason: str = "",
+        step_degraded: bool = False,
     ) -> str:
         """任务最终状态（A1：以最终验收报告判定，而非反思是否执行）：
         - 有步骤失败 → FAILED；
         - 最终验收 fail（无论反思是否执行/重做）→ SUCCESS_WITH_ISSUES；
         - LLM 双端点均失败 → SUCCESS_WITH_ISSUES；
+        - 步骤被降级/错配执行（任务14：检索步由别的执行者代做）→ SUCCESS_WITH_ISSUES；
         - 其余成功 → SUCCESS。
         reflection_unavailable 保留入参仅用于调用方日志追溯，不再参与判定：
         只要最终 acceptance_report.json 仍为 fail，就如实降级，避免
@@ -2532,6 +2660,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 llm_degraded=llm_degraded or {},
                 # M0-a：交付按未验收草稿处理时不得显示"通过"
                 draft_delivery=draft_reason,
+                # 任务14：能力-执行者错配降级不得静默 SUCCESS
+                step_degraded=step_degraded,
             )
         except Exception:
             # 投影器不可用时的兜底：保持与收口前一致的判定
@@ -2541,7 +2671,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 acceptance_summary and acceptance_summary.get("overall") != "pass"
             )
             both_failed = bool(llm_degraded and llm_degraded.get("both_failed"))
-            if accept_fail or both_failed or str(draft_reason or "").strip():
+            if (accept_fail or both_failed or str(draft_reason or "").strip()
+                    or bool(step_degraded)):
                 return "SUCCESS_WITH_ISSUES"
             return "SUCCESS"
 
@@ -5389,6 +5520,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                            "message": f"No agent for {capability}", "timestamp": self._now_iso()})
             return {"task_id": step_id, "status": "FAILED", "result": f"No worker for {capability}"}
 
+        # 任务14（P1）：能力→执行者路由门控。查到的执行者不在该能力的合法名单里
+        # （如注册表把 web_search 能力挂给了摘要 worker）时，**优先改路由**到合法
+        # 执行者；合法执行者都不在册才允许降级派发（结果打错配标记 + 告警，
+        # 不阻断任务——降级执行好过步骤失败，错配留痕供指标与反思归因）。
+        _allowed = CAPABILITY_WORKER_MAP.get(capability)
+        if _allowed and agent_id not in _allowed:
+            _wrong = agent_id
+            _right = self._find_agent_in(_allowed)
+            if _right:
+                logger.warning("能力 %s 执行者错配（%s → %s），已改路由（task=%s）",
+                               capability, _wrong, _right, task_id)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "warning", "agent": "orchestrator",
+                               "message": (f"能力-执行者错配：{capability} 原定 {agent_id}"
+                                           f"，已改路由到 {_right}"),
+                               "timestamp": self._now_iso()})
+                agent_id = _right
+            else:
+                logger.warning("能力 %s 执行者错配（%s），合法执行者不在册，降级派发（task=%s）",
+                               capability, _wrong, task_id)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "warning", "agent": "orchestrator",
+                               "message": (f"能力-执行者错配：{capability} 将由 {agent_id}"
+                                           " 代做（合法执行者不在册），结果将按错配记账"),
+                               "timestamp": self._now_iso()})
+
         push_progress(self._messaging, task_id, "log",
                       {"type": "dispatch", "agent": capability,
                        "message": f"Dispatching to {agent_id}: {instruction[:60]}", "timestamp": self._now_iso()})
@@ -5545,6 +5702,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                            "message": f"Step {step_id} empty result", "timestamp": self._now_iso()})
             result = {"task_id": step_id, "status": "FAILED", "result": "Empty result"}
 
+        # 任务14：错配记账的唯一落点。worker 结果自带执行者 agent_id，
+        # 该能力有指定执行者而实际不是它（降级派发、worker 自报身份不符）→ 打标记。
+        result = self._mark_step_routing(capability, step_id, result, task_id)
         return result
 
     def _inflight_map(self) -> dict:
@@ -7452,11 +7612,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 否则"正文换成 sourceB、验收文件还是 sourceA 的 pass"会被当成功。
         acceptance_summary = self._acceptance_summary_for_status(task_id)
         llm_degraded = self._read_llm_degraded(task_id)
+        # 任务14（P1）：web_search 步由**非检索执行者**代做（search_degraded）时，
+        # 交付的证据链其实不是检索来的——步骤状态都是 SUCCESS，但检索质量不可信，
+        # 终态不得静默 SUCCESS，按有缺口交付。错配告警已在派发处发出。
+        _degraded_steps = sorted(
+            str(k) for k, r in completed_all.items()
+            if isinstance(r, dict) and r.get("search_degraded")
+        )
         overall = self._resolve_final_status(
             has_failure, acceptance_summary,
             getattr(self, "_reflection_llm_unavailable", ""), llm_degraded,
             draft_reason=str(self._delivery(task_id).get("reason") or ""),
+            step_degraded=bool(_degraded_steps),
         )
+        if _degraded_steps and overall == "SUCCESS_WITH_ISSUES":
+            logger.error(
+                "Task %s 检索步降级（步骤 %s）：终态按有缺口交付",
+                task_id, "、".join(_degraded_steps[:6]),
+            )
         if overall == "SUCCESS_WITH_ISSUES":
             logger.error(
                 "Task %s completed with issues: acceptance=%s "
@@ -7969,11 +8142,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 if _try_url and _try_url in getattr(self, "_dead_fetch_urls", set()):
                     push_progress(self._messaging, task_id, "log",
                                   {"type": "replan", "agent": "orchestrator",
-                                   "message": (f"Step {step['step_id']}: 该 URL 已返回 HTTP 错误"
+                                   "message": (f"Step {step['step_id']}: 该 URL 上次已失败"
                                                f"（{_try_url[:80]}），跳过重复抓取"),
                                    "timestamp": self._now_iso()})
                     return {"task_id": step["step_id"], "status": "FAILED",
-                            "result": (f"该 URL 上次已返回 HTTP 错误（{_try_url[:100]}）："
+                            "result": (f"该 URL 上次已失败（{_try_url[:100]}）："
                                        "不重复抓取，按资料缺口处理，换候选后再试"),
                             "elapsed_sec": round(time.time() - step_start, 1)}
             # 人机协作（对标标准 3.2 human_in_loop）：高风险步骤执行前等人工确认
@@ -7991,8 +8164,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 except Exception:               # noqa: BLE001
                     _blob = {}
                 _http = _blob.get("http_status") if isinstance(_blob, dict) else None
+                # 任务14（P1）：**策略拒绝同样记死链**。`net_policy` 的域名不可解析/
+                # 非公网地址等判定是**纯函数级确定性**结果——同一 URL 再抓一次只会
+                # 再花 6-8s DNS 解析得到同一拒绝（实机一个任务里同一坏地址抓了 3 次）。
+                # `net_policy` 模块无 orchestrator 实例可写 `_dead_fetch_urls`，
+                # 故在结果回传点记账（与 HTTP 死链同一份集合、同一跳过通道）。
+                _policy_reject = any(_mk in _res_txt for _mk in _FETCH_POLICY_REJECT_MARKS)
                 if _try_url and (isinstance(_http, int) and not (200 <= _http < 300)
-                                 or "HTTP 4" in _res_txt or "HTTP 5" in _res_txt):
+                                 or "HTTP 4" in _res_txt or "HTTP 5" in _res_txt
+                                 or _policy_reject):
                     if not hasattr(self, "_dead_fetch_urls"):
                         self._dead_fetch_urls = set()
                     self._dead_fetch_urls.add(_try_url)
@@ -8024,6 +8204,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 fb_result = self._dispatch_step_safe(goal, fb_step, task_id, state)
                 if fb_result.get("status") == "SUCCESS":
                     fb_result["degraded_from_react"] = True
+                    # 任务14：该步在任务历史里仍记 react_agent（合法执行者
+                    # reactagentworker），由摘要 worker 代做 → 留错配痕迹。
+                    fb_result = self._mark_step_routing(
+                        step.get("capability", ""), step.get("step_id", ""), fb_result,
+                        task_id, stage="react 降级代做")
                     result = fb_result
             if step.get("capability") == "web_fetch" and result.get("status") == "SUCCESS":
                 # 快照页回灌清洗：抓到的正文并入清洗输入，财务数字进入图表/摘要
@@ -9201,6 +9386,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 state["replan_used"] += 1
                 tried.append(f"重规划为 {alt.get('capability')}")
                 alt_result = self._dispatch(alt, task_id)
+                # 任务14：重规划代做记账——任务历史里该步仍记**原能力**，
+                # 回传执行者却不具备它（如 web_search 步被重规划成 code_execution
+                # 代跑）→ 按原步骤能力留错配痕迹，供指标与反思归因。
+                alt_result = self._mark_step_routing(
+                    step.get("capability", ""), step.get("step_id", ""), alt_result,
+                    task_id, stage="重规划代做")
                 if alt_result.get("status") == "SUCCESS":
                     alt_result["replanned"] = True
                     alt_result["replan_instruction"] = alt.get("instruction", "")

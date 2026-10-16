@@ -680,7 +680,8 @@ def ensure_schema(db_path: str | None = None) -> list[str]:
 
 def derive_status(step_statuses=None, acceptance: dict | None = None,
                   llm_degraded: dict | None = None,
-                  draft_delivery: str = "") -> str:
+                  draft_delivery: str = "",
+                  step_degraded: bool = False) -> str:
     """状态派生规则（唯一实现）。
 
     - 任一步骤非 SUCCESS（含 PARTIAL/FAILED）→ FAILED；
@@ -688,6 +689,8 @@ def derive_status(step_statuses=None, acceptance: dict | None = None,
     - 主备端点均失败（llm_degraded.both_failed）→ SUCCESS_WITH_ISSUES；
     - **交付按未验收草稿处理**（draft_delivery 非空：正文没有对应自身的验收、
       或最终交付文档与选中版本不一致）→ SUCCESS_WITH_ISSUES —— 缺证据不得显示"通过"；
+    - **步骤降级执行**（step_degraded：如 web_search 步由非检索执行者代做，
+      检索质量不可信）→ SUCCESS_WITH_ISSUES —— 不再静默 SUCCESS（任务14）；
     - 其余 → SUCCESS。
 
     用户取消是**显式终态**（`CANCELLED`），不由本函数派生：取消时可能没有验收报告，
@@ -701,7 +704,8 @@ def derive_status(step_statuses=None, acceptance: dict | None = None,
     # R0.2：验收没能证明属于**选中的那版正文**（短 hash / 身份不符 / 只读到文件）
     # → 证据不可信，按有缺口处理，不得显示"通过"
     unbound = bool(acceptance) and acceptance.get("version_bound") is False
-    if accept_fail or both_failed or unbound or str(draft_delivery or "").strip():
+    if (accept_fail or both_failed or unbound or str(draft_delivery or "").strip()
+            or bool(step_degraded)):
         return SUCCESS_WITH_ISSUES
     return SUCCESS
 

@@ -162,6 +162,7 @@ def _new_cap_row() -> dict:
     row.update({
         "total_planned": 0, "total_dispatched": 0,
         "success_dispatched": 0,
+        "mismatch_steps": 0,
         "success_rate_dispatched": None, "success_rate_planned": None,
     })
     return row
@@ -246,6 +247,12 @@ def _db_capability_stats() -> dict:
                 agent = str(ri.get("agent_id") or "").strip()
             if agent:
                 row["total_dispatched"] += 1
+            # 任务14（P1）：能力-执行者错配告警计数（设计 step 5）。
+            # 错配步 = 结果带 worker_mismatch 标记（含 search_degraded 子计数）——
+            # 这是"由别人代做"的实锤，按**步骤登记的能力**归属（下游记账 distortion
+            # 就发生在原能力名下）。
+            if isinstance(ri, dict) and ri.get("worker_mismatch"):
+                row["mismatch_steps"] += 1
             bucket = _step_bucket(ri)
             row[bucket] += 1
             # 派发成功的分子：SUCCESS 且 agent_id 非空。此前若用全部成功步
@@ -628,6 +635,7 @@ class MetricsCollector:
                         "cascade_blocked": v["cascade_blocked"],
                         "genuine_failed": v["genuine_failed"],
                         "other": v["other"],
+                        "mismatch_steps": v.get("mismatch_steps", 0),
                     }
                     for k, v in sorted(cap_stats["by_capability"].items())
                 },
@@ -635,6 +643,20 @@ class MetricsCollector:
                 # 一条 steps_json 都没有（不是"没有能力统计代码"）
                 "by_capability_scope": cap_stats["scope"],
                 "by_capability_available": cap_stats["available"],
+                # 任务14（P1）step 5：能力-执行者错配告警计数（只列**非零**能力，
+                # 空 `{}` = 全表没有错配痕迹，不是"统计缺失"）。错配步的口径见
+                # `by_capability_mismatch_note`；`search_degraded`（检索步由非检索
+                # 执行者代做、终态降为 SUCCESS_WITH_ISSUES）单独出数。
+                "by_capability_mismatch": {
+                    k: v["mismatch_steps"]
+                    for k, v in sorted(cap_stats["by_capability"].items())
+                    if v.get("mismatch_steps")
+                },
+                "by_capability_mismatch_note": (
+                    "错配步 = 步骤结果带 worker_mismatch 标记（该能力有指定执行者，"
+                    "实际执行者不是它）；按步骤登记的**原能力**归属。web_search 步的"
+                    "错配同时带 search_degraded，任务终态降为 SUCCESS_WITH_ISSUES。"
+                    "该标记自任务14 起写入，此前的错配步骤无标记（历史数据为 0）"),
                 # 分层口径说明随汇总下发：`success_rate` 换口径后，读汇总的人
                 # 必须能看出"计划口径"与"派发口径"的区别，否则会拿旧数字对新数字
                 "by_capability_metric_note": (
