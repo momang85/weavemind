@@ -104,16 +104,97 @@ def _db_task_totals() -> dict:
     return out
 
 
+# ── 步级分类（任务13，设计见 docs/arch_phase2_p0_metrics_split.md）──
+# 一次失败的"含噪"三因：门禁跳过（检索没产出可用来源）、级联阻塞（上游失败）、
+# 真实失败（worker 派发后仍 FAILED）。任务12 复盘：by_capability 的"失败"
+# 里 93% 是编排记账噪音，必须分层后才能读出真实能力健康度。
+_STEP_MARK_GATE = "无候选 URL"        # 编排器检索门禁跳过（未派发抓取）
+_STEP_MARK_CASCADE = "Blocked by failed"  # 依赖失败被阻断（未派发）
+
+# 分类桶：键顺序即输出顺序；`other` 是设计五桶之外的兜底（防止未归类步骤
+# 让 total_planned ≠ 各桶之和而无人察觉），正常数据里应为 0
+_STEP_BUCKETS = (
+    "success", "unexecuted", "gate_blocked", "cascade_blocked",
+    "genuine_failed", "other",
+)
+
+
+def _step_bucket(ri) -> str:
+    """单个 `step.result` 的步级分类（**纯函数**，任务13 口径的唯一实现）。
+
+    判定顺序有讲究（设计文件 line 26 与 line 37-39 的表述冲突，按此裁定）：
+    - SUCCESS 最先：抓取成功但页面正文恰好含这些短语的步骤是成功，不是失败；
+    - cascade 在 gate 之前：级联阻塞的步骤同样满足 `elapsed_sec==0 且无
+      agent_id`（任务12 核实），先判门禁会把级联误记成门禁跳过；
+    - genuine = 已派发（agent_id 非空）且 FAILED —— 这是唯一值得修的桶。
+    """
+    if not isinstance(ri, dict):
+        return "unexecuted"
+    status = str(ri.get("status") or "").strip().upper()
+    if not status or status in ("CANCELLED", "CANCELED"):
+        # 任务13 起编排器收尾会把"没跑到的步骤"补写成 CANCELLED/unexecuted；
+        # 旧数据是缺 status 键 —— 两种形态都归"未执行"。
+        # 两种拼写同收：库里历史行存在单 L 的 "CANCELED"（与 _db_task_totals 同口径）
+        return "unexecuted"
+    if status == "SUCCESS":
+        return "success"
+    text = str(ri.get("result") or "")
+    if _STEP_MARK_CASCADE in text:
+        return "cascade_blocked"
+    if _STEP_MARK_GATE in text:
+        return "gate_blocked"
+    if str(ri.get("agent_id") or "").strip():
+        if status == "FAILED":
+            return "genuine_failed"
+        return "other"  # 已派发但非 SUCCESS/FAILED（库中暂无此态，兜底防漏）
+    try:
+        elapsed = float(ri.get("elapsed_sec") or 0)
+    except (TypeError, ValueError):
+        elapsed = 0.0
+    if elapsed == 0:
+        # 未派发即被编排器拒绝（租约/许可/预算等）：无执行者、零耗时
+        return "gate_blocked"
+    return "other"
+
+
+def _new_cap_row() -> dict:
+    row = {b: 0 for b in _STEP_BUCKETS}
+    row.update({
+        "total_planned": 0, "total_dispatched": 0,
+        "success_dispatched": 0,
+        "success_rate_dispatched": None, "success_rate_planned": None,
+    })
+    return row
+
+
+def _finalize_cap_row(row: dict) -> dict:
+    """补齐两个口径的成功率（分母不同，分子都只算**真实派发成功**）：
+    - success_rate_dispatched：派发步成功 / 派发步数（真实能力健康度）；
+    - success_rate_planned：成功步 / 全部计划步（历史口径，含未执行/门禁/级联噪音）。
+    """
+    d, s, n = row["total_dispatched"], row["success"], row["total_planned"]
+    sd = row["success_dispatched"]
+    row["success_rate_dispatched"] = round(sd / d * 100, 1) if d else None
+    row["success_rate_planned"] = round(s / n * 100, 1) if n else None
+    return row
+
+
 def _db_capability_stats() -> dict:
-    """按能力类型的**步级**成功率：从 `task_history.steps_json` 全表聚合。
+    """按能力类型的**步级分层**统计：从 `task_history.steps_json` 全表聚合。
 
     为什么换成任务库（`by_capability` 此前恒为 `{}` 的根因）：原实现只在
     进程内累计 `task_complete` 事件 payload 里的 `steps`，但编排器当前 10 个
     `task_complete` 发布点**没有一个带 steps**（唯一带 steps 的是
     AWAITING_CONFIRM / RUNNING 等非终态推送，被 `_process` 的终态 gate 挡掉），
     而且进程内累计重启即清零 —— 于是统计代码在、输入永远为空。
-    任务库里其实有真实数据（每步含 `capability` 与 `result.status`），
-    口径与原实现保持一致：每步一条，成功 = `result.status == "SUCCESS"`。
+    任务库里其实有真实数据（每步含 `capability` 与 `result.status`）。
+
+    任务13 起每个能力给出分层桶（`_step_bucket` 口径）：
+    `total_planned`（计划步）/ `total_dispatched`（agent_id 非空的真实派发步）/
+    `success` / `unexecuted` / `gate_blocked` / `cascade_blocked` /
+    `genuine_failed`（+ 兜底 `other`）。两个成功率：
+    - `success_rate_dispatched`（真实指标）：派发步成功 / 派发步数；
+    - `success_rate_planned`（历史口径，含噪音）：成功步 / 全部计划步。
 
     覆盖范围必须显式声明在 `scope` 里：`steps_json` 自 2026-09 才开始落库，
     更早的任务没有这个字段，所以它是**有 steps 落库的那批任务**的能力分布，
@@ -141,7 +222,7 @@ def _db_capability_stats() -> dict:
             db.close()
     except Exception:
         return out
-    caps: dict[str, dict] = defaultdict(lambda: {"total": 0, "success": 0})
+    caps: dict[str, dict] = defaultdict(_new_cap_row)
     step_total = 0
     for (raw,) in rows or []:
         try:
@@ -157,20 +238,35 @@ def _db_capability_stats() -> dict:
             if not cap:
                 continue
             step_total += 1
-            caps[cap]["total"] += 1
+            row = caps[cap]
+            row["total_planned"] += 1
             ri = s.get("result")
-            if isinstance(ri, dict) and ri.get("status") == "SUCCESS":
-                caps[cap]["success"] += 1
+            agent = ""
+            if isinstance(ri, dict):
+                agent = str(ri.get("agent_id") or "").strip()
+            if agent:
+                row["total_dispatched"] += 1
+            bucket = _step_bucket(ri)
+            row[bucket] += 1
+            # 派发成功的分子：SUCCESS 且 agent_id 非空。此前若用全部成功步
+            # 当分子、派发步当分母，package 会出现 127/121=105% 的荒谬值
+            # （降级兜底产生的无执行者成功步混进分子）
+            if bucket == "success" and agent:
+                row["success_dispatched"] += 1
     out.update({
         "available": True,
-        "by_capability": dict(caps),
+        "by_capability": {k: _finalize_cap_row(v)
+                          for k, v in sorted(caps.items())},
         "task_rows": grand,
         "step_rows": len(rows or []),
         "step_total": step_total,
         "scope": (
             f"task_history.steps_json 全表聚合：{len(rows or [])}/{grand} 个任务"
-            f"落有 steps_json，共 {step_total} 步；步成功 = step.result.status"
-            " == SUCCESS。该字段自 2026-09 起才写入，更早任务不在内"),
+            f"落有 steps_json，共 {step_total} 步。分层口径见"
+            " docs/arch_phase2_p0_metrics_split.md：success_rate 为真实派发口径"
+            "（派发步成功/派发步数），success_rate_planned 为历史口径"
+            "（含未执行/门禁/级联噪音）。该字段自 2026-09 起才写入，"
+            "更早任务不在内"),
     })
     return out
 
@@ -511,15 +607,47 @@ class MetricsCollector:
                     "critic / replan / alerts 均为本 metrics 进程内计数，"
                     "重启归零；0 = 本进程尚未观察到该类事件，不是历史总数"),
                 "by_capability": {
-                    k: {"total": v["total"], "success": v["success"],
-                        "success_rate": round(v["success"] / v["total"] * 100, 1)
-                        if v["total"] else None}
+                    # 键名兼容：前端 MetricsPage 读 `by_capability[cap].success_rate`
+                    # （>=80/50 上色），所以 `total`/`success`/`success_rate` 三个
+                    # 旧键保留不动名；语义按任务13 分层收口：
+                    # - `success_rate` = **真实派发口径**（此前是含噪音的计划口径
+                    #   68.3%，实为 93.2%），前端显示的即真实健康度；
+                    # - `success_rate_planned` = 历史口径（**含噪音**：把未执行、
+                    #   门禁跳过、级联阻塞都算成失败），只供对比/追溯；
+                    # - 其余分层桶与两个总数为新增字段，便于定位缺口来源。
+                    k: {
+                        "total": v["total_planned"],
+                        "success": v["success"],
+                        "success_rate": v["success_rate_dispatched"],
+                        "success_rate_planned": v["success_rate_planned"],
+                        "total_planned": v["total_planned"],
+                        "total_dispatched": v["total_dispatched"],
+                        "success_dispatched": v["success_dispatched"],
+                        "unexecuted": v["unexecuted"],
+                        "gate_blocked": v["gate_blocked"],
+                        "cascade_blocked": v["cascade_blocked"],
+                        "genuine_failed": v["genuine_failed"],
+                        "other": v["other"],
+                    }
                     for k, v in sorted(cap_stats["by_capability"].items())
                 },
                 # 覆盖范围声明：steps_json 自 2026-09 才落库，空字典 = 库里
                 # 一条 steps_json 都没有（不是"没有能力统计代码"）
                 "by_capability_scope": cap_stats["scope"],
                 "by_capability_available": cap_stats["available"],
+                # 分层口径说明随汇总下发：`success_rate` 换口径后，读汇总的人
+                # 必须能看出"计划口径"与"派发口径"的区别，否则会拿旧数字对新数字
+                "by_capability_metric_note": (
+                    "success_rate = 真实派发口径（派发步成功/派发步数）；"
+                    "success_rate_planned = 历史口径（成功步/计划步，**含噪音**："
+                    "未执行 + 门禁跳过 + 级联阻塞均计入失败）；"
+                    "genuine_failed = agent_id 非空且 status=FAILED，是唯一"
+                    "值得修的能力失败桶。判定顺序：unexecuted → success → "
+                    "cascade_blocked → gate_blocked → genuine_failed → other。"
+                    "other = 未归类残渣（全表 6 步）：`_dispatch` 在超时/协议错误/"
+                    "预算拒绝等路径直接返回结果且**不带 agent_id**，故落不进"
+                    " genuine_failed（含 300s/600s 超时 3 步、协议错误 1 步、"
+                    "预算拒绝 2 步）——要修的是 `_dispatch` 的记账，不是分类口径"),
             }
 
             with open(SUMMARY_FILE, "w", encoding="utf-8") as f:

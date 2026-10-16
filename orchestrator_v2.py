@@ -274,6 +274,36 @@ _FETCH_ROLE_KW = {
 }
 
 
+def _normalize_unexecuted_steps(steps: list) -> list:
+    """把"计划里有、本轮没跑到"的步骤补写成显式终态（任务13，P0 口径分层）。
+
+    实机（任务12 复盘 `agents.db`）：822 个落库步骤里 64 个 `result` 连 `status`
+    键都没有——它们既不是成功也不是失败，而是**从未执行**（反思轮新增后被替换、
+    取消、或 DAG 提前收尾），旧数据里与真实失败混在同一个"失败"桶，把
+    `by_capability` 的成功率拉低（package 36 个"失败"里 12 个是这种）。
+    收尾落库前统一补写 `status: "CANCELLED"` + `reason: "unexecuted"`，
+    让"未执行"成为**显式事实**而不是空白；指标侧把缺 status 与 CANCELLED
+    一律归 `unexecuted`（兼容历史数据，见 metrics_collector._step_bucket）。
+
+    只补**缺失**的 status：已有终态（SUCCESS/FAILED/CANCELLED）的步骤原样保留，
+    不覆盖 worker 与取消闸门写下的真值。就地修改并返回同一列表（调用方是
+    终态唯一落库点 `_finalize_task`，此后无人再读这些字典）。
+    """
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        ri = s.get("result")
+        if not isinstance(ri, dict):
+            ri = {} if ri is None else {"result": str(ri)[:500]}
+        if str(ri.get("status") or "").strip():
+            continue
+        ri = dict(ri)
+        ri["status"] = "CANCELLED"      # 与 task_state.CANCELLED 同值（显式终态）
+        ri["reason"] = "unexecuted"     # 没跑到，不是跑坏了
+        s["result"] = ri
+    return steps or []
+
+
 def _artifact_bytes(artifact: dict, task_id: str) -> bytes | None:
     """读回抓取时保存的 PDF 原始字节并校验 hash（不符/缺失返回 None）。
 
@@ -6339,6 +6369,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if _superseded:
                 logger.error("任务 %s 终态未落库：%s", task_id, _superseded)
                 return
+            # 任务13（P0 口径分层）：落库前把"没跑到"的步骤补写成显式终态
+            # （CANCELLED/unexecuted），不再让未执行与真实失败混在同一个桶里。
+            # 纯函数（可单测），只补缺失的 status，不覆盖已有真值。
+            steps = _normalize_unexecuted_steps(steps)
             # 本地 SQLite 的失败多半是瞬时争用（库忙/锁），小幅重试即可；重试后仍失败
             # 就**不**算已终结：库里会停在 RUNNING，由 stale 兜底与后续重试处理，
             # 并在 Redis 留一个可查标记（此前只写一行 warning，等于没人知道）。
@@ -7336,6 +7370,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             has_failure = True
             delivery = (f"> **本次运行因根任务预算耗尽而提前收尾：{_budget_stop}**\n"
                         "> 结果可能不完整，需人工确认后再使用。\n\n" + delivery)
+        # 任务13（P0 口径分层）：检索门禁跳过=**资料缺口**，任务不因此判失败，
+        # 但必须在交付里注明"检索步骤未获取到有效结果"，让用户看得见缺什么。
+        # 写在 wrapper（不改被验收的正文 `detail`）：交付字节与验收对象的同一性
+        # 由上面的装配唯一实现保证，这里与预算耗尽提示走同一道口子。
+        _gap_steps = sorted(str(k) for k, r in completed_all.items()
+                            if self._is_search_gap_skip(r))
+        if _gap_steps:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": f"资料缺口：步骤 {'、'.join(_gap_steps[:6])} "
+                                      "检索未获取到有效来源，已跳过抓取（不计为能力失败）",
+                           "timestamp": self._now_iso()})
+            delivery = (
+                f"> **资料缺口提示**：检索步骤未获取到有效来源"
+                f"（步骤 {'、'.join(_gap_steps[:6])}），本次按现有资料交付，"
+                "未执行对应抓取；需补资料或换检索词后重试。\n\n" + delivery)
         try:
             from delivery_pipeline import assemble_and_verify, write_wrapper
             from report_version import DELIVERY_DRAFT, DELIVERY_VERIFIED
@@ -7753,6 +7803,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                        "timestamp": self._now_iso()})
         return True
 
+    @staticmethod
+    def _is_search_gap_skip(result) -> bool:
+        """谓词：这一步是不是"检索没产出可用来源"的门禁跳过（任务13）。
+
+        资料缺口 ≠ 能力失败：`无候选 URL` 是检索门禁**未派发抓取**就跳过，
+        不该计入真实失败或把任务判 FAILED。判据按结果文本（历史数据没有
+        `gate_skipped` 标记）+ 本轮新数据的显式标记，两处同源。
+        """
+        if not isinstance(result, dict):
+            return False
+        if result.get("gate_skipped"):
+            return True
+        return "无候选 URL" in str(result.get("result") or "")
+
     def _optional_step_ids(self, steps: list[dict], task_id: str) -> set:
         """本轮 DAG 里"失败不算失败（只是缺口）"的步骤集合。
 
@@ -7876,7 +7940,25 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     logger.warning(
                         "web_fetch step %s skipped: no candidate URL in instruction",
                         step["step_id"])
+                    # 任务13（P0 口径分层）：检索没产出可用来源是**资料缺口**，
+                    # 不是能力失败。旧行为把这种步骤留在 FAILED 且计入任务失败，
+                    # 于是"检索词没命中"就整单判红（实机 `ui-fa2cb73e59`/
+                    # `ui-603f626cbe`）。现在按**谓词式可选跳过**处理：
+                    # ① 结果打 `gate_skipped` 标记（指标分层与下游识别用，
+                    #    判据见 `_is_search_gap_skip`）；
+                    # ② 把本步登记进 `optional_ids`（与 `deps_failed`、阻塞传播
+                    #    **同一份集合**）→ 下游不再被 "Blocked by failed" 连锁，
+                    #    终态也不因此判 FAILED；交付仍由硬门槛与验收按事实判定；
+                    # ③ 缺口在报告里注明（见收尾装配处的"资料缺口提示"）。
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "info", "agent": "orchestrator",
+                                   "message": f"Step {step['step_id']}: 检索缺口"
+                                              "（无候选 URL）按资料缺口处理，不判任务失败",
+                                   "timestamp": self._now_iso()})
+                    with lock:
+                        optional_ids.add(str(step["step_id"]))
                     return {"task_id": step["step_id"], "status": "FAILED",
+                            "gate_skipped": True,
                             "result": "无候选 URL（检索未产出可用来源），已跳过抓取；"
                                       "需补资料或换检索词后重试",
                             "elapsed_sec": round(time.time() - step_start, 1)}
@@ -8248,7 +8330,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     # 是计划里写明的"正常缺口"（见 `_research_steps` 的 `optional`），
                     # 交付硬门槛与验收照旧按事实/正文判定——不该因为少一个有来源的附注页
                     # 就把整单判成 FAILED（实机：交付已 verified，任务状态却是 FAILED）。
-                    if result.get("status") != "SUCCESS" and k not in optional_ids:
+                    # 任务13：检索门禁跳过（无候选 URL）同样是**资料缺口**——
+                    # 谓词判定兜住旧路径与重试路径（不依赖 optional_ids 登记）
+                    if (result.get("status") != "SUCCESS" and k not in optional_ids
+                            and not self._is_search_gap_skip(result)):
                         has_failure = True
                 if step.get("capability") == "web_search":
                     res_raw = result.get("result", "")
