@@ -37,9 +37,14 @@ _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 
 logger = logging.getLogger(__name__)
 
-# 输出文件
+# 输出文件。SUMMARY_FILE 与 web_ui._METRICS_SUMMARY 读同一环境变量、
+# 同一默认值（模块目录）——写读两端必须同源，否则容器里会出现
+# "写 /data 读 /app"的路径分叉（Dockerfile 设 METRICS_SUMMARY=/data/...）
 METRICS_FILE = os.environ.get("METRICS_FILE", "metrics.csv")
-SUMMARY_FILE = os.environ.get("METRICS_SUMMARY", "metrics_summary.json")
+SUMMARY_FILE = os.environ.get(
+    "METRICS_SUMMARY",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "metrics_summary.json"))
 
 # 监听频道
 WATCH_CHANNELS = [

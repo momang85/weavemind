@@ -158,7 +158,14 @@ _evt_seq = 0
 _last_heartbeat_sig = None
 _rate_limiter = None
 _START_TIME = time.time()
-_METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics_summary.json")
+# /api/metrics 的数据来源。读 METRICS_SUMMARY 环境变量（与
+# metrics_collector 的写入路径同一变量、同一默认值）——此前硬编码模块
+# 目录，容器里 Dockerfile 设 METRICS_SUMMARY=/data/... 时写 /data 读
+# /app，metrics 页面永远显示旧数据。
+_METRICS_SUMMARY = os.environ.get(
+    "METRICS_SUMMARY",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "metrics_summary.json"))
 _STALE_AFTER_SECONDS = int(os.environ.get("STALE_TASK_TIMEOUT", "1800"))
 _memory_manager = None
 _memory_manager_lock = threading.Lock()
