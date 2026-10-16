@@ -99,6 +99,77 @@ def _db_task_totals() -> dict:
     return out
 
 
+def _db_capability_stats() -> dict:
+    """按能力类型的**步级**成功率：从 `task_history.steps_json` 全表聚合。
+
+    为什么换成任务库（`by_capability` 此前恒为 `{}` 的根因）：原实现只在
+    进程内累计 `task_complete` 事件 payload 里的 `steps`，但编排器当前 10 个
+    `task_complete` 发布点**没有一个带 steps**（唯一带 steps 的是
+    AWAITING_CONFIRM / RUNNING 等非终态推送，被 `_process` 的终态 gate 挡掉），
+    而且进程内累计重启即清零 —— 于是统计代码在、输入永远为空。
+    任务库里其实有真实数据（每步含 `capability` 与 `result.status`），
+    口径与原实现保持一致：每步一条，成功 = `result.status == "SUCCESS"`。
+
+    覆盖范围必须显式声明在 `scope` 里：`steps_json` 自 2026-09 才开始落库，
+    更早的任务没有这个字段，所以它是**有 steps 落库的那批任务**的能力分布，
+    不是全量任务。
+    """
+    out = {
+        "available": False,
+        "scope": "task_history.steps_json",
+        "by_capability": {},
+        "task_rows": 0,
+        "step_rows": 0,
+        "step_total": 0,
+    }
+    try:
+        import sqlite3
+        db = sqlite3.connect(db_paths.resolve_db_path(), timeout=5)
+        try:
+            grand = int(db.execute(
+                "SELECT COUNT(*) FROM task_history").fetchone()[0] or 0)
+            rows = db.execute(
+                "SELECT steps_json FROM task_history"
+                " WHERE steps_json IS NOT NULL AND steps_json != ''"
+            ).fetchall()
+        finally:
+            db.close()
+    except Exception:
+        return out
+    caps: dict[str, dict] = defaultdict(lambda: {"total": 0, "success": 0})
+    step_total = 0
+    for (raw,) in rows or []:
+        try:
+            steps = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(steps, list):
+            continue
+        for s in steps:
+            if not isinstance(s, dict):
+                continue
+            cap = str(s.get("capability") or "").strip()
+            if not cap:
+                continue
+            step_total += 1
+            caps[cap]["total"] += 1
+            ri = s.get("result")
+            if isinstance(ri, dict) and ri.get("status") == "SUCCESS":
+                caps[cap]["success"] += 1
+    out.update({
+        "available": True,
+        "by_capability": dict(caps),
+        "task_rows": grand,
+        "step_rows": len(rows or []),
+        "step_total": step_total,
+        "scope": (
+            f"task_history.steps_json 全表聚合：{len(rows or [])}/{grand} 个任务"
+            f"落有 steps_json，共 {step_total} 步；步成功 = step.result.status"
+            " == SUCCESS。该字段自 2026-09 起才写入，更早任务不在内"),
+    })
+    return out
+
+
 class MetricsCollector:
     """实时指标收集器。"""
 
@@ -120,14 +191,12 @@ class MetricsCollector:
         self._critic_fail = 0
         self._alerts = 0
 
-        # 按能力类型
-        self._by_capability: dict[str, dict] = defaultdict(
-            lambda: {"total": 0, "success": 0}
-        )
+        # 能力分布**不在进程内累计**：见 _db_capability_stats（_write_summary
+        # 从 task_history.steps_json 全表取）。此前的 _by_capability 累计器
+        # 从未拿到过输入（task_complete payload 不带 steps）且重启清零。
 
-        # 时间窗口内的任务
+        # 时间窗口内的任务（延迟样本来源）
         self._recent_tasks: list[dict] = []
-        self._task_start_times: dict[str, float] = {}
 
         # CSV 初始化
         self._csv_file = open(METRICS_FILE, "a", newline="", encoding="utf-8")
@@ -208,13 +277,20 @@ class MetricsCollector:
             _payload = data.get("payload") or {}
             tid = data.get("task_id", "")
             _el = _payload.get("elapsed_sec")
-            if _el and tid and tid in self._task_start_times:
-                self._recent_tasks.append({
-                    "task_id": tid,
-                    "status": str(_payload.get("status") or ""),
-                    "latency": round(float(_el), 2),
-                })
-                self._task_start_times.pop(tid, None)
+            _latency = round(float(_el), 2) if isinstance(_el, (int, float)) and _el else 0
+            # 延迟样本直接用 payload 的 elapsed_sec（编排器主终态已算好并随
+            # task_complete 发出）。此前 gate 在 `tid in _task_start_times` 上，
+            # 而那个 dict 自初始提交起从未被赋值 —— 死代码，在线延迟样本
+            # 全被丢弃，avg/p95_latency_sec 恒为 0.0。
+            if _latency and tid:
+                with self._lock:
+                    self._recent_tasks.append({
+                        "task_id": tid,
+                        "status": str(_payload.get("status") or ""),
+                        "latency": _latency,
+                    })
+                    if len(self._recent_tasks) > 100:
+                        self._recent_tasks = self._recent_tasks[-50:]
             self._handle_task_complete(now, {
                 "task_id": tid,
                 "status": str(
@@ -222,6 +298,7 @@ class MetricsCollector:
                     or data.get("status") or "UNKNOWN"
                 ),
                 "steps": _payload.get("steps") or [],
+                "latency": _latency,
             })
             return
 
@@ -241,16 +318,11 @@ class MetricsCollector:
                               data.get("type", "")])
 
         elif "task_result" in channel:
-            tid = data.get("task_id", "")
-            if tid and tid in self._task_start_times:
-                latency = time.time() - self._task_start_times.pop(tid)
-                with self._lock:
-                    self._recent_tasks.append({
-                        "task_id": tid, "status": data.get("status"),
-                        "latency": round(latency, 2),
-                    })
-                    if len(self._recent_tasks) > 100:
-                        self._recent_tasks = self._recent_tasks[-50:]
+            # worker 级子任务结果：过去仅在 `tid in _task_start_times` 时记一条
+            # 延迟（该 dict 从未被赋值 → 分支恒不生效，已删）。子任务没有
+            # 主任务终态语义，顶层任务的延迟统一由 orchestrator:response 的
+            # task_complete 采集，这里不再重复计。
+            return
 
     def _handle_task_complete(self, now: str, data: dict):
         tid = data.get("task_id", "")
@@ -266,15 +338,11 @@ class MetricsCollector:
             else:
                 self._failed_tasks += 1
 
-        # 统计 Replan
+        # 统计 Replan（能力分布改由 _db_capability_stats 从任务库全量聚合，
+        # 见 _write_summary；此处不再进程内累计——payload 从不带 steps）
         replan_triggered = 0
         for s in steps:
-            cap = s.get("capability", "")
-            self._by_capability[cap]["total"] += 1
-            ri = s.get("result", {})
-            if isinstance(ri, dict) and ri.get("status") == "SUCCESS":
-                self._by_capability[cap]["success"] += 1
-            if "alt-" in s.get("step_id", ""):
+            if "alt-" in str(s.get("step_id", "")):
                 replan_triggered += 1
 
         self._replan_count += replan_triggered
@@ -313,8 +381,10 @@ class MetricsCollector:
             else:
                 self._recent_tasks.append({"task_id": tid, "status": status, "cost_usd": cost_usd})
 
+        # latency_sec 列：此前硬编码 0（metrics.csv 因此无法复核延迟），
+        # 现在写 task_complete 带来的 elapsed_sec
         self._csv.writerow([
-            now, tid, status, 0, replan_triggered,
+            now, tid, status, data.get("latency", 0), replan_triggered,
             memory_chars, 0, len(steps), ""
         ])
         # 逐行落盘：metrics 进程被 kill 时不丢已统计数据
@@ -337,31 +407,50 @@ class MetricsCollector:
                 if self._total_tasks else 0.0
             )
             # 0 任务时失败率也应为 0（不能 100-0=100 误导成"全失败"）
+            # 延迟样本：只认 >0 的有效值；无样本 → 下面写 None（未知），
+            # 不再兜底 0.0（那会把"没有数据"伪装成"任务 0 秒完成"）
             latencies = [t.get("latency", 0) for t in self._recent_tasks
-                         if isinstance(t.get("latency"), (int, float))]
-            p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1] if latencies else 0.0
-            search_health = {}
+                         if isinstance(t.get("latency"), (int, float))
+                         and t.get("latency") > 0]
+            p95 = (sorted(latencies)[int(len(latencies) * 0.95) - 1]
+                   if latencies else None)
+            # Redis 可达性一次判定，决定两处的"真 0"与"不可用(null)"之分：
+            # - search_engine_health：不可达 → 空 dict（原行为）
+            # - cost_usd_total：get_monthly_spend 在 Redis 不在时降级返回 0.0
+            #   （预算逻辑的契约，这里不改它），但把"没拿到台账"写进汇总就是
+            #   "本月花了 0 美元"的伪数据 → 不可达时写 None
+            redis_ok = False
             try:
-                r = redis.Redis(
+                _rc = redis.Redis(
                     host=os.environ.get("REDIS_HOST", "localhost"),
                     port=int(os.environ.get("REDIS_PORT", "6379")),
                     decode_responses=True,
-                    socket_connect_timeout=2, socket_timeout=2, retry=_NO_REDIS_RETRY,
+                    socket_connect_timeout=2, socket_timeout=2,
+                    retry=_NO_REDIS_RETRY,
                 )
-                raw = r.get("search_engine_health")
-                if raw:
-                    import json as _json
-                    search_health = _json.loads(raw)
+                _rc.ping()
+                redis_ok = True
             except Exception:
-                pass
-            # 累计成本与预算页同本账：月度台账（Redis llm_usage_month，
-            # 全进程记账、跨重启累计）。此前用"进程内累加 + 顶层任务键"
-            # 口径，worker 记账落在 dispatch_id 键上读不到，恒显示 0。
-            try:
-                from costs import get_monthly_spend
-                cost_total = get_monthly_spend()
-            except Exception:
-                cost_total = 0.0
+                redis_ok = False
+            search_health = {}
+            if redis_ok:
+                try:
+                    raw = _rc.get("search_engine_health")
+                    if raw:
+                        import json as _json
+                        search_health = _json.loads(raw)
+                except Exception:
+                    pass
+            cost_total = None
+            if redis_ok:
+                # 累计成本与预算页同本账：月度台账（Redis llm_usage_month，
+                # 全进程记账、跨重启累计）。此前用"进程内累加 + 顶层任务键"
+                # 口径，worker 记账落在 dispatch_id 键上读不到，恒显示 0。
+                try:
+                    from costs import get_monthly_spend
+                    cost_total = get_monthly_spend()
+                except Exception:
+                    cost_total = None
             # 累计任务数/成功率：与 /api/status 同源（agents.db 的 task_history），
             # 且**同一快照、同一范围**给出全部分类计数——前端不再自行推断成功数。
             db_totals = _db_task_totals()
@@ -371,6 +460,8 @@ class MetricsCollector:
                 "running", "queued", "unknown", "terminal")}
             tasks["available"] = available
             tasks["scope"] = db_totals.get("scope", "task_history 全表")
+            # 能力分布：与 tasks 一样取自任务库（全表快照），口径见 scope
+            cap_stats = _db_capability_stats()
             terminal = tasks["terminal"] if available else 0
             # 分母是终态数；无终态任务（或数据不可用）时成功/失败率均为 None → 前端显示"未知"
             success_rate = (tasks["success"] / terminal * 100) if terminal else None
@@ -387,9 +478,19 @@ class MetricsCollector:
                 "search_health": search_health,
                 "avg_latency_sec": round(
                     sum(latencies) / len(latencies), 2
-                ) if latencies else 0.0,
-                "p95_latency_sec": round(float(p95), 2),
-                "cost_usd_total": round(float(cost_total), 4),
+                ) if latencies else None,
+                "p95_latency_sec": round(float(p95), 2) if p95 is not None else None,
+                "latency_sample_size": len(latencies),
+                "latency_scope": (
+                    "仅统计本 metrics 进程启动后收到 elapsed_sec 的主终态任务，"
+                    "重启即清零，故为空 = 本进程还没结算过任务，而不是延迟为 0。"
+                    "历史任务不能直接取均值：task_history.completed_at 会被后续落库"
+                    "重盖（task_state ON CONFLICT DO UPDATE），需要历史值请取分位数"),
+                "cost_usd_total": round(float(cost_total), 4)
+                if cost_total is not None else None,
+                "cost_usd_scope": (
+                    "Redis llm_usage_month 月度台账（与预算页同本账）；"
+                    "null = Redis 不可达，不是本月 0 花费"),
                 "critic": {
                     "pass": self._critic_pass,
                     "fail": self._critic_fail,
@@ -399,10 +500,21 @@ class MetricsCollector:
                     "success": self._replan_success,
                 },
                 "alerts": self._alerts,
+                # 与 task_history 的全表口径不同：这三个是进程内计数，
+                # 重启（含离线重跑汇总）即归零，别读成"历史上从未发生"
+                "process_counters_scope": (
+                    "critic / replan / alerts 均为本 metrics 进程内计数，"
+                    "重启归零；0 = 本进程尚未观察到该类事件，不是历史总数"),
                 "by_capability": {
-                    k: {"success_rate": round(v["success"] / v["total"] * 100, 1) if v["total"] else 0}
-                    for k, v in self._by_capability.items()
+                    k: {"total": v["total"], "success": v["success"],
+                        "success_rate": round(v["success"] / v["total"] * 100, 1)
+                        if v["total"] else None}
+                    for k, v in sorted(cap_stats["by_capability"].items())
                 },
+                # 覆盖范围声明：steps_json 自 2026-09 才落库，空字典 = 库里
+                # 一条 steps_json 都没有（不是"没有能力统计代码"）
+                "by_capability_scope": cap_stats["scope"],
+                "by_capability_available": cap_stats["available"],
             }
 
             with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
