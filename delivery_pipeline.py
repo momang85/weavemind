@@ -2034,6 +2034,35 @@ def research_candidate_body(task_id: str, goal: str, body: str, *,
         return None
 
 
+def accept_task_meta(task_id: str) -> dict:
+    """验收体裁（report_type）要读的**任务元数据**：任务行 + 解析后的 run_options。
+
+    实测：当前链路没有任何"报告体裁"字段——`research_request` 只有公司/期间/口径
+    （`facts.parse_research_request`），`run_options` 只有 auto_run/template_steps，
+    `task_history` 也没有 report_type 列。所以这里如实把"可能声明体裁的地方"整包交给
+    `acceptance_checker.resolve_report_type`：将来任一字段声明了体裁就优先采信，
+    没声明则按目标文本判定。读不到元数据时返回空 dict，验收照常进行。
+    """
+    try:
+        import task_state as _ts
+        row = _ts.read_task(task_id) or {}
+    except Exception as exc:                     # noqa: BLE001 - 元数据读不到不影响验收
+        logger.debug("读取任务元数据失败（task=%s）：%s", task_id, str(exc)[:120])
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    meta = dict(row)
+    _raw = row.get("run_options_json")
+    if isinstance(_raw, str) and _raw.strip():
+        try:
+            _parsed = json.loads(_raw)
+            if isinstance(_parsed, dict):
+                meta["run_options"] = _parsed
+        except Exception:                        # noqa: BLE001 - 坏 JSON 当没配
+            pass
+    return meta
+
+
 def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     trigger: str = "报告步骤", prefer_body: bool = True,
                     hooks: dict | None = None, ws_dir=None,
@@ -2052,6 +2081,9 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
     - `on_summary(summary)`：把缺口摘要推给前端；
     - `iteration`：写进审计事件的轮次；
     - `on_failure(result, report)`：验收 fail 后的沉淀钩子（评测集生长）。
+
+    验收体裁（`report_type`）由 `accept_task_meta(task_id)` + goal 判定后**透传**给
+    `run_acceptance`：同一份正文按不同体裁取不同阈值，结论里回写生效体裁，便于对账。
     """
     hooks = hooks or {}
     try:
@@ -2060,7 +2092,7 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
             return None
         _t0 = time.time()
         _repaired = False
-        from acceptance_checker import run_acceptance
+        from acceptance_checker import resolve_report_type, run_acceptance
         from workspace import task_reports_dir
         rpath = task_reports_dir(task_id) / "report.md"
         if prefer_body and str(body or "").strip():
@@ -2082,7 +2114,11 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                 logger.info("验收对象改为代码装配的候选稿（task=%s，%d→%d 字符）",
                             task_id, len(report), len(candidate))
                 report = candidate
-        result = run_acceptance(task_id, goal, report, _ws(task_id, ws_dir))
+        # 报告体裁（report_type）：任务元数据显式声明 > 目标文本判定 > default_profile；
+        # 验收阈值/时效豁免按体裁档位取（acceptance.profiles），判定规则不变。
+        _report_type = resolve_report_type(goal, accept_task_meta(task_id))
+        result = run_acceptance(task_id, goal, report, _ws(task_id, ws_dir),
+                                report_type=_report_type)
         # 虚假标注确定性修复：把"把叙述片段当来源"的句子降级为诚实披露后复检
         try:
             sl = (result.get("checks") or {}).get("source_labeling") or {}
@@ -2094,7 +2130,9 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     rpath.write_text(repaired, encoding="utf-8")
                     report = repaired
                     _repaired = True
-                    result = run_acceptance(task_id, goal, repaired, _ws(task_id, ws_dir))
+                    result = run_acceptance(task_id, goal, repaired,
+                                            _ws(task_id, ws_dir),
+                                            report_type=_report_type)
         except Exception as exc:
             logger.warning("来源标注自动修复失败（task=%s）：%s", task_id, str(exc)[:120])
         # 来源清单 URL 存活校验（仅提示，不改 overall）

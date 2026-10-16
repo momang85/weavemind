@@ -301,7 +301,9 @@ class TestAcceptanceRulesVersioning(unittest.TestCase):
     # 本断言随之失败 —— 强制"改规则 → bump ACCEPTANCE_RULES_VERSION
     # → 更新此基线"的流程，保证历史结果可反查判定规则版本。
     # 2026.10.03：官方披露站点精确 hostname + 定位/派生声明按产物核验（b98aef94）。
-    _FINGERPRINT_BASELINE = "b98aef94"
+    # 2026.10.16：验收阈值改为按报告体裁档位取（内置兜底档位表 + 体裁判定线索进指纹，
+    # config.json 的 acceptance.profiles 取值本身不进指纹）（e71bd36b）。
+    _FINGERPRINT_BASELINE = "e71bd36b"
 
     def test_acceptance_rules_fingerprint_stable(self):
         import acceptance_checker as ac

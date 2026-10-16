@@ -13,6 +13,7 @@
 
 import json
 import logging
+import os
 import re
 import itertools
 from pathlib import Path
@@ -28,11 +29,13 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 # 判定规则集版本：任何规则表/阈值/正则变更时必须 bump，
-# 并同步更新 test_p0 的指纹基线（test_acceptance_rules_fingerprint_stable
+# 并同步更新 test_acceptance_adversarial 的指纹基线（test_acceptance_rules_fingerprint_stable
 # 会因指纹变化而失败，强制走"改规则→bump 版本→更新基线"流程）。
 # 2026.10.03：官方披露站点改**精确 hostname**判定；定位/派生型来源声明改为按底稿/
 # 准入记录核验（页码+科目+行文、指标+期间+口径+derived_from）。
-ACCEPTANCE_RULES_VERSION = "2026.10.03"
+# 2026.10.16：验收阈值支持**报告体裁**（`acceptance.profiles`）——内置兜底档位表
+# `_BUILTIN_ACCEPTANCE_PROFILES` 与体裁判定线索 `_REPORT_TYPE_MARKERS` 纳入指纹。
+ACCEPTANCE_RULES_VERSION = "2026.10.16"
 
 # 纳入指纹的规则表（常量名；内部按 key/元素排序后哈希，顺序无关）
 _FINGERPRINT_RULES = (
@@ -48,6 +51,9 @@ _FINGERPRINT_RULES = (
     "_PROFILE_REPORT_CHECKS", "_CODE_GOAL_HINTS", "_DATA_GOAL_HINTS",
     # 10-03：官方披露站点白名单与派生算式→指标映射也是判定规则
     "_OFFICIAL_DISCLOSURE_HOSTS", "_DERIVED_METRIC_TERMS",
+    # 10-16：验收体裁档位的内置兜底表与体裁判定线索（config 可覆盖取值，
+    # 但**兜底值与判定线索**是规则，进指纹）
+    "_BUILTIN_ACCEPTANCE_PROFILES", "_REPORT_TYPE_MARKERS",
 )
 # 纳入指纹的关键正则（取 .pattern）
 _FINGERPRINT_PATTERNS = (
@@ -128,6 +134,7 @@ def build_acceptance_event(
         "report_sha256": str(result.get("report_sha256") or ""),
         "overall": str(result.get("overall") or ""),
         "profile": str(result.get("profile") or ""),
+        "report_type": str(result.get("report_type") or ""),
         "gaps_count": len(result.get("gaps") or []),
         "gaps": [str(g)[:200] for g in (result.get("gaps") or [])][:10],
         "checks_failed": failed,
@@ -3334,6 +3341,202 @@ def traceability_domain(goal: str) -> str:
     return "research"
 
 
+# ─────────────────────────────────────────────
+# 报告体裁档位（acceptance.profiles）
+# ─────────────────────────────────────────────
+
+# 内置兜底档位表：`config.json` 的 `acceptance` 段缺失/不可解析时使用。
+# 数值以 docs/arch_task4_acceptance_config.md 为准（**不得**在此自行调整；要改先改文档）。
+# - traceability：按**溯源域**取阈值（本表只给 financial/research 两轴；crypto/macro/news
+#   仍用 `_TRACEABILITY_THRESHOLDS` 的域阈值，不被体裁改写）；
+# - freshness_required=False（事件研究）：这类报告天然没有"数据截止"块，改判
+#   freshness_alternatives 词表，命中即通过、未命中只提示不判失败；
+# - placeholder_max：financial 域报告占位标记达到该数量才判交付物不完整（原硬编码 3）。
+_BUILTIN_ACCEPTANCE_PROFILES: dict[str, dict] = {
+    "annual_report": {
+        "traceability": {"financial": 0.7, "research": 0.5},
+        "freshness_required": True,
+        "placeholder_max": 3,
+    },
+    "semi_annual": {
+        "traceability": {"financial": 0.55, "research": 0.4},
+        "freshness_required": True,
+        "placeholder_max": 5,
+    },
+    "event_study": {
+        "traceability": {"financial": 0.5, "research": 0.3},
+        "freshness_required": False,
+        "freshness_alternatives": ["公告日", "事件日", "披露日"],
+        "placeholder_max": 5,
+    },
+}
+_BUILTIN_DEFAULT_PROFILE = "annual_report"
+
+# 报告体裁线索（目标文本层的兜底判定，顺序敏感）：
+# 事件研究 > 半年报 > 年报——"半年报并购公告"按事件研究判（时效锚点是公告日）。
+_REPORT_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("event_study", (
+        "并购", "收购", "回购", "要约", "重组", "公告", "减持", "增持", "中标",
+        "股权激励", "重大事项", "事件研究", "定增", "分红", "资产出售",
+    )),
+    ("semi_annual", ("半年报", "半年度", "中报", "中期报告", "半年", "h1")),
+    ("annual_report", ("年报", "年度报告", "annual report")),
+)
+
+# 任务元数据里可能显式声明体裁的键（顶层，或下列容器内）：声明了就优先采信，
+# 但取值必须是配置里存在的档位名，否则继续按目标文本判定。
+_REPORT_TYPE_META_KEYS = ("report_type", "acceptance_report_type", "report_genre")
+_REPORT_TYPE_META_CONTAINERS = ("run_options", "research_request", "task_meta")
+
+# 配置文件位置：`WEAVEMIND_CONFIG` 优先（与 net_policy 同口径），否则仓库根的 config.json；
+# 缺失/损坏时回退随包模板 config.example.json，再回退内置兜底表。
+_CONFIG_PATH = Path(os.environ.get("WEAVEMIND_CONFIG")
+                    or (Path(__file__).resolve().parent / "config.json"))
+_CONFIG_TEMPLATE_PATH = Path(__file__).resolve().parent / "config.example.json"
+
+
+def _read_config_file(path: Path) -> dict:
+    """读一个配置文件（失败返回空 dict：验收不能因为配置坏了而崩）。"""
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:                     # noqa: BLE001 - 配置坏了按"没配"处理
+        logger.warning("验收配置读取失败（%s）：%s", path.name, str(exc)[:120])
+    return {}
+
+
+def _merge_acceptance_profile(base: dict, override: dict) -> dict:
+    """档位合并：override 的键优先，缺失键回落内置（=文档值）；traceability 逐轴合并。"""
+    out = dict(base)
+    for key, value in override.items():
+        if key == "traceability" and isinstance(value, dict):
+            axes = dict(base.get("traceability") or {})
+            axes.update(value)
+            out["traceability"] = axes
+        else:
+            out[key] = value
+    return out
+
+
+def load_acceptance_profiles() -> tuple[dict, str]:
+    """当前生效的体裁档位表与默认档位名。
+
+    来源：`config.json` 的 `acceptance` 段 → 随包模板 `config.example.json` →
+    内置兜底表。配置是**部署状态**不是规则集：它不进 `rules_fingerprint()`
+    （指纹锚定判定规则与兜底值），所以同一份结果仍按 rules_version 对账，
+    而阈值可按部署调整。
+    """
+    cfg = _read_config_file(_CONFIG_PATH)
+    if not cfg.get("acceptance"):
+        cfg = _read_config_file(_CONFIG_TEMPLATE_PATH)
+    block = cfg.get("acceptance")
+    block = block if isinstance(block, dict) else {}
+    raw = block.get("profiles")
+    raw = raw if isinstance(raw, dict) else {}
+    # 内置档位表是地板：部署可以覆盖某个档位的部分键、追加新档位，
+    # 但没写到的档位仍按内置（文档）值解析——"键不存在回落 default_profile"
+    # 与"部署没配的档位回落文档默认"同时成立。
+    profiles: dict[str, dict] = {k: dict(v) for k, v in _BUILTIN_ACCEPTANCE_PROFILES.items()}
+    for name, prof in raw.items():
+        if not isinstance(prof, dict):
+            continue
+        base = profiles.get(str(name)) or {}
+        profiles[str(name)] = _merge_acceptance_profile(base, prof)
+    default = str(block.get("default_profile") or "").strip()
+    if default not in profiles:
+        default = (_BUILTIN_DEFAULT_PROFILE
+                   if _BUILTIN_DEFAULT_PROFILE in profiles else sorted(profiles)[0])
+    return profiles, default
+
+
+def report_type_from_meta(meta, profiles: dict | None = None) -> str:
+    """任务元数据里**显式声明**的体裁（未声明/取值不是已知档位 → 空串，不猜）。"""
+    if not isinstance(meta, dict):
+        return ""
+    valid = set(profiles or _BUILTIN_ACCEPTANCE_PROFILES)
+
+    def _pick(src) -> str:
+        if not isinstance(src, dict):
+            return ""
+        for key in _REPORT_TYPE_META_KEYS:
+            val = str(src.get(key) or "").strip()
+            if val and val in valid:
+                return val
+        return ""
+
+    hit = _pick(meta)
+    if hit:
+        return hit
+    for container in _REPORT_TYPE_META_CONTAINERS:
+        hit = _pick(meta.get(container))
+        if hit:
+            return hit
+    return ""
+
+
+def resolve_report_type(goal: str = "", meta=None,
+                        profiles: dict | None = None,
+                        default: str | None = None) -> str:
+    """判定报告体裁：任务元数据显式声明 > 目标文本线索 > 默认档位。
+
+    为什么需要元数据分支：**当前任务链路没有"报告体裁"字段**（`research_request`
+    只有公司/期间/口径，`run_options` 只有 auto_run/template_steps 这类选项，
+    `task_history` 无 report_type 列）。所以这里按"将来声明了就优先采信、没声明
+    就按目标文本判定"实现；`delivery_pipeline` 会把任务行元数据传进来。
+    """
+    if profiles is None or default is None:
+        _profiles, _default = load_acceptance_profiles()
+        profiles = profiles or _profiles
+        default = default or _default
+    hit = report_type_from_meta(meta, profiles)
+    if hit:
+        return hit
+    g = str(goal or "").lower()
+    for name, markers in _REPORT_TYPE_MARKERS:
+        if name in profiles and any(m in g for m in markers):
+            return name
+    return str(default)
+
+
+def acceptance_profile(report_type: str | None = None) -> tuple[str, dict]:
+    """取生效体裁与其档位：未知/未声明体裁回落到 `default_profile`。"""
+    profiles, default = load_acceptance_profiles()
+    name = str(report_type or "").strip() or default
+    prof = profiles.get(name)
+    if not isinstance(prof, dict):
+        name = default
+        prof = profiles.get(default) or {}
+    return name, prof
+
+
+def traceability_threshold_for(domain: str | None, profile: dict | None) -> float:
+    """按溯源域从体裁档位取阈值；档位没给的域沿用 `_TRACEABILITY_THRESHOLDS`。
+
+    只有 financial / research 两轴受体裁影响（档位表就这两个轴）；crypto/macro/news
+    的域阈值不是"报告体裁"问题，保持原值——改的是阈值**来源**，不是判定规则。
+    """
+    axes = (profile or {}).get("traceability")
+    axes = axes if isinstance(axes, dict) else {}
+    dom = str(domain or "")
+    axis = "financial" if dom == "financial" else ("research" if dom == "research" else "")
+    if axis and axes.get(axis) is not None:
+        try:
+            return float(axes[axis])
+        except (TypeError, ValueError):
+            pass
+    return float(_TRACEABILITY_THRESHOLDS.get(dom, 0.7))
+
+
+def _profile_int(profile: dict | None, key: str, default: int) -> int:
+    """档位里的整数项（缺失/非法 → default）。"""
+    try:
+        return int((profile or {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _subject_of(text: str) -> str:
     """从一段文本里取**主体**（公司/实体名）；取不到返回空串（=未知）。
 
@@ -4827,14 +5030,16 @@ _NUMERIC_REQUIREMENT_KEYWORDS = (
 
 def check_deliverable_completeness(
     report: str, goal: str, domain: str | None = None,
+    placeholder_max: int = 3,
 ) -> dict:
     """交付物完整性检查：从 goal 提取关键交付要求（列表/前十/排名/表格类
     与数字要求），检查报告是否被数据缺失占位标记填满、是否缺少必需表格。
 
     规则：
-    - financial 域报告含未披露/未获取/待补充/数据缺失等占位标记 ≥3 处 → FAIL；
-      非金融域（行业调研/新闻/宏观/加密货币等）豁免该惩罚——诚实披露
-      "数据缺失"本身就是交付质量，数字溯源仍由 number_traceability 把关，
+    - financial 域报告含未披露/未获取/待补充/数据缺失等占位标记 ≥`placeholder_max`
+      处 → FAIL（`placeholder_max` 来自报告体裁档位：年报 3、半年报/事件研究 5；
+      此前是硬编码 3）；非金融域（行业调研/新闻/宏观/加密货币等）豁免该惩罚——
+      诚实披露"数据缺失"本身就是交付质量，数字溯源仍由 number_traceability 把关，
       避免"调研任务必然 SUCCESS_WITH_ISSUES"的结构性双重惩罚；
     - goal 要求列表/前十/排名且报告无任何表格，或表格内容全为占位 → FAIL；
     - 正常完整报告（含真实数据表格/无列表要求）→ pass。
@@ -4842,6 +5047,10 @@ def check_deliverable_completeness(
     r = str(report or "")
     g = str(goal or "").lower()
     domain = domain or traceability_domain(goal)
+    try:
+        _ph_max = max(1, int(placeholder_max))
+    except (TypeError, ValueError):
+        _ph_max = 3
     placeholder_count = _count_placeholders(r)
     list_required = any(k in g for k in _LIST_REQUIREMENT_KEYWORDS)
     numeric_required = any(k in g for k in _NUMERIC_REQUIREMENT_KEYWORDS)
@@ -4875,11 +5084,11 @@ def check_deliverable_completeness(
                 any(m in c for m in _PLACEHOLDER_MARKERS) for c in filled
             )
 
-    if placeholder_count >= 3 and domain == "financial":
+    if placeholder_count >= _ph_max and domain == "financial":
         passed = False
         detail = (
             f"交付物不完整：报告含 {placeholder_count} 处数据缺失占位"
-            "（未披露/未获取/待补充/数据缺失）"
+            f"（未披露/未获取/待补充/数据缺失，体裁上限 {_ph_max} 处）"
         )
     elif list_required and (not has_table or table_all_placeholder):
         passed = False
@@ -4889,7 +5098,7 @@ def check_deliverable_completeness(
         )
     else:
         passed = True
-        if placeholder_count >= 3:
+        if placeholder_count >= _ph_max:
             # 非金融域豁免：诚实披露数据缺失不双重惩罚（数字溯源仍从严）
             detail = (
                 f"交付物完整性：报告含 {placeholder_count} 处数据缺失占位，"
@@ -4907,6 +5116,7 @@ def check_deliverable_completeness(
         "pass": passed,
         "details": detail,
         "placeholder_count": placeholder_count,
+        "placeholder_max": _ph_max,
         "has_table": has_table,
         "table_all_placeholder": table_all_placeholder,
         "list_required": list_required,
@@ -5061,26 +5271,66 @@ _TIME_SENSITIVE_MARKERS = (
 _FRESHNESS_DATE_RE = re.compile(r"\d{4}[-/年]\d{1,2}")
 
 
-def check_freshness_block(report: str, goal: str = "") -> dict:
+def check_freshness_block(report: str, goal: str = "",
+                          freshness_required: bool = True,
+                          freshness_alternatives=()) -> dict:
     """数据时效区块检查：报告须含'数据时效/数据截止'字样 + 具体时间/日期。
 
     无时效语义的任务（如纯代码任务，报告与目标都不含行情/财报/数据等词）
-    自动跳过，不误伤。"""
+    自动跳过，不误伤。
+
+    **报告体裁豁免**（`acceptance.profiles[<体裁>].freshness_required == false`，
+    事件研究类）：这类报告天然没有"数据截止"块——事件研究的时间锚点是**公告日/
+    事件日/披露日**。此时改判 `freshness_alternatives` 词表：命中即通过；未命中
+    也**只提示不判失败**（检查口径随体裁变化，判定规则本身不变：非豁免体裁仍是
+    "块 + 日期"两者齐备才 pass）。
+    """
     t = str(report or "")
     hay = t + "\n" + str(goal or "")
+    _alts = tuple(str(m) for m in (freshness_alternatives or ()) if str(m))
     if not any(m in hay for m in _TIME_SENSITIVE_MARKERS):
         return {
             "pass": True,
             "details": "任务无数据时效语义，跳过",
             "has_freshness_block": False,
             "has_date": False,
+            "freshness_required": bool(freshness_required),
+            "alternatives": list(_alts),
+            "has_alternative": False,
             "gaps": [],
             "enabled": False,
         }
     has_block = any(m in t for m in _FRESHNESS_BLOCK_MARKERS)
     has_date = bool(_FRESHNESS_DATE_RE.search(t))
-    passed = has_block and has_date
+    alt_hit = [m for m in _alts if m in t]
     gaps: list[str] = []
+    if not freshness_required:
+        passed = True
+        if alt_hit:
+            details = (f"数据时效区块：体裁豁免（命中替代时效词 {'/'.join(alt_hit)}），"
+                       "不要求'数据截止'块")
+        elif has_block and has_date:
+            details = ("数据时效区块：包含，具体时间/日期：包含"
+                       "（该体裁不强制要求，按通过计）")
+        else:
+            details = "数据时效区块：体裁豁免（未命中替代时效词，仅提示，不判失败）"
+            gaps.append(
+                "报告未给出事件时点/披露时点（该体裁可用替代词："
+                + "/".join(_alts or ("公告日", "事件日", "披露日")) + "）")
+            if not has_date:
+                gaps.append("报告未给具体日期（如 2026-08-30）")
+        return {
+            "pass": passed,
+            "details": details,
+            "has_freshness_block": has_block,
+            "has_date": has_date,
+            "freshness_required": False,
+            "alternatives": list(_alts),
+            "has_alternative": bool(alt_hit),
+            "gaps": gaps,
+            "enabled": True,
+        }
+    passed = has_block and has_date
     if not has_block:
         gaps.append("报告缺少'数据时效'区块（需含数据截止时间/行情快照时间）")
     elif not has_date:
@@ -5093,6 +5343,9 @@ def check_freshness_block(report: str, goal: str = "") -> dict:
         ),
         "has_freshness_block": has_block,
         "has_date": has_date,
+        "freshness_required": True,
+        "alternatives": list(_alts),
+        "has_alternative": bool(alt_hit),
         "gaps": gaps,
         "enabled": True,
     }
@@ -5177,12 +5430,19 @@ def resolve_profile(goal: str, capabilities=None) -> str:
 
 
 def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
-                   capabilities=None, profile: str | None = None) -> dict:
+                   capabilities=None, profile: str | None = None,
+                   report_type: str = "annual_report") -> dict:
     """运行验收 checklist，输出缺口报告。
 
     profile 决定"报告格式类检查"是否适用（代码/数据类任务不适用，标记 N/A 并说明
     原因，不再是"失败项"）；是否计入 overall 缺口沿用既有语义（仅 financial 域计数），
     避免本包顺带改变既有判定。
+
+    report_type 是**报告体裁**（annual_report / semi_annual / event_study），决定阈值
+    与数据时效豁免的来源（`config.json` 的 `acceptance.profiles`，未知体裁回落到
+    `default_profile`）。它与 `profile` 是两个轴：`report_type` 说"这是哪类报告"
+    （影响阈值与时效口径），`profile` 说"报告格式类检查适不适用"。判定规则本身不变，
+    变的只是阈值来源。
     """
     sources = _collect_sources(workspace)
     # V1：用户材料（任务目标/指令里给出的数字）本身就是来源通道。注入为独立来源，
@@ -5194,10 +5454,13 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         sources["user_material"] = _user_material
     domain = traceability_domain(goal)
     profile = profile or resolve_profile(goal, capabilities)
+    # 报告体裁档位：溯源阈值 / 数据时效豁免 / 占位上限的唯一来源（config 可配）
+    _report_type, _acct_profile = acceptance_profile(report_type)
     report_checks = set(_PROFILE_REPORT_CHECKS.get(profile, ()))
     checks: dict = {}
     checks["number_traceability"] = check_number_traceability(
         report_text, sources, domain=domain, goal=goal,
+        threshold=traceability_threshold_for(domain, _acct_profile),
     )
     checks["entity_attribution"] = check_entity_attribution(
         report_text, sources, goal,
@@ -5208,12 +5471,19 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
 
     checks["deliverable_completeness"] = check_deliverable_completeness(
         report_text, goal, domain=domain,
+        placeholder_max=_profile_int(_acct_profile, "placeholder_max", 3),
     )
     # V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明。
     # applicable：按 profile 判断是否适用（不适用 → N/A，计 pass 但保留原始结果）；
     # counted：是否计入 overall 缺口（financial 域计入，非金融域只展示）。
     checks["source_list_completeness"] = check_source_list_completeness(report_text)
-    checks["freshness_block"] = check_freshness_block(report_text, goal)
+    _fresh_required = bool(_acct_profile.get("freshness_required", True))
+    _fresh_alts = _acct_profile.get("freshness_alternatives") or ()
+    checks["freshness_block"] = check_freshness_block(
+        report_text, goal,
+        freshness_required=_fresh_required,
+        freshness_alternatives=_fresh_alts if isinstance(_fresh_alts, (list, tuple)) else (),
+    )
     checks["disclaimer"] = check_disclaimer(report_text)
     _V12_REPORT_CHECKS = (
         "source_list_completeness", "freshness_block", "disclaimer",
@@ -5334,6 +5604,8 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         "checks": checks,
         "overall": overall,
         "profile": profile,
+        # 报告体裁档位（与 `profile` 任务档位分开记：阈值/时效豁免按它取）
+        "report_type": _report_type,
         "gaps": gaps,
         "suggestions": suggestions,
         # 规则版本化与报告指纹：供 acceptance_report.json / 事件流对账

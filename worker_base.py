@@ -17,8 +17,68 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
+import redis.exceptions
 import db_paths
 from common import AgentRegistry, MessagingClient
+
+# ---------------------------------------------------------------------------
+# 统一重试策略层（任务5，docs/arch_task5_retry_policy.md）：
+# worker_base 这条链上所有重试行为按错误类别查这张表，不再各处手写。
+# 数值由架构师指定，不得自行调整。
+# ---------------------------------------------------------------------------
+RETRY_POLICY: dict[str, dict] = {
+    "network":    {"max": 3, "backoff": "exponential", "base": 2.0},  # 2s→4s→8s
+    "rate_limit": {"max": 5, "backoff": "fixed",       "wait": 60},   # 429，等60s
+    "parse":      {"max": 2, "backoff": "fixed",       "wait": 1},    # PDF/JSON解析
+    "model_ctx":  {"max": 0, "backoff": None},   # context too long → 直接降级
+    "model_deny": {"max": 0, "backoff": None},   # 内容拒绝 → 直接 fail
+}
+
+
+def retry_with_policy(fn, error_class, policy_key: str, *, description: str = ""):
+    """按 RETRY_POLICY[policy_key] 执行 fn：失败 → 退避 → 重试，耗尽后抛最后异常。
+
+    `max` 指首次尝试之外的重试上限（network=3 → 至多 4 次调用、重试 3 次）；
+    max=0（model_ctx / model_deny）→ 不重试，异常直接上抛。
+    """
+    policy = RETRY_POLICY[policy_key]
+    max_retries = int(policy.get("max") or 0)
+    label = description or getattr(fn, "__name__", "") or "fn"
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except error_class as exc:
+            if attempt >= max_retries:
+                raise
+            if policy.get("backoff") == "exponential":
+                wait = float(policy.get("base") or 0.0) * (2 ** attempt)  # 2→4→8
+            elif policy.get("backoff") == "fixed":
+                wait = float(policy.get("wait") or 0)
+            else:
+                wait = 0.0
+            logger.warning(
+                "retry[%s]: %s 第 %d/%d 次失败，%.0fs 后重试：%s",
+                policy_key, label, attempt + 1, max_retries, wait, exc)
+            if wait > 0:
+                time.sleep(wait)
+    raise RuntimeError("unreachable")  # 循环内必然 return 或 raise，只为类型检查
+
+
+def classify_model_error(exc: BaseException) -> str | None:
+    """模型调用异常按关键词归类（docs/arch_task5_retry_policy.md §4）：
+
+    含 context / too long → model_ctx；含 rate / 429 → rate_limit；
+    含 refuse / content / policy → model_deny；其余返回 None（不归类）。
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "context" in text or "too long" in text:
+        return "model_ctx"
+    if "rate" in text or "429" in text:
+        return "rate_limit"
+    if "refuse" in text or "content" in text or "policy" in text:
+        return "model_deny"
+    return None
+
 
 # ---------------------------------------------------------------------------
 # 搜索引擎健康状态（对标 O-29：多引擎熔断 + 冷却 + 失败重试）
@@ -420,13 +480,25 @@ class BaseWorker(ABC):
             task: dict[str, Any] | None = None
             try:
                 try:
-                    # 阻塞等待任务
-                    task = self._messaging.pop_task(self.agent_id, timeout=self._POP_TIMEOUT)
+                    # 阻塞等待任务。网络类失败走统一策略层：最多重试 3 次
+                    # （2s→4s→8s 指数退避），耗尽后才放弃本轮——此前直接抛给外层
+                    # unhandled 处理器：连接断开时无等待、无限刷 ERROR 并空转。
+                    task = retry_with_policy(
+                        lambda: self._messaging.pop_task(
+                            self.agent_id, timeout=self._POP_TIMEOUT),
+                        (ConnectionError, redis.exceptions.ConnectionError),
+                        "network", description=f"pop_task[{self.agent_id}]")
                 except Exception as exc:
                     # BRPOP 阻塞时长超过 Redis socket_timeout（POP_TIMEOUT 与
                     # socket_timeout 参数不匹配）时 redis 客户端抛 TimeoutError：
                     # 属正常等待超时，静默续环（此前每 ~2.5 分钟刷一次整屏 ERROR）
                     if type(exc).__name__ == "TimeoutError":
+                        continue
+                    if isinstance(exc, (ConnectionError, redis.exceptions.ConnectionError)):
+                        # network 策略重试已耗尽：本轮放弃，下一轮再拉
+                        logger.error(
+                            "'%s' 拉取任务失败（network 策略重试 %d 次后仍不可用）：%s",
+                            self.agent_id, RETRY_POLICY["network"]["max"], exc)
                         continue
                     raise
                 if task is None:
@@ -550,6 +622,28 @@ class BaseWorker(ABC):
                 return
             self._publish_result(task_id, "SUCCESS", result)
         except Exception as exc:
+            # 任务5：模型类异常先按关键词归类到统一策略表。本链（SearchAgent）
+            # 自己不调模型，模型调用在上游；这里只做**如实标记**，不重跑 execute
+            # （重跑=改业务逻辑，且会重复付费与副作用）。
+            _policy_key = classify_model_error(exc)
+            if _policy_key == "model_ctx":
+                # max=0：不重试。降级（重规划/裁剪上下文）由上游执行，带标记回传。
+                logger.error(
+                    "'%s' task '%s' 模型上下文超限（model_ctx，不重试→降级）：%s",
+                    self.agent_id, task_id, exc)
+                self._publish_failure(task_id, f"model_ctx: {exc}")
+                return
+            if _policy_key == "model_deny":
+                # max=0：不重试，直接失败。
+                logger.error(
+                    "'%s' task '%s' 模型内容拒绝（model_deny，不重试）：%s",
+                    self.agent_id, task_id, exc)
+                self._publish_failure(task_id, f"model_deny: {exc}")
+                return
+            if _policy_key == "rate_limit":
+                logger.error(
+                    "'%s' task '%s' 命中限流（rate_limit）：本文件无模型调用点，"
+                    "等待重试由上游按策略表处理：%s", self.agent_id, task_id, exc)
             logger.error(
                 "'%s' task '%s' execution failed: %s",
                 self.agent_id,

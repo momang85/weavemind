@@ -7,6 +7,7 @@
     3. 5 分钟内重启超过 3 次 → 隔离 (quarantined)
     4. 所有事件发布到告警频道
     5. Guardian 自身发布心跳，支持外部监控
+    6. stuck 任务回收：RUNNING 超过 task_timeout × 1.5 无进展 → CANCELLED（任务6）
 
 安全原则：
     - 隔离的 Worker 永不自动复活，必须人工介入
@@ -162,6 +163,8 @@ class WorkerGuardian:
 
         # 注册 Guardian 自己的心跳
         self._publish_guardian_heartbeat()
+        # 任务6：启动即先回收一轮（上次宕机遗留的 RUNNING 不该永久滞留）
+        self._reap_stuck_tasks()
 
         logger.info(
             "WorkerGuardian started (check every %ds, grace period %.0fs)",
@@ -181,6 +184,8 @@ class WorkerGuardian:
             if time.time() - last_guardian_hb >= GUARDIAN_HEARTBEAT_INTERVAL:
                 self._publish_guardian_heartbeat()
                 last_guardian_hb = time.time()
+                # 任务6：每次心跳顺带回收 stuck 任务（超 task_timeout×1.5 → cancelled）
+                self._reap_stuck_tasks()
 
             # 分段 sleep
             for _ in range(CHECK_INTERVAL):
@@ -496,6 +501,90 @@ class WorkerGuardian:
             })
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # stuck 任务回收（任务6 watchdog）
+    # ------------------------------------------------------------------
+
+    def _reap_stuck_tasks(self) -> int:
+        """stuck 回收（任务6）：RUNNING 超 task_timeout×1.5 无结束 → CANCELLED。
+
+        task_history 无 started_at 列，以 COALESCE(updated_at, created_at) 代之。
+        防误杀双闸门（同 task_state.mark_dead_running_failed，不采信单一信号）：
+        快照 task_snapshot:{tid} 仍新鲜 → 仍被驱动；运行标记持有者存活或不可判定
+        → 保守跳过（只认真正已死）。task_timeout<=0 不限时，不回收。
+        """
+        import json as _json
+        import sqlite3
+
+        import task_state as _ts
+        from audit_logger import audit_log
+
+        try:  # task_timeout 每次心跳热读，改配置无需重启
+            _cfg = _json.loads((Path(__file__).resolve().parent / "config.json")
+                               .read_text(encoding="utf-8"))
+            task_timeout = int((_cfg.get("system") or {}).get("task_timeout") or 0)
+        except Exception:
+            task_timeout = 300
+        if task_timeout <= 0:
+            return 0
+        stuck_after = max(60, int(task_timeout * 1.5))     # 300 × 1.5 = 450s
+        reaped = 0
+        try:
+            con = sqlite3.connect(db_paths.resolve_db_path(), timeout=10)
+            try:
+                ids = [r[0] for r in con.execute(
+                    "SELECT task_id FROM task_history WHERE status=?"
+                    " AND COALESCE(updated_at, created_at) < datetime('now', ?)",
+                    (_ts.RUNNING, f"-{stuck_after} seconds")).fetchall()]
+                for task_id in ids:
+                    try:
+                        _snap = _ts.snapshot_age(task_id)
+                        if _snap is not None and _snap < stuck_after:
+                            continue                  # 闸门一：进度仍在流动
+                        _rc = getattr(self._messaging, "redis", None)
+                        _raw = _rc.get(f"task_running:{task_id}") if _rc is not None else None
+                        if _raw:
+                            # 闸门二：持有者存活或不可判定 → 跳过（只认真正已死）
+                            _info = _json.loads(_raw)
+                            if _ts.pid_same_process(_info.get("pid"),
+                                                    _info.get("started")) is not False:
+                                continue
+                        # CAS：仍 RUNNING 才翻 CANCELLED；真实终态恰好在场时让位
+                        cur = con.execute(
+                            "UPDATE task_history SET status=?, phase=?, report=?,"
+                            " completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP"
+                            " WHERE task_id=? AND status=?",
+                            (_ts.CANCELLED, "看门狗回收",
+                             f"Task cancelled: watchdog_timeout（RUNNING 超过"
+                             f" {stuck_after}s 无结束）", task_id, _ts.RUNNING))
+                        con.commit()
+                        if not cur.rowcount:
+                            continue
+                        reaped += 1
+                        try:                          # 释放 Redis 队列/运行占位（如有）
+                            if _rc is not None:
+                                _rc.delete(f"task_running:{task_id}",
+                                           f"task_snapshot:{task_id}")
+                        except Exception:
+                            pass
+                        self._alert("task_watchdog_timeout",
+                                    f"任务 {task_id} 卡在 RUNNING 超过 {stuck_after}s，"
+                                    f"已回收为 CANCELLED")
+                        audit_log("guardian", "worker_guardian", "task.watchdog_timeout",
+                                  target=task_id, result="ok",
+                                  detail=f"RUNNING 超过 {stuck_after}s 无结束 → CANCELLED")
+                    except Exception as exc:
+                        con.rollback()
+                        logger.warning("stuck 任务 %s 回收失败: %s", task_id, exc)
+            finally:
+                con.close()
+        except Exception as exc:
+            logger.warning("stuck 任务回收失败: %s", exc)
+        if reaped:
+            logger.warning("stuck 回收：本次取消 %d 个 RUNNING 任务（阈值 %ds）",
+                           reaped, stuck_after)
+        return reaped
 
     # ------------------------------------------------------------------
     # 辅助

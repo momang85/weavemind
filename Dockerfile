@@ -26,6 +26,10 @@ COPY financial_analysis/ ./financial_analysis/
 # 缺这个包容器里就永远导不出量化附件——`test_deploy_manifest` 的"运行入口会导入但镜像没拷"守卫
 # 正是抓到这一点（2026-10-05，提交 29689ef 的 CI 失败）。
 COPY quant_research/ ./quant_research/
+# 风险研究域（C5 批引入）：`quant_research/study.py` 的风险读数路径会 import 它
+# （`from risk_research import features, readiness`），已在上面的导入闭包守卫里被算进运行依赖；
+# 缺这个包，容器里走到该读数分支才 ImportError（比 CI 红灯更晚、更难看见）。
+COPY risk_research/ ./risk_research/
 COPY validators/ ./validators/
 COPY skills/ ./skills/
 COPY evals/ ./evals/

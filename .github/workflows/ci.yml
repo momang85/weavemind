@@ -40,6 +40,12 @@ jobs:
         run: python test_p0.py
       - name: Acceptance adversarial suite
         run: python test_acceptance_adversarial.py
+      - name: "Acceptance report-genre profiles (annual/semi-annual/event-study thresholds, freshness exemption)"
+        run: python test_task4_acceptance_profile.py
+      - name: "Unified worker retry policy (model error classification, backoff, no double retry)"
+        run: python test_task5_retry_policy.py
+      - name: "Stuck-running task watchdog reclaim (timeout x1.5, anti-false-kill gates, CAS, alert/audit)"
+        run: python test_task6_watchdog.py
       - name: Financial analysis package (Q1 frozen dataset and profit bridge)
         run: python test_financial_analysis.py
       - name: Annual report PDF table extraction
@@ -146,6 +152,16 @@ jobs:
         run: python test_research_study_entry.py
       - name: "Q1 mechanisms pure modules (E missing-input, unit gate, conflicts, PIT exclude, abstain/crossing/majority)"
         run: python test_q1_mechanisms.py
+      - name: "C2C volume-price closure (two-layer closure, range-mismatch refusal, source pinning, time isolation)"
+        run: python test_c2c_volume_price_closure.py
+      - name: "Financial events evidence base (real financial semantics and available dates, offline)"
+        run: python test_financial_events.py
+      - name: "Research study offline entry (hand calculations and frozen replay boundaries)"
+        run: python test_research_study.py
+      - name: "Risk research contract checks (synthetic fixtures, offline)"
+        run: python test_risk_research.py
+      - name: "Wind import contract (real Chinese wide table, identity gaps, quote caliber and source fingerprint)"
+        run: python test_wind_import.py
       - name: Skills & validators check
         run: python -c "from skill_registry import list_skills; assert len(list_skills())>=3; from validators.registry import list_validators; assert len(list_validators())>=4"
       - name: Eval cases schema check

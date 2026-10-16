@@ -27,6 +27,24 @@ SECRET_KINDS = ("secret",)
 
 SECTIONS: list[dict] = [
     {
+        "key": "acceptance",
+        "label": "验收体裁档位",
+        "note": "机器验收按报告体裁（年报/半年报/事件研究）取溯源阈值与数据时效豁免。"
+                "此处仅声明默认档位；各档位阈值请直接改 config.json 的 acceptance.profiles"
+                "（改阈值不动判定规则；改后无需 bump 验收规则版本——版本锚定的是判定规则，不是部署取值）。",
+        "entries": [
+            {
+                "path": "acceptance.default_profile",
+                "label": "默认体裁",
+                "kind": "string",
+                "default": "annual_report",
+                "choices": ["annual_report", "semi_annual", "event_study"],
+                "affects": "机器验收的阈值与数据时效口径（acceptance_checker.run_acceptance）",
+                "note": "未知/缺失体裁回落到此档位（annual_report=年报，semi_annual=半年报，event_study=事件研究）",
+            },
+        ],
+    },
+    {
         "key": "llm",
         "label": "主 LLM 端点",
         "note": "所有 Agent 的默认模型；任务提交前会做余额预检，主备都不足会直接拒绝任务。",
