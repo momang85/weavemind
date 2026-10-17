@@ -1,0 +1,59 @@
+{
+ "scope": "C5-1 探针：无主体 options 只返登记主体（入口闭环修复）",
+ "live_8091": "status=401",
+ "checks": [
+  {
+   "check": "A1 options 无主体 → 200 且 schema/主体清单/必须选主体齐备",
+   "ok": true,
+   "detail": "status=200 entities=['002304.SZ', '600031.SH']"
+  },
+  {
+   "check": "A2 只返元数据：study 带 feature_cutoff/研究状态，不带任何求值读数",
+   "ok": true,
+   "detail": "study keys=['evaluation_as_of', 'external_delivery', 'feature_cutoff', 'human_review', 'registered_materials', 'research_state', 'schema']"
+  },
+  {
+   "check": "A3 不建候选工作区／不求值／不扫材料（探针桩零调用）",
+   "ok": true,
+   "detail": "ws_calls=[] prepare_calls=0"
+  },
+  {
+   "check": "A4 审计如实记 entities（target=<sid16>/entities）",
+   "ok": true,
+   "detail": "audit=['0af20919e6245b88/entities']"
+  },
+  {
+   "check": "B1 无主体的 evaluate → 400 entity_required",
+   "ok": true,
+   "detail": "status=400 payload={\"error\": \"需要 entity_id（从已选研究的主体里选）\", \"code\": \"entity_required\"}"
+  },
+  {
+   "check": "B1 无主体的 save → 400 entity_required",
+   "ok": true,
+   "detail": "status=400 payload={\"error\": \"需要 entity_id（从已选研究的主体里选）\", \"code\": \"entity_required\"}"
+  },
+  {
+   "check": "C1 未知研究 → 404",
+   "ok": true,
+   "detail": "status=404"
+  },
+  {
+   "check": "C2 result_hash 与冻结登记不一致 → 409",
+   "ok": true,
+   "detail": "status=409"
+  },
+  {
+   "check": "C3 未知 action → 400",
+   "ok": true,
+   "detail": "status=400"
+  },
+  {
+   "check": "D1 8091 实例无会话 POST → 401（鉴权未放松）",
+   "ok": true,
+   "detail": "live=status=401"
+  }
+ ],
+ "total": 10,
+ "passed": 10,
+ "fails": []
+}

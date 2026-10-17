@@ -470,11 +470,12 @@ class TestCoreHasNoModelCalls(unittest.TestCase):
         self.assertIn("profit_bridge_v1", fa.registry.operators())
         self.assertIn("profit_to_cash_v1", fa.registry.operators())
         # 注册表是**唯一入口**：这份清单就是"能被计划采用的模型"的完整集合
-        # （L3 新增 profit_to_cash；清单变化必须是**显式**的，不接受"多出来的自动通过"）
+        # （L3 新增 profit_to_cash；10-08 新增 cash_pressure；清单变化必须是**显式**的，
+        # 不接受"多出来的自动通过"）
         self.assertEqual([m.model_id for m in fa.specs()],
                          ["profit_bridge", "operating_drivers", "cash_reconciliation",
                           "cash_quality", "working_capital", "scenario_sensitivity",
-                          "profit_to_cash"])
+                          "cash_pressure", "profit_to_cash"])
 
 
 class TestAnalysisRunStore(unittest.TestCase):
@@ -954,7 +955,8 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self.assertEqual(got["status"], "partial", got["plan"]["rejected"])
         self.assertEqual(set(got["plan"]["adopted"]),
                          {"profit_bridge", "operating_drivers", "cash_quality",
-                          "working_capital", "scenario_sensitivity", "profit_to_cash"},
+                          "working_capital", "scenario_sensitivity", "cash_pressure",
+                          "profit_to_cash"},
                          got["plan"]["rejected"])
         rej = {r["model_id"]: r for r in got["plan"]["rejected"]}
         self.assertEqual(set(rej), {"cash_reconciliation"})
@@ -1238,17 +1240,18 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
         self.assertEqual(run.status, C.RunStatus.NOT_COMPUTABLE, run.reason)
 
     # ── 注册表与计划 ──
-    def test_registry_lists_seven_families_and_each_has_an_operator(self):
+    def test_registry_lists_registered_families_and_each_has_an_operator(self):
         # U1/U2（2026-10-01）：新增 operating_drivers（经营驱动分解）与
-        # cash_reconciliation（现金调节桥）。
+        # cash_reconciliation（现金调节桥）；10-08：新增 cash_pressure（现金压力）。
         self.assertEqual([m.model_id for m in fa.specs()],
                          ["profit_bridge", "operating_drivers", "cash_reconciliation",
                           "cash_quality", "working_capital", "scenario_sensitivity",
-                          "profit_to_cash"])
+                          "cash_pressure", "profit_to_cash"])
         self.assertEqual(set(fa.registry.operators()),
                          {"profit_bridge_v1", "operating_drivers_v1",
                           "cash_reconciliation_v1", "cash_quality_v1",
-                          "working_capital_v1", "scenario_v1", "profit_to_cash_v1"})
+                          "working_capital_v1", "scenario_v1", "cash_pressure_v1",
+                          "profit_to_cash_v1"})
         for m in fa.specs():
             self.assertIn(m.operator, fa.registry.operators())
             self.assertTrue(m.limits, f"{m.model_id} 必须带限制")
@@ -1259,7 +1262,7 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
         plan = fa.compile_plan("利润变化归因、现金质量、营运资本周转与情景敏感性", self._ds())
         self.assertEqual({a.model_id for a in plan.adopted},
                          {"profit_bridge", "profit_to_cash", "cash_quality",
-                          "scenario_sensitivity"})
+                          "scenario_sensitivity", "cash_pressure"})
         rej = {r["model_id"]: r for r in plan.rejected}
         self.assertEqual(set(rej), {"operating_drivers", "cash_reconciliation",
                                     "working_capital"})
@@ -1272,6 +1275,200 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
         self.assertEqual(set(plan.question_types),
                          {"profit_attribution", "cash_conversion", "working_capital",
                           "scenario"})
+
+
+class TestCashPressure(unittest.TestCase):
+    """10-08 §14.2：**唯一新增算子** cash_pressure —— 同一情景下天数冲击的额外占用。
+
+    验收要点（§14.4）：基准复现（零天数＝0）、独立手算一致、分项相加＝合计、
+    经济方向正确、金额单位/期间与同情景参数一致；两家公司各自输入 → 各自结果
+    （不硬编码、不跨行业排名）。
+    """
+
+    # 洋河 2024 冻结流量（设计算例 §14.3，单位：亿元）
+    R0, G0 = 288.7629699356, 211.250786369
+
+    def _design_ds(self, *, revenue=None, gross_profit=None, unit="亿元"):
+        r0 = self.R0 if revenue is None else revenue
+        g0 = self.G0 if gross_profit is None else gross_profit
+        rows = [
+            _row("revenue", "2023年", 331.26), _row("gross_profit", "2023年", 249.26),
+            _row("net_profit", "2023年", 100.16),
+            _row("revenue", "2024年", r0, unit=unit),
+            _row("gross_profit", "2024年", g0, unit=unit),
+            _row("net_profit", "2024年", 66.73, unit=unit),
+        ]
+        return _dataset(rows)
+
+    def test_design_handcalc_and_component_closure(self):
+        run = fa.run("cash_pressure", self._design_ds(),
+                     params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        got = {o.metric: o.value for o in run.outputs}
+        # 手算：288.7629699356/365×10 = 7.9113 亿；77.5121835666/365×10 = 2.1236 亿
+        # 输出按报送粒度（该数据集单位是亿元 → 两位小数）量化，读者口径即 0.79/0.21 亿/天
+        self.assertAlmostEqual(got["collection_days_capital_per_day"], 0.79, places=2)
+        self.assertAlmostEqual(got["inventory_days_capital_per_day"], 0.21, places=2)
+        bridge = [o for o in run.outputs
+                  if o.metric == "incremental_capital_occupation"][0]
+        comps = {c["component_id"]: c["value"] for c in bridge.components}
+        self.assertAlmostEqual(comps["collection_days"], 7.91, places=2)
+        self.assertAlmostEqual(comps["inventory_days"], 2.12, places=2)
+        self.assertAlmostEqual(bridge.value, 10.03, places=2)
+        self.assertAlmostEqual(bridge.value, 10.0349, places=2,
+                               msg="设计手算 7.9113＋2.1236＝10.0349 亿")
+        self.assertAlmostEqual(comps["collection_days"] + comps["inventory_days"],
+                               bridge.value, places=2, msg="两项相加＝合计")
+        self.assertTrue(run.validation["checks"]["identity"]["ok"])
+        self.assertTrue(run.validation["checks"]["gold"]["ok"])
+        self.assertTrue(run.validation["checks"]["components"]["ok"])
+
+    def test_zero_days_reproduce_the_baseline_as_zero(self):
+        run = fa.run("cash_pressure", self._design_ds(),
+                     params={"collection_days_delta": 0, "inventory_days_delta": 0})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        bridge = [o for o in run.outputs
+                  if o.metric == "incremental_capital_occupation"][0]
+        self.assertEqual(bridge.value, 0.0, "零天数＝零冲击（基准复现）")
+        for c in bridge.components:
+            self.assertEqual(c["value"], 0.0)
+
+    def test_declared_defaults_are_the_ten_day_shock(self):
+        run = fa.run("cash_pressure", self._design_ds())
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.params, {}, "没给参数时不伪造参数")
+        bridge = [o for o in run.outputs
+                  if o.metric == "incremental_capital_occupation"][0]
+        self.assertAlmostEqual(bridge.value, 10.03, places=2,
+                               msg="声明的默认值就是各 +10 天")
+
+    def test_economic_direction_follows_the_days(self):
+        more = fa.run("cash_pressure", self._design_ds(),
+                      params={"collection_days_delta": 20, "inventory_days_delta": 10})
+        base = fa.run("cash_pressure", self._design_ds(),
+                      params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        rel = fa.run("cash_pressure", self._design_ds(),
+                     params={"collection_days_delta": -10, "inventory_days_delta": -10})
+        v = lambda r: [o for o in r.outputs  # noqa: E731
+                       if o.metric == "incremental_capital_occupation"][0].value
+        self.assertGreater(v(more), v(base), "回款天数增加 → 占用增加")
+        self.assertLess(v(rel), 0, "负向天数＝条件释放（不是保证能做到）")
+
+    def test_larger_scenario_flows_scale_the_per_day_amount(self):
+        """同一市场条件下，收入/成本更大的情景 → 每天的资金量更大（不是硬编码）。"""
+        small = fa.run("cash_pressure", self._design_ds(revenue=100.0,
+                                                        gross_profit=73.0),
+                       params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        big = fa.run("cash_pressure", self._design_ds(),
+                     params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        per_day = lambda r: [o for o in r.outputs  # noqa: E731
+                             if o.metric == "collection_days_capital_per_day"][0].value
+        self.assertLess(per_day(small), per_day(big))
+
+    def test_two_companies_get_their_own_numbers(self):
+        """三一自己的流量独立复算：金额与洋河不同，且**不出现同一组数**。"""
+        sany = fa.run("cash_pressure", self._design_ds(revenue=783.83,
+                                                       gross_profit=211.49),
+                      params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        yh = fa.run("cash_pressure", self._design_ds(),
+                    params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        total = lambda r: [o for o in r.outputs  # noqa: E731
+                           if o.metric == "incremental_capital_occupation"][0].value
+        self.assertEqual(sany.status, C.RunStatus.VALIDATED, sany.reason)
+        self.assertNotAlmostEqual(total(sany), total(yh), places=2)
+        self.assertAlmostEqual(total(sany), (783.83 + (783.83 - 211.49)) / 365 * 10,
+                               places=2, msg="自己输入 → 自己结果")
+
+    def test_unit_and_period_come_from_the_frozen_inputs(self):
+        run = fa.run("cash_pressure", self._design_ds(unit="元"),
+                     params={"collection_days_delta": 10, "inventory_days_delta": 10})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        for o in run.outputs:
+            self.assertEqual(o.unit, "元")
+            self.assertIn("2024年", o.output_period)
+        self.assertIn("2024年", " ".join(run.outputs[0].assumptions))
+        self.assertIn("代理", " ".join(run.outputs[0].limits))
+        self.assertIn("不是经营现金流预测", " ".join(run.outputs[0].limits))
+
+    def test_non_positive_revenue_or_cost_is_refused(self):
+        bad_rev = fa.run("cash_pressure", self._design_ds(revenue=0.0))
+        self.assertEqual(bad_rev.status, C.RunStatus.NOT_COMPUTABLE, bad_rev.reason)
+        # 毛利率假设把成本打到非正 → 拒绝相应计算，不编数
+        bad_cost = fa.run("cash_pressure", self._design_ds(),
+                          params={"gross_margin_delta": 0.3})
+        self.assertEqual(bad_cost.status, C.RunStatus.NOT_COMPUTABLE, bad_cost.reason)
+        self.assertIn("成本", bad_cost.reason)
+
+    def test_out_of_contract_params_fail_closed(self):
+        run = fa.run("cash_pressure", self._design_ds(),
+                     params={"collection_days_delta": 999})
+        self.assertEqual(run.status, C.RunStatus.NOT_APPLICABLE, run.reason)
+        days = fa.run("cash_pressure", self._design_ds(), params={"days_in_year": 200})
+        self.assertEqual(days.status, C.RunStatus.NOT_APPLICABLE, days.reason)
+        self.assertIn("days_in_year", days.reason)
+
+    def test_normal_research_combination_adopts_it(self):
+        """正常入口：经营研究问题把现金压力算子一起采入（同一份冻结数据）。"""
+        plan = fa.compile_plan("洋河股份的经营研究：利润、现金与什么条件会改变判断",
+                               self._design_ds())
+        ids = [a.model_id for a in plan.adopted]
+        self.assertIn("cash_pressure", ids)
+        self.assertIn("scenario_sensitivity", ids)
+        self.assertEqual(set(ids), set(fa.registry.research_combination(self._design_ds())))
+
+
+class TestResilienceCard(unittest.TestCase):
+    """10-08 §14.1：**经营韧性卡**——利润门槛／可承受空间 ＋ 天数冲击 ＋ 两项待核假设。"""
+
+    R0, G0 = 288.7629699356, 211.250786369
+
+    def _ds(self, *, np_2023=100.16, np_2024=66.73):
+        from financial_analysis import narrative as nd
+        rows = [
+            _row("revenue", "2023年", 331.26), _row("gross_profit", "2023年", 249.26),
+            _row("net_profit", "2023年", np_2023),
+            _row("revenue", "2024年", self.R0), _row("gross_profit", "2024年", self.G0),
+            _row("net_profit", "2024年", np_2024),
+        ]
+        self.nd = nd
+        return _dataset(rows)
+
+    def _runs(self, ds):
+        out = []
+        for mid, params in (("scenario_sensitivity", {}),
+                            ("cash_pressure", {"collection_days_delta": 10,
+                                               "inventory_days_delta": 10})):
+            r = fa.run(mid, ds, params=params)
+            self.assertEqual(r.status, C.RunStatus.VALIDATED, r.reason)
+            out.append(r)
+        return out
+
+    def test_below_target_it_shows_the_recovery_threshold(self):
+        ds = self._ds()
+        text = "\n".join(self.nd.resilience_lines(self._runs(ds), dataset=ds))
+        self.assertIn("利润目标与条件门槛", text)
+        self.assertIn("恢复/维持目标的门槛", text)
+        self.assertNotIn("可承受空间", text)
+        self.assertIn("10.03", text, "天数冲击合计要在卡里")
+        self.assertIn("两项相加＝合计", text)
+        self.assertIn("优先核查的两项假设", text)
+        self.assertIn("代理", text)
+
+    def test_above_target_it_shows_headroom_not_recovery(self):
+        """目标已完成 → 说**可承受空间**，不复制"需要恢复"的措辞（三一那一侧）。"""
+        ds = self._ds(np_2023=45.27, np_2024=59.75)
+        text = "\n".join(self.nd.resilience_lines(self._runs(ds), dataset=ds))
+        self.assertIn("可承受空间", text)
+        self.assertIn("收入可下降", text)
+        self.assertNotIn("恢复/维持目标的门槛", text)
+
+    def test_without_the_pressure_run_it_says_what_is_missing(self):
+        ds = self._ds()
+        sc = fa.run("scenario_sensitivity", ds)
+        text = "\n".join(self.nd.resilience_lines([sc], dataset=ds))
+        self.assertIn("未运行现金压力算子", text)
+        self.assertEqual(self.nd.resilience_lines([], dataset=ds), [],
+                         "一个运行都没有时不出卡（正文一字不变）")
 
 
 class TestRealFrozenSampleChain(unittest.TestCase):
@@ -3210,11 +3407,11 @@ class TestV0OperatingResearchCombination(unittest.TestCase):
                                     entity_id="002304.SZ", as_of="2025-04-30",
                                     source_label=source)
 
-    def test_registry_combination_is_three_models_in_order(self):
+    def test_registry_combination_is_four_models_in_order(self):
         from financial_analysis import registry as reg
         self.assertEqual(reg.RESEARCH_COMBINATION,
                          ("operating_drivers", "cash_reconciliation",
-                          "scenario_sensitivity"))
+                          "scenario_sensitivity", "cash_pressure"))
         ds = self._ds(self.IS)
         self.assertIn("operating_drivers", reg.research_combination(ds))
 
@@ -3880,6 +4077,305 @@ class TestW1OneReportOneJudgment(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestReaderJudgmentSelection(unittest.TestCase):
+    """读者判断的选择：**只有量价组合并**，别的组不得被改名（10-06 三一复制实测反例）。"""
+
+    def test_cash_group_keeps_its_own_identity_when_two_readings_exist(self):
+        """现金组有两条候选时，组内代表仍是现金判断——不得变成量价那条。
+
+        反例（三一复制，真实运行）：现金组的两条（营运资本构成／直接法支撑）都命中，
+        旧选择器对**任何**多候选组都调 `_merge_volume_price`，于是现金判断被改名成
+        `revenue_mechanism_volume_price`＋"收入下降的量与价…"标题，读者列表出现两个同名
+        判断，其中一条的读数却是现金桥。
+        """
+        from financial_analysis import judgments as jd
+        js = [
+            {"judgment_id": jd.J_PROFIT_MECHANISM, "title": "利润机制",
+             "numbers": ["归母净利润变化 +14.48亿元"]},
+            {"judgment_id": jd.J_VOLUME, "title": "销量", "numbers": ["销量 -12%"]},
+            {"judgment_id": jd.J_PRICE, "title": "价格", "numbers": ["单位收入 +3%"]},
+            {"judgment_id": jd.J_CASH_WORKING_CAPITAL, "title": "现金：营运资本构成",
+             "numbers": ["现金桥（四项相加）：+1.00亿元"],
+             "next_observation": {"metric": "经营性应收/应付项目、存货"}},
+            {"judgment_id": jd.J_CASH_DIRECT_SUPPORT, "title": "现金：直接法支撑",
+             "numbers": ["销售商品收到的现金 +2.00亿元"]},
+            {"judgment_id": jd.J_SCENARIO_THRESHOLD, "title": "情景阈值"},
+            {"judgment_id": jd.J_STRUCTURE, "title": "结构"},
+        ]
+        reader = jd.select_reader_judgments(js)
+        ids = [str(j.get("judgment_id")) for j in reader]
+        self.assertEqual(len(ids), len(set(ids)), f"同一判断不得出现两次：{ids}")
+        self.assertIn(jd.J_REVENUE_MECHANISM, ids, "量价两条要合并成一条收入机制")
+        self.assertIn(jd.J_CASH_WORKING_CAPITAL, ids, "现金判断必须保留自己的身份")
+        cash = [j for j in reader if j.get("judgment_id") == jd.J_CASH_WORKING_CAPITAL][0]
+        self.assertIn("营运资本", str(cash.get("title")))
+        self.assertIn("现金桥", str(cash.get("numbers")))
+        vp = [j for j in reader if j.get("judgment_id") == jd.J_REVENUE_MECHANISM][0]
+        self.assertNotIn("现金桥", str(vp.get("numbers")),
+                         "量价那条不得带上现金的读数")
+
+    def test_all_gap_volume_price_is_not_an_observed_conclusion(self):
+        """10-07 复核 §主问题-2：量价**全缺**时合并条不得写成"销量收缩…已发生"。
+
+        三一实测：量价分解未取到，旧合并器仍写死"收入下降的量与价：**销量收缩**是数量观察，
+        **单位收入上升不证明提价**"并标"已发生（读数）"。修后：缺哪项写缺哪项、`kind=gap`、
+        并且**排到强结论之后**（保留缺口、不占强结论席位）。
+        """
+        from financial_analysis import judgments as jd
+        js = [
+            {"judgment_id": jd.J_VOLUME, "title": "销量与收入的数量关系：本次不足以下判断",
+             "kind": "gap", "kind_label": "读数不足（不作结论）",
+             "numbers": ["量价分解未取到销量/单位收入效应"], "boundary": "读数不足"},
+            {"judgment_id": jd.J_PRICE, "title": "单位收入与提价能力：本次无从判断",
+             "kind": "gap", "kind_label": "读数不足（不作结论）",
+             "numbers": ["量价分解里的单位价格效应未取到"], "boundary": "不评价价格"},
+            {"judgment_id": jd.J_PROFIT_MECHANISM, "title": "利润机制", "numbers": ["x"]},
+            {"judgment_id": jd.J_CASH_WORKING_CAPITAL, "title": "现金：营运资本构成",
+             "numbers": ["y"]},
+        ]
+        merged = jd._merge_volume_price(js[:2])
+        self.assertEqual(merged["kind"], "gap")
+        self.assertIn("未取到", str(merged["title"]))
+        self.assertNotIn("销量收缩", str(merged["title"]))
+        reader = jd.select_reader_judgments(js)
+        ids = [j["judgment_id"] for j in reader]
+        self.assertEqual(ids[-1], jd.J_REVENUE_MECHANISM,
+                         f"缺口要排在强结论之后（保留缺口、不占席位）：{ids}")
+        self.assertEqual(reader[-1]["kind"], "gap")
+
+
+class TestDirectionFromReadings(unittest.TestCase):
+    """10-07 复核 §架构决定-1：**判断随读数的符号走**（不只换标题词）。
+
+    - 洋河（利润下降）：税费 +11.64 亿元是**缓冲**；
+    - 三一（利润增长）：税费 −1.12 亿元是**拖累**、现金由营运资本**推动**；
+    - 现金解释与下一观察只陈述**会计构成**，不把未证商业原因（"占用未随采购同步下降"）
+      写成已发生解释。
+    """
+
+    IS = TestU2ResearchNote.IS          # 洋河（净利 -33.43 亿元）
+    CF = TestU2ResearchNote.CF
+
+    # 三一式（净利 +14.48 亿元、税费贡献 -1.12 亿元）——与实机读数同量级
+    IS_UP = {
+        "revenue": (73_222_000_000.0, 77_773_000_000.0),
+        "operating_cost": (51_866_000_000.0, 54_062_000_000.0),
+        "income_tax_expense": (180_000_000.0, 284_788_000.0),      # 贡献 -1.0479 亿元
+        "taxes_and_surcharges": (60_000_000.0, 67_453_000.0),       # 贡献 -0.0745 亿元
+        "selling_expense": (7_000_000_000.0, 7_362_880_000.0),
+        "admin_expense": (3_000_000_000.0, 3_345_680_000.0),
+        "rd_expense": (4_829_740_000.0, 5_313_714_000.0),
+        "net_profit": (4_527_000_000.0, 5_975_000_000.0),
+        "net_profit_consolidated": (4_527_000_000.0, 5_975_000_000.0),
+    }
+    CF_UP = {
+        "net_profit_consolidated": (4_500_000_000.0, 5_986_428_000.0),      # +14.86 亿元
+        "depreciation": (2_000_000_000.0, 1_589_779_000.0),                 # -4.10 亿元
+        "operating_payable_increase": (10_000_000_000.0, 21_613_000_000.0),  # +116.13 亿元
+        "inventory_decrease": (500_000_000.0, 258_000_000.0),               # -2.42 亿元
+        "operating_receivable_decrease": (1_000_000_000.0, -2_394_000_000.0),  # -33.94 亿元
+        "other_cashflow_adjustments": (100_000_000.0, 152_920_000.0),       # +0.53 亿元
+        "operating_cashflow": (5_708_000_000.0, 14_814_000_000.0),          # +91.06 亿元
+    }
+
+    def _ds(self, table, *, source):
+        rows = []
+        for metric, (prev, cur) in dict(table).items():
+            rows.append(_row(metric, "2023年", prev, unit="元", fact_id=f"{source}-{metric}-23"))
+            rows.append(_row(metric, "2024年", cur, unit="元", fact_id=f"{source}-{metric}-24"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="测试主体",
+                                    entity_id="600031.SH", as_of="2025-04-30",
+                                    source_label=source)
+
+    def _profit(self, is_table, source):
+        from financial_analysis import judgments as jd
+        od = fa.run("operating_drivers", self._ds(is_table, source=source))
+        self.assertEqual(od.status, C.RunStatus.VALIDATED, od.reason)
+        js = jd.research_judgments([od], records=[], limit=0)
+        return next(j for j in js if j["judgment_id"] == jd.J_PROFIT_MECHANISM), jd
+
+    def test_profit_down_tax_is_a_buffer(self):
+        j, _jd = self._profit(self.IS, "test:dir-down")
+        self.assertIn("利润下降", j["title"])
+        self.assertNotIn("利润改善", j["title"])
+        self.assertIn("缓冲", j["title"])
+        self.assertIn("11.64", " ".join(j["numbers"]))
+        self.assertIn("贡献", " ".join(j["numbers"]),
+                      "分项是对利润变化的贡献，不是「科目减少」")
+
+    def test_profit_up_tax_is_a_drag_never_a_prop(self):
+        """三一反例：净利 +14.48 亿元、税费 −1.12 亿元 ⇒ **拖累**（旧文案写"利润下降…托底"）。"""
+        j, _jd = self._profit(self.IS_UP, "test:dir-up")
+        self.assertIn("利润改善", j["title"])
+        self.assertNotIn("利润下降", j["title"])
+        self.assertIn("拖累", j["title"])
+        self.assertNotIn("托底", j["title"])
+        self.assertIn("-1.12", " ".join(j["numbers"]))
+        hyp = " ".join(str(e.get("text")) for e in j["explanation"])
+        self.assertNotIn("税费减少是不是", hyp, "方向反了：不能说「税费减少」")
+        self.assertIn("税费增加", hyp)
+
+    def test_cash_direction_and_only_accounting_composition(self):
+        from financial_analysis import judgments as jd
+        cash = fa.run("cash_reconciliation", self._ds(self.CF_UP, source="test:dir-cash-up"))
+        self.assertEqual(cash.status, C.RunStatus.VALIDATED, cash.reason)
+        wc = jd.wc_flow_of(self._ds(self.CF_UP, source="test:dir-cash-up"))
+        js = jd.research_judgments([cash], wc_flow=wc, records=[], limit=0)
+        c = next(j for j in js if j["judgment_id"] == jd.J_CASH_WORKING_CAPITAL)
+        self.assertIn("推动", c["title"])
+        self.assertIn("改善", c["title"])
+        self.assertNotIn("下降", c["title"])
+        blob = " ".join(str(e.get("text")) for e in c["explanation"])
+        self.assertNotIn("占用未随采购同步下降", blob, "未证的商业原因不得写成解释")
+        self.assertIn("会计构成", blob)
+        self.assertIn("未证", blob)
+        # 三行方向由符号决定：应付是推动、应收是拖累
+        self.assertIn("经营性应付项目", blob)
+        self.assertIn("推动", blob)
+        self.assertIn("经营性应收项目", blob)
+
+    def test_cash_down_says_profit_driven_and_keeps_next_observation(self):
+        from financial_analysis import judgments as jd
+        od = fa.run("operating_drivers", self._ds(self.IS, source="test:dir-profit"))
+        cash = fa.run("cash_reconciliation", self._ds(self.CF, source="test:dir-cash"))
+        js = jd.research_judgments([od, cash], records=[], limit=0)
+        c = next(j for j in js if j["judgment_id"] == jd.J_CASH_WORKING_CAPITAL)
+        self.assertIn("下降", c["title"])
+        self.assertIn("由利润变化主导", c["title"])
+        nxt = c.get("next_observation") or {}
+        self.assertTrue(nxt.get("support") and nxt.get("weaken"),
+                        "下一观察的支持/削弱条件必须随方向给出")
+        self.assertIn("缓冲", str(nxt.get("support")) + str(nxt.get("weaken")))
+
+
+class TestTargetFulfilmentTwoEvidence(unittest.TestCase):
+    """10-07 **第二次**复核 §目标兑现：计划＝原句/原件定位；实际＝**冻结读数**的确定性同比。
+
+    两个既有反例（复核 `probe_results.json`）必须一直不成立：
+    ① 另一句计划（「2024年计划实现营业收入同比增长8%」）不得当全年实际；
+    ② 半年报（「2024年1-6月…同比增长8%」）不得满足全年目标。
+    另有：同主体才配对；同处一份年报的计划标**回顾性对照**；缺匹配即未知。
+    """
+
+    def _jd(self):
+        from financial_analysis import judgments as jd
+        return jd
+
+    def _ds(self, *, rev_2023=331_262_775_51.51, rev_2024=288_762_969_93.56,
+            entity="洋河股份", entity_id="002304.SZ"):
+        rows = []
+        for metric, prev, cur in (("revenue", rev_2023, rev_2024),):
+            rows.append(_row(metric, "2023年", prev, unit="元", fact_id=f"t-{metric}-23"))
+            rows.append(_row(metric, "2024年", cur, unit="元", fact_id=f"t-{metric}-24"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity=entity,
+                                    entity_id=entity_id, as_of="2025-04-30",
+                                    source_label="test:target")
+
+    def test_plan_only_is_unknown_and_never_declares_fulfilment(self):
+        jd = self._jd()
+        t = jd.plan_target_of([{
+            "snippet": "公司计划营业收入同比增长5%，努力实现稳定经营。",
+            "locator": "第 9 页 · 经营计划", "section": "经营计划",
+            "published_at": "2025-04-29", "document_period": "2024"}])
+        self.assertIsNotNone(t)
+        self.assertIsNone(t["actual"], "计划句自己不是实际完成")
+        j = jd._target_judgment(t)
+        self.assertIn("兑现未知", j["title"])
+        self.assertEqual(j["kind"], "gap")
+        self.assertNotIn("达到或超过计划上限", j["title"])
+        self.assertFalse([e for e in j["explanation"] if e.get("kind") == "发行人解释"],
+                         "没有真实原句就不编发行人原因")
+
+    def test_another_plan_sentence_is_never_the_actual(self):
+        """反例①：第二句计划（8%）不得被当成全年实际并宣告兑现。"""
+        jd = self._jd()
+        t = jd.plan_target_of([
+            {"snippet": "公司计划2024年营业收入同比增长5%。", "locator": "A计划",
+             "subject": "A", "published_at": "2024-03-01", "document_period": "2023"},
+            {"snippet": "2024年计划实现营业收入同比增长8%。", "locator": "A未来计划",
+             "subject": "A", "published_at": "2024-03-01", "document_period": "2023",
+             "section": "2024年经营计划"}])
+        # 文本里没有冻结读数 ⇒ 实际必须未知（只有数据集才能提供实际）
+        self.assertIsNone(jd.full_year_actual_from_dataset(None, year=2024))
+        j = jd._target_judgment(t)
+        self.assertIn("兑现未知", j["title"])
+        self.assertNotIn("8.00%", json.dumps(j, ensure_ascii=False))
+
+    def test_half_year_is_not_full_year(self):
+        """反例②：半年报的实际不得满足全年目标（结构上不再可能：实际只来自年度数据集）。"""
+        jd = self._jd()
+        t = jd.plan_target_of([
+            {"snippet": "公司计划2024年营业收入同比增长5%。", "locator": "A计划",
+             "subject": "A", "published_at": "2024-03-01", "document_period": "2023"},
+            {"snippet": "2024年1-6月实现营业收入100亿元，同比增长8%。", "locator": "A半年报",
+             "subject": "A", "published_at": "2024-08-01", "document_period": "2024H1"}])
+        j = jd._target_judgment(t)
+        self.assertIn("兑现未知", j["title"])
+        # 半年报口径的数据集（期间不是年度）也不给实际
+        h1 = fa.freeze_from_facts(
+            [_row("revenue", "2024年", 1.0, unit="元", fact_id="h1-24")],
+            periods=(2024,), entity="A", entity_id="A.SZ", as_of="2025-08-19",
+            source_label="test:h1")
+        self.assertIsNone(jd.full_year_actual_from_dataset(h1, year=2024))
+
+    def test_frozen_actual_pairs_with_ex_ante_plan(self):
+        """正确对照：2023 年报原计划（2024-04-27）＋ 2024 全年冻结实际（−12.83%）。"""
+        jd = self._jd()
+        act = jd.full_year_actual_from_dataset(self._ds(), year=2024)
+        self.assertIsNotNone(act)
+        self.assertAlmostEqual(act["yoy"], -12.8296, places=3)
+        self.assertEqual(act["caliber"], "合并")
+        self.assertEqual((act["cur_period"], act["prev_period"]), ("2024年", "2023年"))
+        self.assertIn("冻结底稿", act["source"])
+        t = jd.plan_target_of([{
+            "snippet": "2024 年，公司将聚焦主业，力争营业收入同比增长 5%-10%。",
+            "locator": "第 3 页 · 公司未来发展的展望", "subject": "002304",
+            "published_at": "2024-04-27", "document_period": "2023",
+            "section": "公司未来发展的展望"}])
+        self.assertEqual(t["plan"]["year"], 2024, "年度写在标记词之前也要取到")
+        self.assertTrue(t["ex_ante"], "更早一份披露 ⇒ 事前计划")
+        t["actual"] = act
+        j = jd._target_judgment(t)
+        self.assertIn("未兑现", j["title"])
+        self.assertNotIn("回顾性", j["title"])
+        self.assertIn("17.83", " ".join(j["numbers"]))
+        self.assertIn("冻结底稿", " ".join(j["numbers"]))
+        self.assertTrue(any(str(e.get("type", "")).startswith("全年实际（冻结读数")
+                            for e in j["evidence"]),
+                        "实际证据必须是冻结读数，不是文本匹配")
+
+    def test_same_report_plan_is_labelled_retrospective(self):
+        """计划与实际同处一份年报（"报告期初"事后回顾）⇒ 标回顾性，不冒称原期初计划。"""
+        jd = self._jd()
+        act = jd.full_year_actual_from_dataset(self._ds(), year=2024)
+        t = jd.plan_target_of([{
+            "snippet": "报告期初，公司规划 2024 年力争营业收入同比增长 5%-10%。",
+            "locator": "第 13 页 · 概述", "subject": "002304",
+            "published_at": "2025-04-29", "document_period": "2024"}])
+        self.assertFalse(t["ex_ante"])
+        t["actual"] = act
+        j = jd._target_judgment(t)
+        self.assertIn("回顾性对照", j["title"])
+        self.assertIn("不构成对原期初计划的独立核对", " ".join(j["numbers"]))
+
+    def test_different_subject_is_not_paired(self):
+        """主体对不上 ⇒ 不配冻结读数（宁可未知）。"""
+        jd = self._jd()
+        act = jd.full_year_actual_from_dataset(self._ds(entity="三一重工",
+                                                        entity_id="600031.SH"), year=2024)
+        self.assertIsNotNone(act)
+        # 该数据集的主体与计划记录的主体不同 ⇒ research_judgments 的配对规则会剔除
+        plan_sub = "002304"
+        ids = f"{act['entity']} {act['entity_id']}"
+        self.assertNotIn(plan_sub, ids)
+
+    def test_no_numeric_plan_no_judgment(self):
+        jd = self._jd()
+        self.assertIsNone(jd.plan_target_of([{
+            "snippet": "公司将持续推进国际化战略，经营计划不涉及具体财务指标。",
+            "locator": "第 19 页 · 经营计划", "document_period": "2024"}]))
+
+
 class TestW2ResearchJudgments(unittest.TestCase):
     """W2（阶段W §5）：**可检验的研究判断**——七段式、读数驱动、写得出反转条件。
 
@@ -4214,9 +4710,12 @@ class TestX0DeliveryClosure(unittest.TestCase):
         #    10-06 复核 §4：不再另印『三项主判断（先看这里）』。
         self.assertIn("## 关键判断与下一步", ctx["front"])
         self.assertNotIn("三项主判断", ctx["front"])
-        for needle in ("-16.30%", "推算吨价", "+3.93%", "+16.38%", "-8.40%"):
-            self.assertIn(needle, ctx["front"], f"首屏判断缺 {needle}")
-        self.assertIn("推算口径", ctx["front"], "推算身份必须写明")
+        self.assertIn("-16.30%", ctx["front"], "首屏判断缺 -16.30%")
+        # 10-07 第二次复核 §阅读层：首屏改成**短判断**（每条 1–2 个关键数，
+        # 完整解释/边界/原句随同版附件）⇒ 第 3、4 条读数（推算吨价、库存量、产量同比）
+        # 落在明细里。这里锁"披露 facts/derived 真的进了判断层"，而不是"必须挤进首屏"。
+        for needle in ("推算吨价", "推算口径", "-8.40%", "+16.38%"):
+            self.assertIn(needle, ctx["detail"], f"判断明细缺 {needle}")
         # 结构化判断对象与首屏同源透传（§6.3-1）
         self.assertTrue(ctx["reader_judgments"], "首屏判断对象要透传")
         self.assertGreaterEqual(len(ctx["judgments"]), len(ctx["reader_judgments"]))
@@ -4421,6 +4920,38 @@ class TestX0DeliveryClosure(unittest.TestCase):
         self.assertNotIn("## 三项主判断", again)
         self.assertNotIn("## 经营驱动分析正文", again)
 
+    def test_no_pointer_to_a_moved_section(self):
+        """收束后不许留悬空引用：主文没有 `## 关键发现`，指针就必须指『关键判断与下一步』。
+
+        反例（10-06 正常入口实测，`ui-10ea37599d` 正常导出包）：正文 3 处
+        「完整读数见『关键发现』」＋1 处「见开头『关键判断与下一步』与『关键发现』」，
+        而 `## 关键发现` 已被唯一首屏取代 ⇒ 读者被指到一个**不存在的小节**。
+        """
+        import report_brief as rb
+        structure = {
+            "scope": {"company": "洋河股份", "company_id": "002304.SZ",
+                      "caliber": "合并", "as_of": "2025-04-30"},
+            "reader_judgments_front": "## 关键判断与下一步\n\n1. 占位判断\n",
+            "research_questions": [{"question": "收入变化的量价与结构依据",
+                                    "coverage": "partial",
+                                    "boundary": "公司收入口径与白酒销量口径不同",
+                                    "next_action": ["下期分产品收入与销量"]}],
+            "change_explanation": {"changes": [{"metric": "revenue",
+                                                "cur": 288.76, "prev": 331.26}]},
+        }
+        md = rb.render_brief_markdown(structure, body="正文占位")
+        self.assertIn("## 关键判断与下一步", md)
+        self.assertNotIn("\n## 关键发现", md, "有唯一首屏时不再印旧的关键发现")
+        self.assertNotIn("『关键发现』", md, "不得把读者指向已被收束移走的小节")
+        self.assertIn("『关键判断与下一步』", md)
+        # 没有唯一首屏（旧结构/旧版本回放）时行为不变：指针仍指『关键发现』，且那一节确实在
+        old = dict(structure)
+        old.pop("reader_judgments_front")
+        old["analysis_front"] = "## 三项主判断（先看这里）\n\n1. 占位判断\n"
+        md_old = rb.render_brief_markdown(old, body="正文占位")
+        self.assertIn("\n## 关键发现", md_old)
+        self.assertIn("『关键发现』", md_old)
+
 
 class TestX1ResearchContinuation(unittest.TestCase):
     """X1（阶段X §4）：**可检验的研究续页**。
@@ -4609,6 +5140,386 @@ class TestX1ResearchContinuation(unittest.TestCase):
         self.assertLess(brief.index("## 研究续页（可检验）"), brief.index("## 关键发现"))
         again = rb._analysis_section(brief)
         self.assertNotIn("## 研究续页", again, "回流再装配不得再印一遍续页")
+
+    def test_compact_page_is_one_page_and_keeps_the_guards(self):
+        """10-07 第二次复核 §阅读层"续页 1 页"：**主文用一页版**，附件仍是完整页。
+
+        一页版可以省版面，但**不能省掉护栏**：四个列名、判定口径、交叉核对（半年不与
+        全年硬比）、历史观察与假说分开、缺读数写"无法判断"必须都在；压缩比要有齿
+        （否则"一页版"只是换了个名字印两遍）。
+        """
+        from financial_analysis import continuation as cont
+        earlier, later = self._pair()
+        page = cont.compare(earlier, later)
+        full = cont.render_page(page)
+        one = cont.render_page(page, compact=True)
+        for needle in ("上次持续性假说", "本期关键新读数", "判断怎样改变", "下一观察",
+                       "判定口径", "历史观察与假说分开", "历史材料回放"):
+            self.assertIn(needle, one, f"一页版缺 {needle}")
+        self.assertIn("无法判断", one, "缺同口径读数时「无法判断」这句不能省")
+        # 逐行重复的判定口径**提成一行**：不再每条后面各挂一遍
+        self.assertEqual(one.count("判定口径"), 1, one)
+        # 护栏句**不得被截断**（截到"不作一致性…"正好把护栏砍掉）
+        oc = page.get("overlap_check") or {}
+        if oc.get("verdict"):
+            self.assertIn(str(oc["verdict"]), one, "交叉核对判定句必须完整")
+        # 压缩的是**表体**（判定口径提脚注、旧读数让附件）：比较表体而不是整页
+        def _table(md: str) -> str:
+            return "\n".join(ln for ln in md.splitlines() if ln.startswith("| "))
+        self.assertLess(len(_table(one)), len(_table(full)), "一页版的表体必须更短")
+        self.assertIn("判定口径", one)
+        # 10-08：一页版**多了追踪卡**（最多三项下一核查＋替代解释＋来源）——
+        # 卡片是读者入口的行动清单，不计入"压版面"的压缩比。
+        self.assertIn("追踪卡", one, "读者入口要有追踪卡")
+        self.assertIn("要查的材料", one)
+
+
+class TestContinuationBuildSeam(unittest.TestCase):
+    """10-08 复核 §2：续页**接进正常任务**，并且更新的两侧都要有**身份**。
+
+    旧实现的纯内存反例：较早侧按原始标题选材、两侧都重贴任务公司，于是
+    `admission=excluded`／主体不符的更晚材料照样进快照；已有 `continuation.json`
+    又永远阻止下一次更新。现在的判定：
+
+    - 较早侧＝**已采纳旧版本**下、报告期等于契约末年、按旧截止**准入**的同主体材料；
+    - 较新侧＝报告期严格更晚、主体状态 `ok`、按**新截止**（用户声明，未声明按材料自身
+      发布日）准入的材料；
+    - 更新**另存新版**：旧版原样归档到 `analysis/continuation_versions/`，内容没变时
+      幂等不重写；没有已采纳旧版本时标 `historical_rebuild`。
+    """
+
+    GOAL = ("研究洋河股份 2023 与 2024 两个年度的营业收入与归母净利润，合并报表口径，"
+            "数据截至 2025-04-30。")
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        import task_state
+        import workspace as ws_mod
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_cont_seam_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "t.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.ws = ws_mod.task_workspace("cont-seam", "default")
+        (self.ws / "project").mkdir(parents=True, exist_ok=True)
+        self._register_task()
+        self._write_inputs()
+
+    def _register_task(self, *, as_of="2025-04-30"):
+        import facts as _F
+        import task_state
+        req = _F.parse_research_request(
+            self.GOAL, company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of=as_of, identity_source="test")
+        task_state.mark_queued("cont-seam", goal=self.GOAL,
+                               research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+
+    def _adopt_old_version(self, body="旧正文：洋河 2023–2024 研究（已采纳）"):
+        """落一份**已采纳旧版本**：更新的较早侧身份从它来，不从标题猜。"""
+        from report_version import VersionStore
+        store = VersionStore(self.ws, "cont-seam")
+        v = store.record(body, sources_fingerprint="s", rules_version="r")
+        store.adopt(v, reason="test")
+        return v
+
+    def _build(self, **kw):
+        from financial_analysis import continuation as cont
+        return cont.build_for_task("cont-seam", ws_dir=self.ws, goal=self.GOAL,
+                                   periods=(2023, 2024), **kw)
+
+    def _write_inputs(self, docs=None):
+        docs = docs if docs is not None else [
+            {"title": "洋河股份:2024年年度报告",
+             "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223.PDF",
+             "published_at": "2025-04-29", "text": "洋河股份 2024年年度报告正文"},
+            {"title": "洋河股份:2025年半年度报告",
+             "url": "http://static.cninfo.com.cn/finalpage/2025-08-19/1888.PDF",
+             "published_at": "2025-08-19", "text": "洋河股份 2025年半年度报告正文"},
+        ]
+        (self.ws / "project" / "fetch_snapshot.json").write_text(
+            json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+
+    def _stub(self, calls):
+        from financial_analysis import continuation as cont
+
+        def _snap(doc, **kw):
+            calls.append(("snapshot", str(doc.get("title")), kw.get("period_kind"),
+                          tuple(kw.get("periods") or ())))
+            return {"label": kw.get("label") or "", "period_kind": kw.get("period_kind"),
+                    "periods": list(kw.get("periods") or ()),
+                    "source": {"title": doc.get("title"), "url": doc.get("url"),
+                               "period_kind": kw.get("period_kind"),
+                               "period_labels": list(kw.get("period_labels") or ()),
+                               "disclosure_date": str(doc.get("published_at") or "")},
+                    "dataset": {"hash": "h"}, "runs": {}, "volume_price": {"ok": False},
+                    "records": [], "judgments": [
+                        {"judgment_id": "cash_from_working_capital",
+                         "title": "旧判断：现金来源方向", "numbers": ["ΔOCF"],
+                         "watch": ["下一期三行"], "alternatives": ["一次性时点"], "gaps": []}]}
+
+        orig = (cont.snapshot, cont.compare)
+
+        def _compare(e, l, **kw):
+            calls.append(("compare", e.get("period_kind"), l.get("period_kind")))
+            return {"hypotheses": [{"judgment_id": "cash_from_working_capital"}],
+                    "later": {"source": {}}, "earlier": {"source": {}}}
+
+        cont.snapshot = _snap
+        cont.compare = _compare
+        self.addCleanup(setattr, cont, "snapshot", orig[0])
+        self.addCleanup(setattr, cont, "compare", orig[1])
+
+    def test_newer_disclosure_produces_the_page_from_the_normal_path(self):
+        self._adopt_old_version()
+        calls: list = []
+        self._stub(calls)
+        page = self._build()
+        self.assertTrue(page.get("hypotheses"), page)
+        picks = [c for c in calls if c[0] == "snapshot"]
+        self.assertEqual(len(picks), 2, calls)
+        self.assertEqual(picks[0][1], "洋河股份:2024年年度报告")
+        self.assertEqual(picks[0][2], "annual")
+        self.assertEqual(picks[1][1], "洋河股份:2025年半年度报告")
+        self.assertEqual(picks[1][2], "half", "半年报按半年口径建快照")
+        self.assertTrue((self.ws / "analysis" / "continuation.json").is_file())
+        v = dict(page.get("version") or {})
+        self.assertFalse(v.get("historical_rebuild"), "有已采纳旧版本就不是历史重建")
+        self.assertTrue((v.get("based_on_old_version") or {}).get("frozen"))
+        self.assertTrue(str((v.get("based_on_old_version") or {}).get(
+            "report_version_id") or ""), "要带旧版本的 report_version_id")
+        self.assertEqual([m.get("side") for m in (v.get("materials") or [])],
+                         ["earlier", "later"])
+        for m in (v.get("materials") or []):
+            self.assertEqual(m.get("subject_state"), "ok", m)
+            self.assertIn(m.get("admission"), ("admitted", "comparison"), m)
+        self.assertIn("未声明新截止", str(v.get("new_cutoff_source") or ""),
+                      "没有声明新截止时如实写出来源")
+
+    def test_repeat_call_is_idempotent_and_does_not_rewrite_the_version(self):
+        self._adopt_old_version()
+        self._stub([])
+        first = self._build()
+        vid = str((first.get("version") or {}).get("version_id") or "")
+        self.assertTrue(vid)
+        again = self._build()
+        self.assertEqual(str((again.get("version") or {}).get("version_id") or ""), vid)
+        arch = self.ws / "analysis" / "continuation_versions"
+        self.assertFalse(arch.is_dir() and list(arch.glob("*.json")),
+                         "内容没变就不该产生归档（更不该覆盖旧版）")
+
+    def test_a_new_version_is_saved_and_the_old_one_is_archived_unchanged(self):
+        self._adopt_old_version()
+        self._stub([])
+        first = self._build()
+        vid1 = str((first.get("version") or {}).get("version_id") or "")
+        cur = self.ws / "analysis" / "continuation.json"
+        before = cur.read_bytes()
+        second = self._build(new_as_of="2025-09-30")
+        vid2 = str((second.get("version") or {}).get("version_id") or "")
+        self.assertNotEqual(vid1, vid2, "声明的新截止变了就是另一版")
+        self.assertEqual(str((second.get("version") or {}).get("supersedes") or ""), vid1)
+        self.assertNotEqual(cur.read_bytes(), before, "当前版本要被新版替换")
+        arch = self.ws / "analysis" / "continuation_versions"
+        files = sorted(p.name for p in arch.glob("*.json"))
+        self.assertEqual(len(files), 1, files)
+        archived = json.loads((arch / files[0]).read_text(encoding="utf-8"))
+        self.assertEqual(str((archived.get("version") or {}).get("version_id") or ""), vid1,
+                         "归档的是**旧版**内容，旧版不改")
+
+    def test_wrong_subject_material_never_enters_the_snapshot(self):
+        self._adopt_old_version()
+        calls: list = []
+        self._stub(calls)
+        self._write_inputs(docs=[
+            {"title": "洋河股份:2024年年度报告",
+             "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223.PDF",
+             "published_at": "2025-04-29", "text": "洋河股份 2024年年度报告正文"},
+            {"title": "宁德时代:2025年半年度报告",
+             "url": "http://static.cninfo.com.cn/finalpage/2025-08-19/9999.PDF",
+             "published_at": "2025-08-19", "text": "宁德时代 2025年半年度报告正文"},
+        ])
+        self.assertEqual(self._build(), {}, "主体不符的更晚材料不得进入快照")
+        self.assertEqual([c for c in calls if c[0] == "snapshot"], [], calls)
+
+    def test_material_published_after_the_declared_cutoff_is_excluded(self):
+        self._adopt_old_version()
+        self._stub([])
+        self.assertEqual(self._build(new_as_of="2025-06-30"), {},
+                         "新材料晚于声明的新截止 → 明确不适用，不进快照")
+        self.assertTrue(self._build(new_as_of="2025-09-30").get("hypotheses"))
+
+    def test_without_a_newer_disclosure_it_is_not_applicable(self):
+        self._adopt_old_version()
+        self._write_inputs(docs=[{"title": "洋河股份:2024年年度报告",
+                                  "url": ("http://static.cninfo.com.cn/finalpage/"
+                                          "2025-04-29/1223.PDF"),
+                                  "published_at": "2025-04-29",
+                                  "text": "洋河股份 只到 2024 年年报"}])
+        calls: list = []
+        self._stub(calls)
+        self.assertEqual(self._build(), {})
+        self.assertEqual([c for c in calls if c[0] == "compare"], [],
+                         "没有更新披露就不做比较（不凑假对照）")
+        self.assertFalse((self.ws / "analysis" / "continuation.json").is_file())
+
+    def test_historical_rebuild_when_no_old_version_is_frozen(self):
+        """没有已采纳旧版本 → 标**历史重建**（不得称原判断的事前盲测），但仍可生成。"""
+        self._stub([])
+        page = self._build()
+        self.assertTrue(page.get("hypotheses"))
+        v = dict(page.get("version") or {})
+        self.assertTrue(v.get("historical_rebuild"))
+        self.assertFalse((v.get("based_on_old_version") or {}).get("frozen"))
+        self.assertIn("历史重建",
+                      str((v.get("based_on_old_version") or {}).get("note") or ""))
+
+
+class TestHalfYearCalibers(unittest.TestCase):
+    """10-08 复核 §2：H1 续页的税费/现金**口径**与**子判断拆分**。
+
+    复核点名四件事，逐条钉住：
+    ① 命题定义里的"税费"是总税费（所得税＋税金及附加），洋河 2025H1 应约 20.84 亿
+       （10.85＋10.00），不是只算所得税那 10.85 亿；
+    ② 现金桥的净利润项用**补充资料合并净利润**变化（约 −36.12 亿），不是归母 −36.04 亿；
+    ③ 应收 +8.08／应付 +18.31 亿是**同期调节项变化**，本期发生额是应收释放 6.86／应付消耗 56.68 亿；
+    ④ "利润主导方向延续"与"缓冲结构变化"是**两项子判断**，各自给状态。
+    """
+
+    # 洋河 2025H1（半年报「本报告期／上年同期」两列）与补充资料净利润
+    HALF = {
+        "cur_label": "2025H1", "prev_label": "2024H1", "period_kind": "half",
+        "rows": {
+            "归属于上市公司股东的净利润": {"cur": 4343649032.11, "prev": 7947245427.18,
+                                          "yoy": -45.34, "locator": "第 7 页 · 「归属于上市公司股东的净利润」"},
+            "所得税费用": {"cur": 1592767634.72, "prev": 2677318299.95, "yoy": -40.51,
+                       "locator": "第 12 页 · 「所得税费用」"},
+            "税金及附加": {"cur": 2415489775.36, "prev": 3415166563.30, "yoy": -29.27,
+                       "locator": "第 40 页 · 「税金及附加」"},
+            "经营活动产生的现金流量净额": {"cur": 616044153.37, "prev": 2043328628.29,
+                                   "yoy": -69.85,
+                                   "locator": "第 7 页 · 「经营活动产生的现金流量净额」"},
+        },
+        "supplement_net_profit": {"cur": 4335432025.45, "prev": 7947920201.66,
+                                  "locator": "第 44 页 · 现金流量表补充资料「净利润」"},
+        "volume": {"销售量": {"cur": 78192.32, "prev": 115586.48, "yoy": -32.35,
+                            "locator": "第 11 页 · 产销量表"},
+                   "库存量": {"cur": 16293.52, "prev": 24673.39, "yoy": -33.96,
+                            "locator": "第 11 页 · 产销量表"}},
+    }
+
+    def _half_snap(self, **over):
+        snap = {"label": "洋河 2025 年半年度报告", "periods": [2024, 2025],
+                "period_kind": "half",
+                "source": {"title": "洋河股份:2025年半年度报告", "url": "https://x/h1",
+                           "period_kind": "half", "period_labels": ["2024H1", "2025H1"],
+                           "disclosure_date": "2025-08-19", "text_sha256": "h1"},
+                "dataset": {"hash": "h-2425"}, "runs": {}, "records": [],
+                "volume_price": {"ok": True, "facts": [], "derived": []},
+                # 补充资料三行：`cur`/`prev` 是本期/上期**发生额**，`delta` 是同期变化
+                "wc_lines": {
+                    "payable": {"label": "经营性应付项目", "cur": -5668153072.08,
+                                "prev": -7498974974.55, "delta": 1830821902.47},
+                    "inventory": {"label": "存货", "cur": 708006819.89,
+                                  "prev": 946033212.48, "delta": -238026392.59},
+                    "receivable": {"label": "经营性应收项目", "cur": 686334539.30,
+                                   "prev": -122046717.41, "delta": 808381256.71},
+                },
+                "judgments": [], "half": json.loads(json.dumps(self.HALF))}
+        snap.update(over)
+        return snap
+
+    def _annual_snap(self):
+        """较早侧：2024 年度判断（营运资本＝应付/存货/应收三行，变化口径）。"""
+        return {"label": "洋河 2024 年度报告（冻结）", "periods": [2023, 2024],
+                "period_kind": "annual",
+                "source": {"title": "洋河股份:2024年年度报告", "url": "https://x/24",
+                           "period_kind": "annual", "period_labels": ["2023年", "2024年"],
+                           "disclosure_date": "2025-04-29", "text_sha256": "a24"},
+                "dataset": {"hash": "h-2324"},
+                "runs": {"cash_reconciliation": {
+                    "model_id": "cash_reconciliation", "status": "validated",
+                    "run_id": "run-24",
+                    "outputs": [{"metric": "operating_cashflow_change", "value": -15.02e8,
+                                 "components": [
+                                     {"component_id": "change_in_net_profit",
+                                      "value": -33.54e8},
+                                     {"component_id": "change_in_working_capital",
+                                      "value": 11.04e8}]}]}},
+                "volume_price": {"ok": False, "facts": [], "derived": []}, "records": [],
+                "judgments": [{"judgment_id": "cash_from_working_capital",
+                               "title": "现金变化主要由营运资本构成",
+                               "numbers": ["ΔOCF -15.02 亿元"], "watch": ["下一期三行"],
+                               "boundary": "b", "alternatives": [], "gaps": []}]}
+
+    def test_total_tax_buffer_is_income_tax_plus_surcharge(self):
+        from financial_analysis import continuation as cont
+        r = cont.readings_of(self._half_snap())
+        # ① −Δ所得税 10.85 亿 ＋ −Δ税金及附加 10.00 亿 ≈ 20.84 亿
+        self.assertAlmostEqual(r["tax_income_contribution"] / 1e8, 10.8455, places=3)
+        self.assertAlmostEqual(r["surcharge_contribution"] / 1e8, 9.9968, places=3)
+        self.assertAlmostEqual(r["tax_contribution"] / 1e8, 20.8423, places=3)
+        self.assertEqual(r["tax_role"], "缓冲")
+        # 缺一段税费构成时如实标缺口，不把 10.85 当成总额（文本里写"仅取到一项"）
+        snap = self._half_snap()
+        snap["half"]["rows"].pop("税金及附加")
+        r2 = cont.readings_of(snap)
+        self.assertAlmostEqual(r2["tax_contribution"] / 1e8, 10.8455, places=3)
+        page = cont.compare(self._annual_snap(), snap,
+                            select_ids=["profit_mechanism_and_buffer"])
+        self.assertEqual(page["hypotheses"], [],
+                         "较早侧没有该判断时不硬编（这里只验证读数层）")
+
+    def test_cash_bridge_uses_supplement_consolidated_net_profit(self):
+        from financial_analysis import continuation as cont
+        r = cont.readings_of(self._half_snap())
+        # ② 补充资料合并净利润变化 −36.12 亿（≠ 归母 −36.04 亿），口径写清楚
+        self.assertAlmostEqual(r["cash_np"] / 1e8, -36.1249, places=4)
+        self.assertNotAlmostEqual(r["cash_np"], r["profit_change"], places=4)
+        self.assertIn("补充资料", r["cash_np_caliber"])
+        self.assertAlmostEqual(r["cash_wc"] / 1e8, 24.0118, places=4)
+        # 四项对账：ΔOCF ＝ 净利项 ＋ 营运资本项 ＋ 非现金及其他（残差由合计行给出）
+        self.assertAlmostEqual(
+            r["ocf_change"] - r["cash_np"] - r["cash_wc"] - r["cash_noncash"], 0.0, places=4)
+        self.assertIn("由利润下降主导", r["cash_direction"])
+
+    def test_amount_and_change_are_not_conflated(self):
+        from financial_analysis import continuation as cont
+        r = cont.readings_of(self._half_snap())
+        rec, pay = r["wc_lines"]["receivable"], r["wc_lines"]["payable"]
+        # ③ 本期发生额 vs 同期调节项变化：应收释放 6.86（变化 +8.08）、应付消耗 56.68（变化 +18.31）
+        self.assertAlmostEqual(rec["cur"] / 1e8, 6.8633, places=4)
+        self.assertAlmostEqual(rec["delta"] / 1e8, 8.0838, places=4)
+        self.assertAlmostEqual(rec["prev"] / 1e8, -1.2205, places=4)
+        self.assertAlmostEqual(pay["cur"] / 1e8, -56.6815, places=4)
+        self.assertAlmostEqual(pay["delta"] / 1e8, 18.3082, places=4)
+
+    def test_direction_and_buffer_structure_are_separate_rows(self):
+        from financial_analysis import continuation as cont
+        page = cont.compare(self._annual_snap(), self._half_snap(),
+                            select_ids=["cash_from_working_capital"])
+        rows = {h["judgment_id"]: h for h in page["hypotheses"]}
+        self.assertIn("cash_from_working_capital", rows)
+        self.assertIn(cont.J_CASH_BUFFER, rows, "缓冲结构必须是独立子判断")
+        # ④ 方向延续：本期半年主导项仍是**利润项** → 加强（不被缓冲结构的变化带成削弱）
+        #    文案在 10-11 C4 改为「主导项仍是**{旧快照读数给出的那一项}**」（不假定利润项、
+        #    也不拿别家公司的身份），所以这里断言的是同一意图：主导项身份＝利润项。
+        self.assertEqual(rows["cash_from_working_capital"]["status"], cont.STATUS_STRONGER)
+        self.assertIn("主导项仍是**利润项**", rows["cash_from_working_capital"]["status_reason"])
+        # 缓冲结构：应收本期**释放** 6.86 亿 → 削弱，且明确区分本期额与同期变化
+        buf = rows[cont.J_CASH_BUFFER]
+        self.assertEqual(buf["status"], cont.STATUS_WEAKER)
+        self.assertIn("释放", buf["status_reason"])
+        self.assertIn("6.86", buf["status_reason"].replace(" ", ""))
+        _txt = " ".join(buf["new_readings"])
+        self.assertIn("本期发生额", _txt)
+        self.assertIn("同期调节项变化", _txt)
+        # 两项状态可以不同（一个加强、一个削弱），不用整体状态抹平
+        self.assertNotEqual(rows["cash_from_working_capital"]["status"], buf["status"])
 
 
 class TestX0AmountUnitBoundary(unittest.TestCase):

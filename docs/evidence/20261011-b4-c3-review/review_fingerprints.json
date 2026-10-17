@@ -1,0 +1,91 @@
+{
+  "captured_at": "2026-10-11T18:50:19.995189+08:00",
+  "head": "c85371e22040d439d2ed77113f152f87ccdc026d",
+  "batch": "C3 研究实验台（现金反转条件＋一次披露更新）",
+  "instruction": "docs/总架构师执行指令.md L11（受保护只读）",
+  "previous": "docs/evidence/20261011-b4-c2e-review/results.json",
+  "touched_files": {
+    "research_report_adapter.py": "1dc1e72166a8ca2959013bb0fc3f1af651e70e3b224d820a3d4419296682e676",
+    "financial_analysis/operators/cash_reconciliation.py": "fd929f9ff7e2aecde0ccc507de497771053e348758abbdfe9d4fd1c8a2c0d60f",
+    "scripts/c3_experiment.py": "c27bfa5b466fcf0d20e3f95e5d427b40bf6e1689aef38517be8a9844e7167490",
+    "docs/evidence/20261011-b4-c3-review/c3_review.py": "f32e5a93da4df7c56b061a9059c3d6465673526f6a7832fec357baf5c8858848",
+    "docs/evidence/20261011-b4-c3-review/c3_action_page.md": "88598d3f6a798218749a786b49aa0dd939b264cd09658cc8990eed41ddab6ffa",
+    "docs/evidence/20261011-b4-c3-review/c3_action_page.pdf": "96901cb64e265b113b1c40c84ee60c64acaeece5fa821f99e2b8b51b94130b5c",
+    "docs/evidence/20261011-b4-c3-review/c3_artifacts_sha256.json": "85192d01a56b810ec99126336fc4e9871e636bddfbf2644cbdca19ce11c5dc19",
+    "docs/evidence/20261011-b4-c3-review/results.json": "ac445fd7e4251d61e685945f5a870f32ecd8dd79d773a5066c8f6c7b5d5d2af1",
+    "tmp/research-studies/4dba42a6bdde9227/c3_experiment_600031.SH.json": "101dca966aa39b2eb7cbc99d564bb6752d0f5486d5e24487f02f48142cdac9f6",
+    "tmp/research-studies/0af20919e6245b88/c3_experiment_002304.SZ.json": "2c4451fc81fe76a23eb8120c84de15e630c2111e5310b2a455b4f35d0e8c85fd"
+  },
+  "unchanged_verified": {
+    "acceptance_checker.py": "23185477325b2708cbd9b8c5753e94754fef841e6ad41574b7e0ed960260fb62",
+    "delivery_pipeline.py": "b29a042304fc081fb1899004ec81679cbfa3f8151fab4cd9757c65cadb8740cf",
+    "web_ui.py": "654b1111473e3d1578868f448b650fb5fc6c34c16a2da39f72f6e6e63600a0df",
+    "financial_analysis/continuation.py": "c9a184fd05f59104289038bb8d8d8da6db7036e50a24240521b2f7221e061864",
+    "report_pdf.py": "41cde1935b1e21b15470ae487a61954c7ddb29f87db96bae5882ef947db35a5a",
+    "docs/总架构师执行指令.md": "3585a814c9726a84b962206622e4ff49ffeed99c1461d2adbfc6416503ab90dd",
+    "docs/三域金融研究架构规划_20261005.md": "8a04e247feccb5964a4c7788c2027845e1a0a8872042d8534f7e930df0132984",
+    "docs/架构监督记录.md": "f352b66ea4cc0cf9e8330bc3b222fcc30a8998ba4758fbd5e7aba4780058bcab"
+  },
+  "new_packages": {
+    "sany": {
+      "zip": "deliverables_20261011_183959_f38391.zip",
+      "sha256": "d443e59c0201fea5d00630f67efc87af2c70778bb25941f8c5e2ee0087ece437",
+      "bytes": 5210401
+    },
+    "yanghe": {
+      "zip": "deliverables_20261011_184706_13b232.zip",
+      "sha256": "c06a409b6f80f5fce8f3f9a9f3138cbe6f0610c7a22c197dbf51ef925a92f7a2",
+      "bytes": 5263914
+    }
+  },
+  "old_packages": {
+    "c2e_sany": {
+      "zip": "deliverables_20261011_171519_344cb4.zip",
+      "sha256": "d6d6b7def6b6ce44ad637d5df1d3ce648d81105c3e3081426cb3a05ff60db4bf",
+      "unchanged": true,
+      "baseline_sha256": "d6d6b7def6b6ce44ad637d5df1d3ce648d81105c3e3081426cb3a05ff60db4bf"
+    },
+    "c2e_yanghe": {
+      "zip": "deliverables_20261011_171523_8c5000.zip",
+      "sha256": "6d8c3914d3f4a387a8321dd4dfa125e8aa120cfd2f9610f99341f61312b51e75",
+      "unchanged": true,
+      "baseline_sha256": "6d8c3914d3f4a387a8321dd4dfa125e8aa120cfd2f9610f99341f61312b51e75"
+    },
+    "c2c_baseline": {
+      "zip": "deliverables_20261011_142232_080384.zip",
+      "sha256": "f79861e758f570affdea023c14602444a906e636f937afa617554a0c31e774df",
+      "unchanged": true,
+      "baseline_sha256": "f79861e758f570affdea023c14602444a906e636f937afa617554a0c31e774df"
+    }
+  },
+  "review_evidence": {
+    "c3_action_page.md": "88598d3f6a798218749a786b49aa0dd939b264cd09658cc8990eed41ddab6ffa",
+    "c3_action_page.pdf": "96901cb64e265b113b1c40c84ee60c64acaeece5fa821f99e2b8b51b94130b5c",
+    "c3_artifacts_sha256.json": "85192d01a56b810ec99126336fc4e9871e636bddfbf2644cbdca19ce11c5dc19",
+    "c3_review.py": "f32e5a93da4df7c56b061a9059c3d6465673526f6a7832fec357baf5c8858848",
+    "README.md": "5da6b52cdcaabc268a05b9ea1666a4e46d64d4b19523aa27dc42ad1aa527e4bb",
+    "results.json": "ac445fd7e4251d61e685945f5a870f32ecd8dd79d773a5066c8f6c7b5d5d2af1",
+    "review_fingerprints.json": "4779353bbcb3bc94962817802efe92d46771c0dbc50db8dafd9fc749f82d1247"
+  },
+  "packages_contain": {
+    "sany": [
+      "reports/report.md",
+      "analysis/context.json",
+      "analysis/analysis_runs.json",
+      "analysis/c3_experiment_600031.SH.md"
+    ],
+    "yanghe": [
+      "reports/report.md",
+      "analysis/context.json",
+      "analysis/analysis_runs.json",
+      "analysis/c3_experiment_002304.SZ.md"
+    ]
+  },
+  "tracked_status_at_capture": "M README.en.md\n M README.md\n M acceptance_checker.py\n M delivery_pipeline.py\n M docs/DeepSeek执行状态.md\n M docs/M0完成复核与下一步修订_20260916.md\n M docs/总架构师执行指令.md\n M docs/架构监督记录.md\n M evals/cases/auto_grown.json\n M financial_analysis/dataset.py\n M financial_analysis/operators/cash_reconciliation.py\n M financial_analysis/operators/operating_drivers.py\n D frontend/dist/assets/Agents-B_3ZQBQg.js\n D frontend/dist/assets/AuditPage-By_nLf47.js\n D frontend/dist/assets/Evals-BZ1OgcVv.js\n D frontend/dist/assets/Health-D3x5Sb3P.js\n D frontend/dist/assets/History-B7q3q95E.js\n D frontend/dist/assets/Memory-B0zm2Bai.js\n D frontend/dist/assets/MetricsPage-DhPwsJeS.js\n D frontend/dist/assets/ReportViewer-cUPB_bnT.js\n D frontend/dist/assets/ResearchStudy-CktnTY8R.js\n D frontend/dist/assets/Settings-B8oSxljc.js\n D frontend/dist/assets/Skills-DtLUVgOD.js\n D frontend/dist/assets/TaskConsole-31_5aqUI.js\n D frontend/dist/assets/chevron-down-Yswnkbsa.js\n D frontend/dist/assets/chevron-right-CtBtDXF5.js\n D frontend/dist/assets/circle-check-337XdjRW.js\n D frontend/dist/assets/copy-BIoMbjCU.js\n D frontend/dist/assets/file-text-rpqHifFQ.js\n D frontend/dist/assets/index-Dty-DQCi.css\n D frontend/dist/assets/index-GJQNgEx3.js\n D frontend/dist/assets/plus-CHk9hWZA.js\n D frontend/dist/assets/rotate-ccw-WACHRYrP.js\n D frontend/dist/assets/search-D_yIOXDk.js\n D frontend/dist/assets/sparkles-Cw0a_Wk8.js\n D frontend/dist/assets/trash-2-B6womI3J.js\n D frontend/dist/assets/ui-07hq_abT.js\n D frontend/dist/assets/upload-DT33luqT.js\n M frontend/dist/index.html\n M frontend/src/pages/ResearchStudy.tsx\n M quant_research/study.py\n M templates.json\n M test_research_study_entry.py\n M web_ui.py\n?? .zcodeignore\n?? AGENTS.md\n?? _dbg_ver.py\n?? _l3_probe_tmp.py\n?? _trial_files.py\n?? _trial_monitor.py\n?? _trial_nev.py\n?? _trial_peek.py\n?? _trial_submit.py\n?? _trial_ws.py\n?? adapters/wind_import.py\n?? docs/A批复核与补修指令_20260918.md\n?? docs/DSH下午增量复核与收口指令_20260928.md\n?? docs/DSH真实样本复核与下一批执行_20260928.md\n?? docs/Harness接续执行指令_20260927.md\n?? docs/evidence/20260917-target-fingerprints.json\n?? docs/evidence/20260918-A-review-fingerprints.json\n?? docs/evidence/20260918-review-fingerprints.json\n?? docs/evidence/20260919-F3-review-fingerprints.json\n?? docs/evidence/20260919-report-review-fingerprints.json\n?? docs/evidence/20260920-report-review-fingerprints.json\n?? docs/evidence/20260921-night-D-review-fingerprints.json\n?? docs/evidence/20260921-stage-D-review-fingerprints.json\n?? docs/evidence/20260922-D-review-fingerprints.json\n?? docs/evidence/20260923-D-delivery-review-fingerprints.json\n?? docs/evidence/20260923-noon-D-review-fingerprints.json\n?? docs/evidence/20260925-onboarding-review-fingerprints.json\n?? docs/evidence/20260926-network-probe.json\n?? docs/evidence/20260926-search-review-fingerprints.json\n?? docs/evidence/20260926-search-review.md\n?? docs/evidence/20260927-harness-command-sent.png\n?? docs/evidence/20260927-harness-handoff-fingerprints.json\n?? docs/evidence/20260927-system-review-fingerprints.json\n?? docs/evidence/20260928-afternoon-dsh-command-sent.png\n?? docs/evidence/20260928-afternoon-review-fingerprints.json\n?? docs/evidence/20260928-afternoon-review-probes.json\n?? docs/evidence/20260928-dsh-command-sent.png\n?? docs/evidence/20260928-dsh-review-fingerprints.json\n?? docs/evidence/20260928-dsh-review-probes.json\n?? docs/evidence/20260929-Q-command-sent.png\n?? docs/evidence/20260929-Q-review-fingerprints.json\n?? docs/evidence/20260929-acquisition-command-sent.png\n?? docs/evidence/20260929-acquisition-facts-review.md\n?? docs/evidence/20260929-acquisition-review-fingerprints.json\n?? docs/evidence/20260929-night-acceptance-review.md\n?? docs/evidence/20260929-night-command-sent.png\n?? docs/evidence/20260929-night-output-review.json\n?? docs/evidence/20260929-night-review-fingerprints.json\n?? docs/evidence/20260929-stage-review.md\n?? docs/evidence/20260930-Q-command-sent.png\n?? docs/evidence/20260930-Q-deepening-review.md\n?? docs/evidence/20260930-Q-review-fingerprints.json\n?? docs/evidence/20260930-afternoon-logic-command-sent.png\n?? docs/evidence/20260930-afternoon-logic-fingerprints.json\n?? docs/evidence/20260930-afternoon-logic-review.md\n?? docs/evidence/20260930-expanded-delivery-probes.json\n?? docs/evidence/20260930-expanded-delivery-probes.py\n?? docs/evidence/20260930-expanded-frontend-probes.cjs\n?? docs/evidence/20260930-expanded-frontend-probes.json\n?? docs/evidence/20260930-expanded-package-recompute.json\n?? docs/evidence/20260930-expanded-pdf/\n?? docs/evidence/20260930-expanded-review-fingerprints.json\n?? docs/evidence/20260930-expanded-stageT-command-sent.png\n?? docs/evidence/20260930-expanded-system-review.md\n?? docs/evidence/20261001-U-scale-guidance-sent.png\n?? docs/evidence/20261001-U-scale-review-fingerprints.json\n?? docs/evidence/20261001-U-scale-review.md\n?? docs/evidence/20261001-V-to-W-review-fingerprints.json\n?? docs/evidence/20261001-W-architecture-review.md\n?? docs/evidence/20261001-W-guidance-sent.png\n?? docs/evidence/20261001-W-to-X-review-fingerprints.json\n?? docs/evidence/20261001-X-guidance-sent.png\n?? docs/evidence/20261001-analysis-direction-command.png\n?? docs/evidence/20261001-analysis-direction-fingerprints.json\n?? docs/evidence/20261001-e2e-browser-run.json\n?? docs/evidence/20261001-e2e-dsh-guidance.png\n?? docs/evidence/20261001-e2e-task-submitted.png\n?? docs/evidence/20261001-readme-review-fingerprints.json\n?? docs/evidence/20261002-e2e-close-fingerprints.json\n?? docs/evidence/20261002-e2e-current-package-report.md\n?? docs/evidence/20261002-e2e-current-package-report.pdf\n?? docs/evidence/20261002-e2e-final-guidance-queued.png\n?? docs/evidence/20261002-e2e-final-workbench.png\n?? docs/evidence/20261002-e2e-independent-review.json\n?? docs/evidence/20261002-e2e-pdf-page-1.png\n?? docs/evidence/20261002-e2e-pdf-page-6.png\n?? docs/evidence/20261002-e2e-running-workbench.png\n?? docs/evidence/20261002-repair-boundary-fingerprints.json\n?? docs/evidence/20261002-repair-guidance-sent.png\n?? docs/evidence/20261003-incremental-guidance-sent.png\n?? docs/evidence/20261003-incremental-review-fingerprints.json\n?? docs/evidence/20261005-X1-guidance-sent.jpg\n?? docs/evidence/20261005-data-acquisition-plan-fingerprints.json\n?? docs/evidence/20261005-feasibility-roi-guidance-sent.png\n?? docs/evidence/20261005-feasibility-roi-review-fingerprints.json\n?? docs/evidence/20261005-research-view-review-fingerprints.json\n?? docs/evidence/20261005-review-report-page1.png\n?? docs/evidence/20261005-review-report-page9.png\n?? docs/evidence/20261005-three-domain-guidance-sent.png\n?? docs/evidence/20261005-three-domain-plan-fingerprints.json\n?? docs/evidence/20261007-stage-next-review/\n?? docs/evidence/20261008-architect-next-stage/\n?? docs/evidence/20261008-existing-data-b1/\n?? docs/evidence/20261008-offline-research-framework/\n?? docs/evidence/20261008-quant-methods-plan/\n?? docs/evidence/20261009-architect-b2/\n?? docs/evidence/20261009-architect-b3/\n?? docs/evidence/20261009-architecture-market/\n?? docs/evidence/20261010-architect-b4/\n?? docs/evidence/20261010-b4-product-review/\n?? docs/evidence/20261011-b4-c2a-review/\n?? docs/evidence/20261011-b4-c2b-review/\n?? docs/evidence/20261011-b4-c2c-review/\n?? docs/evidence/20261011-b4-c2d-review/\n?? docs/evidence/20261011-b4-c2e-review/\n?? docs/evidence/20261011-b4-c3-review/\n?? docs/evidence/20261011-c2a-accept-next/\n?? docs/evidence/20261011-c2b-review/\n?? docs/evidence/20261011-c2c-accept/\n?? docs/evidence/20261011-c2d-accept/\n?? docs/evidence/20261011-c2e-accept/\n?? docs/三场景输出复核与F3执行指令_20260919.md\n?? docs/三域金融研究架构规划_20261005.md\n?? docs/代码逻辑收口与DSH下一批_20260930下午.md\n?? docs/分析卓越化_经营驱动研究与标杆案例_20261001.md\n?? docs/历史架构指令_20260930.md\n?? docs/报告成稿复核与下一步指导_20260920.md\n?? docs/报告质量二轮复核与F2补修指令_20260919.md\n?? docs/报告质量复核与产品化路线_20260919.md\n?? docs/搜索网络与金融资料获取专项_20260926.md\n?? docs/新人一键启动与首次研究体验_20260925.md\n?? docs/目标收敛与执行指令_20260917.md\n?? docs/真实研究闭环与阶段D收口_20260927.md\n?? docs/端到端复核_研究修复闭环_20261002.md\n?? docs/端到端实测_真实入口与研究数据贯通_20261001.md\n?? docs/路线图_市场对齐_20260927.md\n?? docs/金融分析与受控建模阶段Q_20260929.md\n?? docs/金融资料获取与事实化补链_20260929.md\n?? docs/阶段D交付真实性复验与执行_20260923.md\n?? docs/阶段D前置审查_报告与交付_20260921.md\n?? docs/阶段D夜间复核与纠偏_20260921.md\n?? docs/阶段D实机复核与下一批指令_20260922.md\n?? docs/阶段D收口复验与下一步_20260922.md\n?? docs/阶段D正常交付闭环执行指令_20260923.md\n?? docs/阶段D系统收敛与研究效能提升_20260923.md\n?? docs/阶段Q增量验收与产品闭环推进_20260929夜.md\n?? docs/阶段Q深化_可信分析与问题驱动建模_20260930.md\n?? docs/阶段T_可信研究内核与产品化路线_20260930.md\n?? docs/阶段V_从分析标杆到经营研究产品_20261001.md\n?? docs/阶段W_研究判断与有效经营情景_20261001.md\n?? docs/阶段X_可检验研究续页与简洁交付_20261001.md\n?? docs/阶段复核与下一步指令_20260918.md\n?? evals/a2_official_chain_20260929/000711-corrected/\n?? evals/a2_official_chain_20260929/000711/project/materials/797a3b25d1142a30/\n?? evals/a2_official_chain_20260929/002304-2023/\n?? evals/a2_official_chain_20260929/002304-2025/\n?? evals/a2_official_chain_20260929/002304-2025h1/\n?? evals/a2_official_chain_20260929/002304/project/materials/f42e747c73850b59/\n?? evals/a2_official_chain_20260929/600031/project/materials/0c3e82056e977adc/\n?? examples/\n?? financial_analysis/events.py\n?? frontend/dist/assets/Agents-B_oFHoY9.js\n?? frontend/dist/assets/AuditPage-xjoRtyZM.js\n?? frontend/dist/assets/Evals-DK8o4R18.js\n?? frontend/dist/assets/Health-CiCF4l8A.js\n?? frontend/dist/assets/History-hCBI45Xc.js\n?? frontend/dist/assets/Memory-D4uhBGN1.js\n?? frontend/dist/assets/MetricsPage-CMuoWMOk.js\n?? frontend/dist/assets/ReportViewer-BxXxK30-.js\n?? frontend/dist/assets/ResearchStudy-DKtVyLt5.js\n?? frontend/dist/assets/Settings-BX-awD-Y.js\n?? frontend/dist/assets/Skills-BoEc5h3O.js\n?? frontend/dist/assets/TaskConsole-DAka-wU6.js\n?? frontend/dist/assets/chevron-down-UJsHAIAA.js\n?? frontend/dist/assets/chevron-right-CvawUtH9.js\n?? frontend/dist/assets/circle-check-D-QDzrcx.js\n?? frontend/dist/assets/copy-CH3MZqPe.js\n?? frontend/dist/assets/file-text-CShYmF4o.js\n?? frontend/dist/assets/index-D1Sf4BRq.css\n?? frontend/dist/assets/index-Dor8AM9q.js\n?? frontend/dist/assets/plus-QkGIko5R.js\n?? frontend/dist/assets/rotate-ccw-ItkHwKZH.js\n?? frontend/dist/assets/search-exsSpBMf.js\n?? frontend/dist/assets/sparkles-CQPgMwXD.js\n?? frontend/dist/assets/trash-2-CrUB1E_P.js\n?? frontend/dist/assets/ui-YB625Q9K.js\n?? frontend/dist/assets/upload-CAYTLu2H.js\n?? probe_batchA.py\n?? research_report_adapter.py\n?? risk_research/\n?? scripts/c2c_volume_price_study.py\n?? scripts/c2d_cash_study.py\n?? scripts/c2e_cash_study.py\n?? scripts/c3_experiment.py\n?? scripts/run_research_study.py\n?? test_c2c_volume_price_closure.py\n?? test_financial_events.py\n?? test_risk_research.py\n?? test_wind_import.py\n?? tmp/\n?? trial_tasks.json",
+  "unverified": [
+    "GUI 实机复核（服务栈未运行，8080 被非本项目进程占用）",
+    "PDF 首页像素级目视（需人工或可读图模型）",
+    "经济因果/供应商条款（本轮明示不能判断）",
+    "研究详情交互渲染（本轮只把同一 JSON 放进研究目录，供文件清单读取）"
+  ]
+}

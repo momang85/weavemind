@@ -1,0 +1,127 @@
+{
+  "artifacts": {
+    "events.json": "d2a31628d5e8d82640357948bca8a9196f97d972eda7f6149dcdc40bc19c2ef2",
+    "excluded.json": "8b71e8add764d71f03e702c33843a1ab8f49b7ecd75180de65ebfb9d7e9949de",
+    "financial.json": "07b374faae88df2eb391fd27377b60432f65a955ae70f3012566da6fe79593d0",
+    "inputs.json": "2c3377a4ffa9728f5bbf14a20b2170a568aa8dbbc756d1127023db84e62171d6",
+    "label_readiness.json": "9c07de78a1543126d61204779ce4b2aa50d5de99b7c665feabdd66f034400398",
+    "mechanism_cards.md": "f2542658a7ed4c72ecfe06507f6e6639b45b5cf9c36388cdd766cb015e70a5a1",
+    "mechanism_evaluation.json": "4d38fe628d80fbac823844e5c3456dc23732dcbd5d7f41d0d3c8ede498e4fa2c",
+    "mechanism_evaluation.md": "7186de847b55c57fe5c092169dd492c62d980b5d81a2cfe9cea5f4d8d88af326",
+    "mechanisms.json": "8e4d1500e8b8fa1e570250f3961aa9297b41868c941d6352bf17e6a791b50d5b",
+    "previews.json": "5ab9d0a3d9a0bb71f57d8b16744a37b468fccd6f85ac88b798463d56a7aaacf9",
+    "projection_ledger.json": "78d01458800325d62f63b1929fb81abdb0129f166aa359923fa44506806f11d9",
+    "quant/event_returns.json": "e8ee0e3eadedad5c57402ac9bf57de3d7f2b9099a3479b1592916fb66a62db11",
+    "quant/quant_detail.md": "9daad870fbc88c676904561738d4c587f10400427f8cc9f90a3e40efb4f76072",
+    "quant/quant_manifest.json": "f270c01995e4fcda0ed49d321d18edb48134a3601b7b4a28bd9d94c954db86d2",
+    "research.md": "f17c3796963c77c3fee8eaa206c3f030b7d49b2fa59faa3a25eba3bbbebbbc79",
+    "risk.json": "df77283993a614d5d9109da8ad087cf9337f3c64de977b38c7e566a0184dc9de",
+    "summary.md": "9af3d1b93ed534f9023d801d38050650e4aa8f9435396f2d6fb4ef347802a54e"
+  },
+  "evaluation_as_of": "2024-04-27",
+  "external_delivery": {
+    "allowed": false,
+    "reason": "本批仅生成内部研究产物"
+  },
+  "feature_cutoff": "2024-04-27",
+  "human_review": "unreviewed",
+  "impl_version": "study/1.0.0",
+  "implementation_hashes": {
+    "adapters/wind_import.py": "0d04a030a91c70dbf10e7cc55b30ef250bf975cd16dd173feeee611e800dee17",
+    "financial_analysis/__init__.py": "4033aa54c048a44847bebe6a817080a8b41067da39cabd7b387aa5a1c90c4b8e",
+    "financial_analysis/charts.py": "6d759ceb903b00346d20c5db918c7544cea649fecab6330753077610d99e80c9",
+    "financial_analysis/continuation.py": "c9a184fd05f59104289038bb8d8d8da6db7036e50a24240521b2f7221e061864",
+    "financial_analysis/contracts.py": "8fa07ed9e54d820ed2490b8b560f743756fb74f6f2a623068f6ec005bafde4b6",
+    "financial_analysis/dataset.py": "26c78eb7cc78f88ccd7de3daf3ed2c8f2d2791b9467ba6ad871aac6cc52b56fa",
+    "financial_analysis/events.py": "1eaf8fae8ffb86be6e72122ca1b86ef4710bf2fdaf2455f401110bffd6776491",
+    "financial_analysis/judgments.py": "03a571045222c57b297b53908b132b72dc8a4d6898efd1d96e2d193a1d078054",
+    "financial_analysis/narrative.py": "e6cc919b97779654347c5f5aba5a3b5036de30e9ccc7db7d440fc6f564bb432f",
+    "financial_analysis/operators/__init__.py": "01c8daa54f30d7912bf50667615800548a44dbbb349266f15c742acfdb3a32d0",
+    "financial_analysis/operators/cash_pressure.py": "e9e20e7f7ad94b9cc5627c3aca87f0da4cba503123f3b44211cce377947622a4",
+    "financial_analysis/operators/cash_quality.py": "92fbf3bb957cf2a5d15564c5d261932fcb800dbd7b6c7caa92ccf72257d984e8",
+    "financial_analysis/operators/cash_reconciliation.py": "e1d93aac88275959e0f4c065e91631722ed5d037155e44daf0f0eb5377f9edae",
+    "financial_analysis/operators/operating_drivers.py": "bebf2abb4203c05c236d140a72155cd6c551b047af47048d4b247ef7309ffa35",
+    "financial_analysis/operators/profit_bridge.py": "7bd2a5a56d530e4b3c0c1305fe81db27764e2108ea42d65c004211c90d3b5817",
+    "financial_analysis/operators/profit_to_cash.py": "61b61d12b3eb82353f60c6f49960e9415542099a48b004cf7b1229d834837cb2",
+    "financial_analysis/operators/scenario.py": "3924eb163cd12092523dc4bfd743a9180c519e55c5877194be8c3b93d5c02e74",
+    "financial_analysis/operators/working_capital.py": "ebeb9f5d0386c1829c1d138d9397a8be418683953b2abbb0060e1b5f5af28e6b",
+    "financial_analysis/questions.py": "84a5a3848db212cf4e0210b2197e241b53ba80b5263821112ebea81e2a759678",
+    "financial_analysis/registry.py": "a98026f1817659c7be618be725a6dc62fc32eb3cf4bfbf1b7411b5cd0e25541e",
+    "financial_analysis/report_adapter.py": "565666d95fefe48137b28e4543d0022eb6c30e55448cd404b4432fcccacc643b",
+    "financial_analysis/runner.py": "24f5e8f818480c6e146d63bd78613cf0bf344e7f7f388c3ebf400125338a0001",
+    "financial_analysis/store.py": "95e045eff5821991243fa234b7879ee4e2b15aaff5021d472901d5d91b67acac",
+    "financial_analysis/validation.py": "322c5c6566408581df1ed3b6a9610be810f5434aeb4a71b1fe3ebdfe5a7e7019",
+    "quant_research/backtest.py": "d126233ed553a3baf5d7c74bf6a7ba16cf47f4fab234e4520badc18e13586389",
+    "quant_research/event_returns.py": "d49bbadc8f1fc652b35fd85234af4b94b5fab023ea5c7c8abe8c1f8a4d7f05ba",
+    "quant_research/publish.py": "5ba0e18395ae61ab80808ae0aa526898334918d6f28b1e92745e264f3e71d159",
+    "quant_research/study.py": "0c8888c3f87635aa51bac12fb92657f4b63c7e45a4c40933f8d8fc3ffe58cf06",
+    "risk_research/features.py": "a7905e2afa40199935b929db7e9868afc9f2eee0a25214a89d42996c349c01a5",
+    "risk_research/readiness.py": "c6349ee2b7a24ad9e97c1caaa7384b1bdf5841c9b310a5a19671f4f7a9ca87b6"
+  },
+  "params_hash": "215dcc3fa30ab8ebd31474e5c7a05fc25a72180b06a0ae0e2300289e658b6472",
+  "q1": {
+    "card_hashes": {
+      "002304.SZ": "170d931f0f2096130f5ae38441c6075d32a40d4516598ebd005fede2170e86f7",
+      "600031.SH": "d667dd48124f222f342068d4eff7b6b1503c9c2c4364df25694e2dc131b4a031"
+    },
+    "eval_version": "q1_eval/1.0.0",
+    "evaluation_hash": "3ee36ecdf2f47480ae0cb8e4dd6b0cfd0be5b0d7d52a3821be5a77b02cb39e64",
+    "method_version": "q1-v1",
+    "module_hashes": {
+      "quant_research/evaluate_mechanisms.py": "9ee750024f3797cb4f8f97b21bdc927b698060ff139ed5edf9de6fb3cfc1ed4f",
+      "quant_research/mechanisms.py": "17b8bcfa0d7555f4c9be7ee0c889d68996f8cae436bf527524ffb7f35b2f925e"
+    },
+    "primary_t": {
+      "002304.SZ": "2023",
+      "600031.SH": ""
+    },
+    "provenance_kind": "历史重建",
+    "readings_hash": "de84a502d8e9a093f428269ad4300ac7c7c0a1ab1469e2aac5243411a3acf736"
+  },
+  "research_state": "research_draft",
+  "result_hash": "d44fb61b4430fe9b9bb0b33d85d308b016649aa8b4c885ad44086f6530c3fa68",
+  "schema": "weavemind.research_study/1",
+  "sources": {
+    "financial": {
+      "field_map": {},
+      "file": "financials.json",
+      "metadata": {
+        "license": "official_public_disclosure",
+        "materials": [
+          {
+            "disclosed_at": "2024-04-27",
+            "material_id": "77185ce8ec83f3bc",
+            "text_sha256": "48e137d4d0b90f82ac1cf363f9c4f579ad83175bbb69d7f5bd0d0b0be45c3545",
+            "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF"
+          },
+          {
+            "disclosed_at": "2025-04-29",
+            "material_id": "f42e747c73850b59",
+            "text_sha256": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0",
+            "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF"
+          },
+          {
+            "disclosed_at": "2026-04-28",
+            "material_id": "ee4429eecac66f50",
+            "text_sha256": "b01f7d7cf8cf4a438e33bb0f0cd1afcf44a157e857624a2c49a7d5022b60ac42",
+            "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF"
+          },
+          {
+            "disclosed_at": "2025-04-18",
+            "material_id": "0c3e82056e977adc",
+            "text_sha256": "aeaf2e836e2af6741003258b2cc8cf7f0799b8b939e5643a835675258aa33ef5",
+            "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF"
+          }
+        ],
+        "projection_note": "现役官方年报表抽取 → 原预览器可读行的显式投影",
+        "projection_version": "q1_projection/1.0.0",
+        "source": "official_disclosure_cache",
+        "source_note": "巨潮官方披露缓存原件；不冒称 Wind 导出",
+        "synthetic": false
+      },
+      "raw_sha256": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b"
+    }
+  },
+  "study_id": "b2a7b0ed02b70d603887a8ac3d1e2a331d5626c303f2b5083fd1554a0f54a6b3",
+  "synthetic": false
+}

@@ -1,0 +1,139 @@
+{
+  "reviewed_at": "2026-10-07T00:21:26.810324+08:00",
+  "previous_review_baseline": "733ec89",
+  "reviewed_implementation_baseline": "4cbea3b082da84d5377a0fd4c1bcede7f9642303",
+  "head_at_record": "7d5e9a92af670fc5f0bc6821a1cb87ac727afebe",
+  "new_head_scope": "DSH status and registration of review evidence only; no new implementation approval",
+  "files": {
+    "docs/DeepSeek执行状态.md": {
+      "sha256": "7c0243f705ad8f32e74980cf32dc6b660bdbefe5704987481008e6734fabe64e",
+      "bytes": 290801
+    },
+    "docs/总架构师执行指令.md": {
+      "sha256": "4485cd45b005a8eb5dc84bcc318c16698a232abd60a01adf999ea2fc07f508cc",
+      "bytes": 13267
+    },
+    "docs/架构监督记录.md": {
+      "sha256": "22c7e26d4cc4bb90cb774f84941aa633327d6da39ca1542720bed8ced7c5798b",
+      "bytes": 130838
+    },
+    "financial_analysis/judgments.py": {
+      "sha256": "0de402ec802f5804f4970fb5ee71089c7b8337cb1f526eb413d29ccdea5eb8cc",
+      "bytes": 85909
+    },
+    "financial_analysis/narrative.py": {
+      "sha256": "87434e872da82e1ed45eb616400bbe795c5fed61b560863bf65488e6dc39a87d",
+      "bytes": 65137
+    },
+    "report_brief.py": {
+      "sha256": "34df071126a4f931509db7accf471cbb23860f68580dd0ee617e3b69796c514e",
+      "bytes": 249426
+    },
+    "delivery_pipeline.py": {
+      "sha256": "1cb98aa1686bf3fbea0096769b74d40c268470fb44f84f5a009b2701bfed7f48",
+      "bytes": 137576
+    },
+    "quant_research/backtest.py": {
+      "sha256": "d126233ed553a3baf5d7c74bf6a7ba16cf47f4fab234e4520badc18e13586389",
+      "bytes": 31844
+    },
+    "quant_research/event_returns.py": {
+      "sha256": "69d620d9e7ed83646e355cd37cdf133279b916a539e4ed8a684f5ef6581c7d11",
+      "bytes": 38854
+    },
+    "quant_research/event_calendar.py": {
+      "sha256": "a3202296df2fbacf659aa1a05de237a967606e53f2852e400feff3391fa89ba9",
+      "bytes": 9437
+    },
+    "quant_research/market_history.py": {
+      "exists": false
+    },
+    "quant_research/publish.py": {
+      "sha256": "9f24ed02eb0e622b7ebea6a65de012a42e2b47ecf787a28f56430ff62ae66d6f",
+      "bytes": 10869
+    },
+    "quant_research/qlib_adapter.py": {
+      "sha256": "e4680b20f49bdfdc72ab91e0eaf916aa71c2b813f9b6999927ae5700f703138f",
+      "bytes": 5659
+    },
+    "acceptance_checker.py": {
+      "sha256": "505c7dac0e6c97f458832ef6f6e9542010ad0dda0aa3263f2b3bc7f6d67a6290",
+      "bytes": 248327
+    },
+    "docs/evidence/20261006-sany-replication/report.md": {
+      "sha256": "f6d9064f4051808b8307ad52f610806e2d4504535d7ecbb840cbcb249f13f18a",
+      "bytes": 23042
+    },
+    "docs/evidence/20261007-results-review/review.md": {
+      "sha256": "70cccc92d913d3b6078151e3af44793caa47141e7651a693b97e542640a8928e",
+      "bytes": 9935
+    },
+    "docs/evidence/20261007-results-review/artifact_checks.json": {
+      "sha256": "82b7f288801c1d3fc21c6d77df45bcedfac57e50559336a2703165b0553bb529",
+      "bytes": 3393
+    },
+    "docs/evidence/20261007-results-review/delivered_report.md": {
+      "sha256": "114ff91876c460d17e5148257c522e25976fc478bc102f0db0d7619d198006a1",
+      "bytes": 27203
+    },
+    "docs/evidence/20261007-results-review/dsh-review-sent.png": {
+      "sha256": "38c39a931c7e7d1fe7a6b1ebb88afe0b7e88ed8fdf45bdbc3948a3fd9056886a",
+      "bytes": 128917
+    },
+    "docs/evidence/20261006-normal-entry/deliverables_20261006_231822_08a4e6.pdf": {
+      "sha256": "e648bab61bacad81c1b898b113510b5f8eaa367df855c4038e12e15ef7e94644",
+      "bytes": 5536907
+    }
+  },
+  "dirty_tracked_at_record": [
+    "README.en.md",
+    "README.md",
+    "docs/M0完成复核与下一步修订_20260916.md",
+    "docs/evidence/20261007-results-review/review.md",
+    "docs/总架构师执行指令.md",
+    "docs/架构监督记录.md",
+    "evals/cases/auto_grown.json",
+    "financial_analysis/dataset.py",
+    "financial_analysis/judgments.py",
+    "templates.json"
+  ],
+  "artifact": {
+    "package": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-10ea37599d\\deliverables_20261006_231822_08a4e6.zip",
+    "package_sha256": "ccb1782173e22b2433e802f35da85d92e739ffb81901f21ddf5c001bb6432c08",
+    "md_sha256": "114ff91876c460d17e5148257c522e25976fc478bc102f0db0d7619d198006a1",
+    "pdf_sha256": "e648bab61bacad81c1b898b113510b5f8eaa367df855c4038e12e15ef7e94644",
+    "pages": 9,
+    "manifest_content_count": 27,
+    "all_member_hashes_match": true
+  },
+  "dsh_guidance": {
+    "sent_at_local": "2026-10-07 00:16",
+    "delivery": "visible message, consumed/read, status plan updated in 7d5e9a9",
+    "old_automatic_goal": "paused, not resumed",
+    "implementation": "not yet accepted",
+    "evidence": "dsh-review-sent.png"
+  },
+  "accepted": [
+    "judgment object flow and single front section",
+    "Yanghe frozen 9-page package and 27 content hashes",
+    "prior order dependence counterexample fixed",
+    "ordinary license restricted projection"
+  ],
+  "pending": [
+    "final company-specific reader judgments and reports",
+    "missing volume-price stays unknown",
+    "plan and actual independent matching evidence",
+    "missing available_at date cutoff",
+    "unreadable mixed quant members deny external quant projection",
+    "replacement ID requires successful replacement outcome",
+    "one final deterministic same-version export"
+  ],
+  "verification_limits": [
+    "no paid new research",
+    "no implementation edits",
+    "no repeated browser adopt/download",
+    "no full test suite or CI rerun",
+    "live process health not established",
+    "machine/research/human review states remain distinct"
+  ]
+}

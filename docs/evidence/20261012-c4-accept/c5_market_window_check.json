@@ -1,0 +1,176 @@
+{
+  "scope": "Read-only existing two events and cached free internal market dataset; no old algorithm tests",
+  "market_meta": {
+    "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+    "source": "akshare",
+    "license": "免费源·仅内部试验",
+    "adj_basis": "前复权(qfq)",
+    "date_range": [
+      "2023-01-03",
+      "2026-09-30"
+    ],
+    "rows": 2724,
+    "instruments": [
+      "000300",
+      "002304",
+      "600031"
+    ],
+    "imported_at": "2026-10-05T16:24:59+08:00"
+  },
+  "rows_sha256": "1a6e5d7c008cf9b63cc99ca9d4d3c40365f221490ce552a4b63eb1eade34c4e1",
+  "calendar_id": "49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435",
+  "calendar_range": [
+    "1990-12-19",
+    "2026-12-31"
+  ],
+  "events": [
+    {
+      "material_id": "2ce860dddd94e5a6",
+      "date": "2025-08-19",
+      "event": {
+        "code": "002304",
+        "date": "2025-08-19",
+        "date_precision": "day",
+        "date_basis": "source_url_format",
+        "title": "2025年半年度报告",
+        "category": "定期报告",
+        "matched": "年度报告",
+        "rule": "title:年度报告",
+        "material_id": "2ce860dddd94e5a6",
+        "url": "http://static.cninfo.com.cn/finalpage/2025-08-19/1224503648.pdf",
+        "raw_sha256": "d14744bffbcad3b55858ef34d7850b0b412b8d587c6ffdba30bbc79e1c737e05",
+        "period": "2025H1"
+      },
+      "status": "ok",
+      "anchor": {
+        "date": "2025-08-19",
+        "close": 70.88
+      },
+      "points": [
+        {
+          "offset": -1,
+          "date": "2025-08-19",
+          "close": 70.88,
+          "return": null,
+          "benchmark_return": null,
+          "excess_return": null,
+          "state": "anchor",
+          "note": "锚点（价格起点）：无收益读数，仅用于定位",
+          "unavailable": ""
+        },
+        {
+          "offset": 0,
+          "date": "2025-08-20",
+          "close": 70.69,
+          "return": -0.002681,
+          "benchmark_return": 0.011371,
+          "excess_return": -0.013894,
+          "state": "observed",
+          "unavailable": ""
+        },
+        {
+          "offset": 4,
+          "date": "2025-08-26",
+          "close": 71.69,
+          "return": 0.011428,
+          "benchmark_return": 0.054273,
+          "excess_return": -0.040639,
+          "state": "observed",
+          "unavailable": ""
+        },
+        {
+          "offset": 19,
+          "date": "2025-09-16",
+          "close": 69.17,
+          "return": -0.024125,
+          "benchmark_return": 0.071024,
+          "excess_return": -0.088839,
+          "state": "observed",
+          "unavailable": ""
+        }
+      ],
+      "window_state": "observed",
+      "coverage_gaps": {
+        "002304": [],
+        "000300": []
+      },
+      "reading_hash": "b6b00be22c57924603aab47d407582b2cd529f787dfb985a3b5b1d94e787dccc",
+      "delivery_eligible": false,
+      "delivery_block_reason": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+    },
+    {
+      "material_id": "ee4429eecac66f50",
+      "date": "2026-04-28",
+      "event": {
+        "code": "002304",
+        "date": "2026-04-28",
+        "date_precision": "day",
+        "date_basis": "source_url_format",
+        "title": "2025年年度报告",
+        "category": "定期报告",
+        "matched": "年度报告",
+        "rule": "title:年度报告",
+        "material_id": "ee4429eecac66f50",
+        "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF",
+        "raw_sha256": "10af27149ab8b7b5f7a5678b76ada3bc1d422bc068a9fd52f5c1b253f610032c",
+        "period": "2025"
+      },
+      "status": "ok",
+      "anchor": {
+        "date": "2026-04-28",
+        "close": 47.68
+      },
+      "points": [
+        {
+          "offset": -1,
+          "date": "2026-04-28",
+          "close": 47.68,
+          "return": null,
+          "benchmark_return": null,
+          "excess_return": null,
+          "state": "anchor",
+          "note": "锚点（价格起点）：无收益读数，仅用于定位",
+          "unavailable": ""
+        },
+        {
+          "offset": 0,
+          "date": "2026-04-29",
+          "close": 47.95,
+          "return": 0.005663,
+          "benchmark_return": 0.010958,
+          "excess_return": -0.005238,
+          "state": "observed",
+          "unavailable": ""
+        },
+        {
+          "offset": 4,
+          "date": "2026-05-08",
+          "close": 46.53,
+          "return": -0.024119,
+          "benchmark_return": 0.023896,
+          "excess_return": -0.046894,
+          "state": "observed",
+          "unavailable": ""
+        },
+        {
+          "offset": 19,
+          "date": "2026-05-29",
+          "close": 43.72,
+          "return": -0.083054,
+          "benchmark_return": 0.028144,
+          "excess_return": -0.108154,
+          "state": "observed",
+          "unavailable": ""
+        }
+      ],
+      "window_state": "observed",
+      "coverage_gaps": {
+        "002304": [],
+        "000300": []
+      },
+      "reading_hash": "3948004ceb245b8429dc13de35bf1046bc6828ad057b9ce4546cf14a2b62f389",
+      "delivery_eligible": false,
+      "delivery_block_reason": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+    }
+  ]
+}

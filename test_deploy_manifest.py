@@ -393,13 +393,28 @@ class TestComposeKeepsContainerAlive(unittest.TestCase):
 
 
 class TestCiSuiteCoverage(unittest.TestCase):
+    # 已知未入门禁的测试文件（本清单**只减不增**，新增测试必须进 CI；
+    # 2026-10-16 起为空：此前遗留的 5 个测试文件已全部登记进 CI 工作流，
+    # risk_research 包也已补进镜像 COPY 清单——见本文件 `test_runtime_imports_are_in_image`）。
+    _KNOWN_UNREGISTERED = ()
+
     def test_every_test_file_runs_in_ci(self):
         ci = CI_YML.read_text(encoding="utf-8")
         executed = set(re.findall(r"python\s+(test_[A-Za-z0-9_]+\.py)", ci))
         on_disk = {p.name for p in ROOT.glob("test_*.py")}
+        missing = sorted(on_disk - executed - set(self._KNOWN_UNREGISTERED))
         self.assertEqual(
-            sorted(on_disk - executed), [],
+            missing, [],
             "以下测试文件不在 CI 门禁内，会随代码漂移静默失效")
+
+    def test_known_unregistered_list_has_no_stale_entries(self):
+        """豁免清单只减不增：已登记的（或已删除的）文件必须从清单里移除。"""
+        ci = CI_YML.read_text(encoding="utf-8")
+        executed = set(re.findall(r"python\s+(test_[A-Za-z0-9_]+\.py)", ci))
+        on_disk = {p.name for p in ROOT.glob("test_*.py")}
+        stale = sorted(n for n in self._KNOWN_UNREGISTERED
+                       if n not in on_disk or n in executed)
+        self.assertEqual(stale, [], "豁免清单里有过期条目（已登记/已删除），请移除")
 
     def test_workflow_yaml_parses(self):
         """CI 工作流必须能被 YAML 解析。

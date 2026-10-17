@@ -1,0 +1,18 @@
+[
+  {
+    "record_id": "mock-credit-1", "entity_id": "mock-borrower-1",
+    "decision_at": "2024-01-15", "synthetic": true,
+    "features": [{"name": "cash_coverage", "value": 1.2, "entity_id": "mock-borrower-1", "available_at": "2024-01-10"}],
+    "label": 0, "label_available_at": "2025-02-01", "outcome_end": "2025-01-15",
+    "label_definition": "模拟12月借款违约", "horizon_days": 366,
+    "authorization": {"internal": true, "training": true, "reference": "synthetic_fixture_only"}
+  },
+  {
+    "record_id": "mock-credit-pending", "entity_id": "mock-borrower-2",
+    "decision_at": "2025-01-15", "synthetic": true,
+    "features": [{"name": "cash_coverage", "value": 0.6, "entity_id": "mock-borrower-2", "available_at": "2025-01-10"}],
+    "label": null, "label_available_at": "", "outcome_end": "2026-01-15",
+    "label_definition": "模拟12月借款违约", "horizon_days": 365,
+    "authorization": {"internal": true, "training": true, "reference": "synthetic_fixture_only"}
+  }
+]

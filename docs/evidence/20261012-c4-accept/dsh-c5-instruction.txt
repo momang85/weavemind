@@ -1,0 +1,8 @@
+架构裁决：C4公开求值/内容身份/保存重开与真实历史材料回放有限认可；用户闭环暂不通过。Codex已启动本项目8091测试WebUI（PID30452）、用此前授权momang正常登录，选三一4dba…→点⑧“取研究主体”，真实报“需要entity_id”。这不是缺口令：TS初选仅发study/hash/options等返回entities，后端却先要求entity。请读更新总架构师执行指令、三域规划§18.19及 docs/evidence/20261012-c4-accept/。
+
+唯一当前C5：80%“经营判断×市场反应”，≤20%必要入口/选版接缝，不另开Bug/更多离线样品阶段。
+1. 首先后端一处解除循环：验证study/hash读取financial后，无entity的options只返登记主体/元数据，不默认第一主体、不扫描材料/求值；其余动作保留entity要求。随后马上做新价值，已验四格不重跑。
+2. 复用research_experiment+event_calendar/event_returns，在现实验区加可选market_comparison：用户明确选新披露事件/price_dataset_id/calendar_id/evaluation_as_of，三窗口股票/基准/几何相对并列经营支持/削弱及下一观察。H1 2ce860dd（2025-08-19）和年报ee4429ee（2026-04-28）窗口数据均齐。内部集3d6b4acb/日历49413c7d；参考H1后5日股票+1.14%、基准+5.43%、相对−4.06%，年度后20日相对−10.82%，生产从数据算不写死。仅披露日收盘后1/5/20交易日offset0/4/19，三时点分开，不用年度信息回填H1；市场表现不证明原因/预期差/alpha。
+3. 原判断沿现experiments冻结readings/判据/来源，显式baseline_experiment_id更新，不现场重建旧判断冒原假说；无原版可明示历史重建baseline。旧/新材料都核同公司和各自时点，旧<=cutoff。现金主导只保留现已求值规则，删额外未执行“ΔOCF转负削弱”文案，库存本窗口与持续确认分开。
+4. 当前adapter所谓最新按saved_at=None/hash字典序选，正文/staging重复解析；请求带显式experiment_id解析一次贯穿。C4仅验临时staging/源码glob，没有真实新ZIP：本批从两个已存实验明确选一个实际内部导出，核MD/完整JSON/manifest同源，保存重开保留事件/行情/条件；旧包不动。当前行情免费源仅内部，受限数不从analysis/实验JSON/正文绕现external_delivery门外发，不改许可。
+终点：首点击→主体/run→回撤求值；洋河baseline→H1支持/削弱+三市场窗→年度另事件；保存重开→显式选版实际内部ZIP/一页行动。只验新通路/窗口绑定/原判据/同版及内部门，不重复31/37/28/13/57/258、全仓CI付费。计算留分析层，不再加大模块/服务/worker/DB/DSL。代码加载仅处理本轮8091测试实例、不触碰无关8080或其他任务，保留鉴权/当前登录/目录范围，不改模型权限密钥或绕安全；GUI不可见记具体条件，不索要已给口令。保护原8项和未跟踪，不git add-A/清理删除，必要实现/dist清单，状态账约20行历史链接，完成交审。

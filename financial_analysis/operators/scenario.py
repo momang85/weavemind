@@ -239,6 +239,18 @@ def _minority_of(ctx: dict, consolidated: Decimal, given) -> Decimal:
     return (consolidated * min0) / cons0
 
 
+def scenario_revenue_gross(revenue, margin, *, growth=0.0,
+                           margin_delta=0.0) -> tuple[Decimal, Decimal]:
+    """同一情景的**两条流量**：`R1 = R0×(1+g)`、`G1 = R1×(基期毛利率+m)`。
+
+    10-08 §14.2：这是情景求值里唯一被别处复用的两行，提成**纯函数共享**——
+    `evaluate()` 与 `cash_pressure` 走同一处实现，不另建情景引擎、不改其它求值规则。
+    """
+    rev1 = _d(revenue) * (1 + _d(growth))
+    gross1 = rev1 * (_d(margin) + _d(margin_delta))
+    return rev1, gross1
+
+
 def evaluate(ctx: dict, *, growth=0.0, margin_delta=0.0, expense_ratio=0.0,
              mode: str = "fixed", tax_rate=None, minority_share=None) -> dict:
     """**唯一的情景求值器**（W0）：一组假设 → 情景归母净利（以及明细项）。
@@ -249,8 +261,8 @@ def evaluate(ctx: dict, *, growth=0.0, margin_delta=0.0, expense_ratio=0.0,
       加上**冻结的基期残差**，再按税率算所得税、按占比算少数股东。
     """
     g, m, e = _d(growth), _d(margin_delta), _d(expense_ratio)
-    rev1 = ctx["revenue"] * (1 + g)
-    gross1 = rev1 * (ctx["margin"] + m)
+    rev1, gross1 = scenario_revenue_gross(ctx["revenue"], ctx["margin"],
+                                          growth=g, margin_delta=m)
     if mode != "detail":
         block1 = ctx["block_signed"] * (1 + e)
         return {"mode": "fixed", "revenue": rev1, "gross_profit": gross1,

@@ -1,0 +1,22 @@
+[
+  {
+    "code": "900001.SH", "company": "模拟公司甲",
+    "title": "模拟甲发布经营计划", "text": "公司预计下一年度营业收入增长，并计划改善回款。",
+    "available_at": "2025-04-25", "ingested_at": "2025-04-30",
+    "source": "synthetic_fixture", "material_id": "mock-guidance", "origin_id": "mock-guidance",
+    "synthetic": true
+  },
+  {
+    "code": "900002.SH", "company": "模拟公司乙",
+    "title": "模拟乙签订设备订单", "text": "公司公告签订设备采购订单，订单金额增加。签约不等于已经确认营业收入。",
+    "available_at": "2025-04-26", "ingested_at": "2025-04-30",
+    "source": "synthetic_fixture", "material_id": "mock-order", "origin_id": "mock-order",
+    "synthetic": true
+  },
+  {
+    "code": "900001.SH", "company": "模拟公司甲",
+    "title": "模拟后续融资材料（特征截止后）", "text": "公司获得融资并完成债务偿还。",
+    "available_at": "2025-05-20", "ingested_at": "2025-05-20",
+    "source": "synthetic_fixture", "material_id": "mock-future", "synthetic": true
+  }
+]

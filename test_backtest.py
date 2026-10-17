@@ -151,6 +151,66 @@ class NoImpossibleFillTest(unittest.TestCase):
         self.assertGreaterEqual(min(x["cash_after"] for x in r["orders"]), 0.0)
 
 
+class RebalanceOrderInvarianceTest(unittest.TestCase):
+    """复核 §3C 的最小修：**输入顺序不改经济结果**。
+
+    反例（`docs/evidence/20261006-report-review/quant_counterexamples.md`）：零费用、1000 元
+    本金、1 股一手、四个交易日、两只股票，只把 `universe` 从 `[A,B]` 换成 `[B,A]`，旧实现
+    总收益 25% → 49%，且两边 `audit.ok` 都是 true —— **账本守恒并不证明等权分配正确**。
+    修法：冻结目标差额 → 统一卖出 → 按规范顺序（代码序）统一买入。
+    """
+
+    ROWS = [("2025-01-02", 10.0, 10.0), ("2025-01-31", 5.0, 15.0),
+            ("2025-02-03", 5.0, 15.0), ("2025-02-04", 10.0, 15.0)]
+
+    def _fixture(self):
+        rows = []
+        for d, a, b in self.ROWS:
+            for c, v in (("A", a), ("B", b)):
+                rows.append({"date": d, "code": c, "open": v, "close": v, "available_at": d})
+        return {"schema": "market_history/0", "dataset_id": "fixture-order",
+                "source": "synthetic", "license": "unknown", "adj_basis": "qfq",
+                "rows": len(rows), "instruments": ["A", "B"],
+                "date_range": ["2025-01-02", "2025-02-04"], "data": rows}
+
+    def _run(self, universe):
+        return bt.run(self._fixture(),
+                      {"universe": list(universe), "initial_cash": 1000.0, "lot_size": 1},
+                      costs={k: 0 for k in bt.DEFAULT_COSTS})
+
+    def test_universe_order_does_not_change_economics(self):
+        ab, ba = self._run(["A", "B"]), self._run(["B", "A"])
+        for r in (ab, ba):
+            self.assertEqual(r["status"], "ok")
+            self.assertTrue(r["audit"]["ok"], r["audit"]["failed"])
+        # 逐笔成交（含顺序与金额）、逐日净值、拒绝记录都必须与名单顺序无关
+        self.assertEqual(ab["orders"], ba["orders"])
+        self.assertEqual(ab["nav"], ba["nav"])
+        self.assertEqual(ab["rejections"], ba["rejections"])
+        self.assertEqual(ab["metrics"]["total_return"], ba["metrics"]["total_return"])
+        self.assertEqual(ab["positions"], ba["positions"])
+
+    def test_sells_are_visible_to_buys_in_the_same_rebalance(self):
+        """同一再平衡日先卖后买：卖出释放的现金对买单可见，不因"先遇到买单"而少买。
+
+        2025-02-03：权益 1000 ⇒ 各目标 500；B 现值 750 ⇒ 卖 16 股（240 元，余 34 股），
+        A 现值 250 ⇒ 用这 240 元买 48 股（5 元/股，手算）。旧实现在 `[A,B]` 下会先把 A 的
+        买单按"现金 0"拒绝，那 240 元再也没有机会被用上 ⇒ 25%。
+        """
+        ab = self._run(["A", "B"])
+        feb = [o for o in ab["orders"] if o["date"] == "2025-02-03"]
+        self.assertEqual([(o["side"], o["code"]) for o in feb], [("sell", "B"), ("buy", "A")])
+        self.assertEqual(feb[0]["qty"], 16)
+        self.assertEqual(feb[1]["qty"], 48)
+        self.assertEqual(ab["nav"][-1]["cash"], 0.0)
+        self.assertAlmostEqual(ab["metrics"]["total_return"], 0.49, places=6)
+
+    def test_execution_rule_is_reported_with_the_result(self):
+        r = self._run(["A", "B"])
+        self.assertIn("规范顺序", r["execution_rule"])
+        self.assertTrue(any("规范顺序" in x for x in r["limits"]))
+
+
 class DividendTest(unittest.TestCase):
     def test_explicit_dividend_enters_cash_ledger(self):
         """不复权价 + 显式分红：持 10,000 股、每股派 0.5 ⇒ 现金 +5,000（手算）。"""

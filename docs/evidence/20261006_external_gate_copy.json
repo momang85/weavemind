@@ -1,0 +1,115 @@
+{
+ "schema": "weavemind.external_gate_copy_probe/0",
+ "task": "copy-10ea37599d",
+ "source_task": "ui-10ea37599d",
+ "dataset": {
+  "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+  "license": "免费源·仅内部试验",
+  "adj_basis": "前复权(qfq)"
+ },
+ "readings": {
+  "event_returns": {
+   "reading_hash": "f823ea463adfa40aa8544db0845a3234106b9c83f29faf4c8a905b893bdc54e2",
+   "delivery_eligible": false,
+   "status": "ok"
+  },
+  "backtest": {
+   "reading_hash": "701e0ada7fd455fcf9ebac14d835118b430ae1a68f8fae043e9241f0d23fd889",
+   "delivery_eligible": false,
+   "spec_hash": "9ba7227d3285067229563b7b8356e5865e9aae4b5eaf859b9b09b7fc9c6f98d7",
+   "audit_ok": true
+  }
+ },
+ "snapshot_quant_members": [
+  "quant/backtest.json",
+  "quant/event_returns.json",
+  "quant/quant_detail.md",
+  "quant/quant_manifest.json"
+ ],
+ "package": "deliverables_20261006_224336_0211a6.zip",
+ "package_members": [
+  "PACKAGE_MANIFEST.json",
+  "analysis/analysis_cards.md",
+  "analysis/analysis_detail.md",
+  "analysis/analysis_runs.json",
+  "analysis/context.json",
+  "analysis/dataset.json",
+  "analysis/plan.json",
+  "analysis/selection.json",
+  "audit/model_report_full_15916267ff493f6b.md",
+  "audit/model_report_full_17579c4d65a9339a.md",
+  "audit/model_report_full_32a0acb4b49ae5ae.md",
+  "audit/model_report_full_3d720dfd27d345ff.md",
+  "audit/model_report_full_4d65174b2374fd4b.md",
+  "audit/model_report_full_6e02eb9b48afcb68.md",
+  "audit/model_report_full_97d3517e126cc4ea.md",
+  "audit/model_report_full_a4fd5257049c1cf6.md",
+  "audit/model_report_full_be1fc5808aa88ee2.md",
+  "audit/model_report_full_e6ea5420f8b5a1a7.md",
+  "audit/model_report_full_e958563b9d484c6f.md",
+  "audit/model_report_full_ed04b63a6ec27c47.md",
+  "charts/chart_1.png",
+  "charts/chart_2.png",
+  "charts/chart_3.png",
+  "evidence/citation_evidence.json",
+  "quant/EXTERNAL_DELIVERY_RESTRICTION.md",
+  "reports/report.md",
+  "working_paper.csv",
+  "working_paper.json"
+ ],
+ "package_quant_members": [
+  "quant/EXTERNAL_DELIVERY_RESTRICTION.md"
+ ],
+ "external_delivery": {
+  "schema": "weavemind.external_delivery/1",
+  "applied": true,
+  "allowed": false,
+  "checked": [
+   "quant/backtest.json",
+   "quant/event_returns.json",
+   "quant/quant_detail.md",
+   "quant/quant_manifest.json"
+  ],
+  "basis": "quant_research.publish.external_delivery_gate",
+  "reason": "存在不可对外的量化读数：backtest：许可「免费源·仅内部试验」⇒ 仅内部试验；event_returns：许可「免费源·仅内部试验」⇒ 仅内部试验（许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论）。对外交付须机构授权或只交付衍生结论，原始数据不得随包外发",
+  "withheld": {
+   "quant/backtest.json": "8d45ef07da10853ff298d88ea88a188915fe7872c2b522599f2b4b7a7582f16d",
+   "quant/event_returns.json": "f0e6511eb82a46621578ffa45d6a576ca9a697523fd217a7e51f7c13a26c8cc2",
+   "quant/quant_detail.md": "297c6762a32d478f95b8740cbf052337b4b37fdb4f505d638bcd1e1e7b8d90f1",
+   "quant/quant_manifest.json": "82aed39e63e186f45f46e87087a1492f1214a221b506ec5446ad4e412d9e9b30"
+  },
+  "note": "quant/EXTERNAL_DELIVERY_RESTRICTION.md"
+ },
+ "report_in_package": true,
+ "report_sha256": "cabae0cf70050aca7c0da44cc24fd8a8bfb1b87551ba6a8587cbd06e2f4f377c",
+ "verify": {
+  "reports/report.md": "ok",
+  "working_paper.json": "ok",
+  "working_paper.csv": "ok",
+  "charts/chart_1.png": "ok",
+  "charts/chart_2.png": "ok",
+  "charts/chart_3.png": "ok",
+  "audit/model_report_full_15916267ff493f6b.md": "ok",
+  "audit/model_report_full_17579c4d65a9339a.md": "ok",
+  "audit/model_report_full_32a0acb4b49ae5ae.md": "ok",
+  "audit/model_report_full_3d720dfd27d345ff.md": "ok",
+  "audit/model_report_full_4d65174b2374fd4b.md": "ok",
+  "audit/model_report_full_6e02eb9b48afcb68.md": "ok",
+  "audit/model_report_full_97d3517e126cc4ea.md": "ok",
+  "audit/model_report_full_a4fd5257049c1cf6.md": "ok",
+  "audit/model_report_full_be1fc5808aa88ee2.md": "ok",
+  "audit/model_report_full_e6ea5420f8b5a1a7.md": "ok",
+  "audit/model_report_full_e958563b9d484c6f.md": "ok",
+  "audit/model_report_full_ed04b63a6ec27c47.md": "ok",
+  "evidence/citation_evidence.json": "ok",
+  "analysis/analysis_runs.json": "ok",
+  "analysis/dataset.json": "ok",
+  "analysis/plan.json": "ok",
+  "analysis/context.json": "ok",
+  "analysis/selection.json": "ok",
+  "analysis/analysis_cards.md": "ok",
+  "analysis/analysis_detail.md": "ok",
+  "quant/EXTERNAL_DELIVERY_RESTRICTION.md": "ok"
+ },
+ "note": "内部快照仍带量化附件；交付包按既有许可门把无权外发的 quant/* 移出，只留限制说明与被移出成员的 sha256；财报正文仍在包内。"
+}

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
 import asyncio
 import hashlib
@@ -6313,6 +6313,18 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("**未采用的材料（不满足主体/期间/资料截止或未核验）**", md)
         self.assertIn("晚于资料截止日", md)
 
+    def test_same_risk_section_dedupes_across_materials(self):
+        """同一小节在两份材料里各列一次：**按小节键去重**（页码/字符区间跟着材料变）。"""
+        import report_brief as rb
+        a = ("来源 [2] 第 25 页 · 小节：第三节 管理层讨论与分析 > 十一、公司未来发展的展望 > "
+             "（三）可能面对的风险（字符 25331-25561）")
+        b = ("来源 [3] 第 26 页 · 小节：第三节 管理层讨论与分析 > 十一、公司未来发展的展望 > "
+             "（三）可能面对的风险（字符 26408-26629）")
+        c = ("来源 [3] 第 157 页 · 小节：第十节 财务报告 > 十二、与金融工具相关的风险 > "
+             "1、金融工具产生的各类风险（字符 162189-162344）")
+        self.assertEqual(rb._risk_section_key(a), rb._risk_section_key(b))
+        self.assertNotEqual(rb._risk_section_key(a), rb._risk_section_key(c))
+
     def test_risk_rows_carry_evidence_conditions_and_materials(self):
         """每条风险都要有对应证据、会改变判断的观察条件、需要补充的材料。"""
         import report_brief
@@ -6508,12 +6520,17 @@ class TestResearchBriefAssembly(unittest.TestCase):
 
         C3 起位置改到附录（主文只留一行指引）：口径说明不进主文版面，但**证据不删**，
         所以断言改为"附录里有完整条件"，而不是"主文里必须有这个标题"。
+
+        10-06：指引不再写死"见附录"——收束会把这一节移进 `analysis/analysis_detail.md`，
+        写死位置就会变成悬空引用；现在按**标题**指（详见
+        `test_financial_analysis.TestX0DeliveryClosure.test_no_pointer_to_a_moved_section`）。
         """
         import report_brief
         tid, _ = self._env()
         st = report_brief.build_structure(tid, self.GOAL, "")
         md = report_brief.render_brief_markdown(st, "")
-        self.assertIn("比率适用条件与适用范围见附录", md)
+        self.assertIn("比率适用条件与适用范围见『比率适用条件』", md)
+        self.assertNotIn("比率适用条件与适用范围见附录", md)
         _head, _, tail = md.partition("## 附录")
         self.assertIn("### 比率适用条件", tail)
         self.assertIn("归母净利率", tail)
@@ -9133,18 +9150,27 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
             {"label": "毛利额", "unit": "元", "cur": None, "prev": 1}, periods=[2023, 2024]))
 
     def test_profit_decomposition_declares_its_periods(self):
-        """材料必须自带报告期：正文据它给派生读数标年份，不靠调用方猜。"""
+        """材料必须自带报告期：正文据它给派生读数标年份，不靠调用方猜。
+
+        10-08 复核 §1：毛利率表**不声明年份**，所以"这份材料是哪一期"只能由
+        文档自己声明（标题里的"2024年年度报告"）；没声明就**未知**，不拿请求期间顶替。
+        """
         import narrative_evidence as ne
 
-        doc = {"title": "年报", "url": "https://x/1", "text": (
-            "分销售模式 2024年 2023年 同比增减\n"
-            "批发经销 27854167407.45 32052628760.26 -13.10%\n"
-            "营业收入 28876296993.56 33125534523.11 -12.83%\n"
-            "营业成本 营业成本 毛利率 营业收入 营业成本 毛利率\n"
-            "销售费用 6934875260.00 6681605162.00 3.79%\n")}
+        text = ("分销售模式 2024年 2023年 同比增减\n"
+                "批发经销 27854167407.45 32052628760.26 -13.10%\n"
+                "营业收入 28876296993.56 33125534523.11 -12.83%\n"
+                "营业成本 营业成本 毛利率 营业收入 营业成本 毛利率\n"
+                "销售费用 6934875260.00 6681605162.00 3.79%\n")
+        doc = {"title": "洋河股份:2024年年度报告", "url": "https://x/1", "text": text}
         pd = ne.extract_profit_decomposition([doc], periods=[2023, 2024])
         self.assertIn("periods", pd)
         self.assertEqual(list(pd["periods"]), [2023, 2024])
+        self.assertEqual(str(pd["document_period"]), "2024")
+        # 没有报告期的材料 → 未知（不得按请求期间放行）
+        undated = {"title": "年报", "url": "https://x/2", "text": text}
+        self.assertFalse(ne.extract_profit_decomposition([undated],
+                                                         periods=[2023, 2024]).get("ok"))
 
     def test_assembly_sentences_enter_the_same_claim_set(self):
         """装配器生成的观察与边界都要进主张集合，且边界单独记类型。"""
@@ -9907,6 +9933,48 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
             self.assertEqual(zf.read("reports/report.md"), md, "包内 MD 与导出字节一致")
             pkg = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
             self.assertEqual(pkg.get("research_body_sha256"), m.get("research_body_sha256"))
+
+    def test_export_projection_keeps_restricted_quant_out_of_the_zip(self):
+        """§3D：正常导出路径产出的包里**没有**无权外发的量化附件，正文与自检都还在。
+
+        内部快照仍带附件（内部保存成立），但交付包（对外交付面）只留一份限制说明 +
+        被移出成员的 sha256；许可判据复用既有门，不新增第二条交付链。
+        """
+        import zipfile
+        import delivery_pipeline as dp
+        from quant_research import publish as pub
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        pub.store_reading(ws, "event_returns", {
+            "operator": "event_returns_v1", "status": "ok", "delivery_eligible": False,
+            "input_kind": {"input_kind": "market_history", "dataset_id": "ds-1",
+                           "license": "免费源·仅内部试验"},
+            "readings": [], "limits": ["不是因果结论"]})
+        md = "# 交付正文（外发投影）\n\n正文内容。\n"
+        self._register_delivery(md)
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=md,
+                                  md_bytes=md.encode("utf-8"))
+        self.assertIn("quant/event_returns.json", snap.get("payload") or {},
+                      "内部快照仍带量化附件")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        self.assertTrue(res.get("package"), res)
+        with zipfile.ZipFile(ws / res["package"]) as zf:
+            names = zf.namelist()
+            pkg = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+            self.assertIn("reports/report.md", names, "财报正文必须仍可交付")
+            self.assertNotIn("quant/event_returns.json", names)
+            self.assertNotIn("quant/quant_detail.md", names)
+            self.assertIn(dp.EXTERNAL_NOTE_ARC, names)
+            self.assertIn("对外", zf.read(dp.EXTERNAL_NOTE_ARC).decode("utf-8"))
+        self.assertFalse(pkg["external_delivery"]["allowed"])
+        self.assertEqual(sorted(pkg["external_delivery"]["withheld"]),
+                         ["quant/event_returns.json", "quant/quant_detail.md",
+                          "quant/quant_manifest.json"])
+        self.assertEqual(sorted(pkg["files"]),
+                         sorted(n for n in names if n != "PACKAGE_MANIFEST.json"),
+                         "清单的成员表必须与包内实际成员一致（移出后不留幽灵）")
+        self.assertTrue(all(v == "ok" for v in (res.get("verify") or {}).values()),
+                        f"移出后自检仍需全绿：{res.get('verify')}")
 
     def test_export_snapshot_rejects_interleaved_revision(self):
         """09-23 E：快照取自 A、期间修订切到 B → 拒绝发布（不静默混版）。"""

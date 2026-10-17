@@ -60,6 +60,12 @@ LIMITS = (
     "毛利率的百分点变化不能替代金额归因（口径不同，不可互换）",
     "分产品/分地区是同一酒类口径的不同切法，**不可相加**；未分类差额单独列出",
     "量价分解的“均价”由该口径收入/销量算出，含产品结构混合，不得命名“提价效果”",
+    "分产品行的量价分解只能取**同范围**分子分母（白酒收入÷白酒销量）；公司收入÷白酒销量"
+    "是范围错配，本版拒绝出数、只报缺口",
+    "销量是**出货口径**（年报产量/销量/库存表），不等于终端动销；单位实现收入的升降含产品"
+    "结构与渠道让利，不得单独读成主动降价/提价",
+    "分产品勾稽的两层各自闭合：白酒行内（量＋单位实现收入）与公司合计（白酒＋红酒＋其他）；"
+    "两层都要求残差 ≤0.01 元，且不得用分行业/分地区/分销售模式的切法补第三个结构项",
 )
 
 SPEC = ModelSpec(
@@ -90,6 +96,10 @@ SPEC = ModelSpec(
         OutputSpec("gross_profit_change_by_segment", "分产品/分地区毛利变化",
                    kind="amount", structure="bridge"),
         OutputSpec("volume_price_decomposition", "量价分解", kind="amount",
+                   structure="bridge"),
+        # C2c：分产品收入勾稽（白酒量＋单位实现收入＋红酒＋其他＝公司营业收入变化）。
+        # 与量价分解是两层：第一层在白酒行内部，第二层勾回公司合计。金额型桥。
+        OutputSpec("revenue_product_reconciliation", "分产品收入勾稽", kind="amount",
                    structure="bridge"),
     ),
     allowed_params={"rounding": ("yuan_2", "yi_2")},
@@ -290,8 +300,65 @@ def _volume_metric(dataset, period: str) -> str:
     return ""
 
 
+def _scope_of(obs) -> str:
+    """观察行的**维度范围**（C2c）：`分产品:白酒` / `公司合计` / 空（未声明）。"""
+    return str(getattr(obs, "dimension", "") or "").strip()
+
+
+def _same_scope_revenue(dataset, volume_metric: str, periods: tuple[str, ...],
+                        volume_scope: str) -> tuple[str, str, str]:
+    """销量指标 → **与它同范围**的收入指标。
+
+    返回 `(收入指标名, 关系, 说明)`，关系 ∈ {same_scope, different_scope, company_scope}。
+    C2c 的硬约束（架构师 2026-10-11）：**白酒收入 ÷ 白酒销量**才是同一口径；
+    **公司收入 ÷ 白酒销量是范围错配，本版拒绝出数**——缺分产品白酒收入时留缺口并在
+    说明里写清缺什么，不用公司口径的替代吨价顶（旧实现把差额推给残差，本版不再这么做）。
+    """
+    if volume_metric == "sales_volume_baijiu":
+        scope = "分产品:白酒"
+        if all(dataset.get("revenue_product_baijiu", p) is not None for p in periods):
+            obs = dataset.get("revenue_product_baijiu", periods[-1])
+            declared = _scope_of(obs)
+            if declared and volume_scope and declared != volume_scope:
+                return "", "mismatch", (f"分产品白酒收入的维度范围是「{declared}」，"
+                                        f"销量是「{volume_scope}」：范围不一致，不做量价分解")
+            return "revenue_product_baijiu", "same_scope", f"销量与收入同为「{scope}」"
+        return "", "different_scope", ("分产品白酒收入未取得：公司收入÷白酒销量是范围错配，"
+                                       "本版**拒绝出数**（先补原表分产品行，不用替代吨价顶）")
+    return "revenue", "company_scope", "通用销量口径：与公司收入同为公司范围"
+
+
+def _volume_price_extra(dataset, prev_p: str, cur_p: str, vp: dict | None) -> dict:
+    """同表相邻行（白酒生产量/期末库存量）——**只作补充观察**，不进量价分解。
+
+    只在量价分解真的成立（同口径）时给出，且必须与销量同维度范围；缺行就不出现。
+    产能/库存是**公司**口径，渠道库存仍然未知——报告据此把两者分开说。
+    """
+    if not vp:
+        return {}
+    scope = str(vp.get("dimension") or "")
+    out: dict = {}
+    for key, metric, label in (("production_volume", "production_volume_baijiu", "白酒生产量"),
+                               ("inventory_volume", "inventory_volume_baijiu", "白酒期末库存量")):
+        o_c, o_p = dataset.get(metric, cur_p), dataset.get(metric, prev_p)
+        if o_c is None or o_p is None:
+            continue
+        if scope and _scope_of(o_c) and _scope_of(o_c) != scope:
+            continue                                     # 范围不一致：不用
+        out[key] = {"label": label, "metric": metric, "unit": str(o_c.unit or ""),
+                    "prev": float(_d(o_p.value)), "cur": float(_d(o_c.value)),
+                    "dimension": _scope_of(o_c)}
+    return out
+
+
 def _volume_price(dataset, prev_p, cur_p) -> tuple[dict | None, list]:
-    """同一口径两期都有销量与收入时做量价分解；均价含结构，标注不清口径差异。"""
+    """同一口径两期都有销量与收入时做量价分解。
+
+    C2c：有分产品白酒收入时，销量与收入**同取分产品:白酒**（同口径），R/Q 命名
+    「单位实现收入（含产品结构）」——它含产品结构混合，**不等于主动降价或提价**；
+    范围不一致（例如把公司收入合计当白酒收入、或维度声明冲突）时**拒绝分解**，
+    留下缺口而不是给一个"已解释"的数。
+    """
     skipped: list[str] = []
     best: dict | None = None
     calibers: list[str] = []
@@ -305,10 +372,19 @@ def _volume_price(dataset, prev_p, cur_p) -> tuple[dict | None, list]:
     for cal in calibers:
         v_c = dataset.get(metric, cur_p, caliber=cal)
         v_p = dataset.get(metric, prev_p, caliber=cal)
-        r_c = dataset.get("revenue", cur_p, caliber=cal)
-        r_p = dataset.get("revenue", prev_p, caliber=cal)
-        if any(x is None for x in (v_c, v_p, r_c, r_p)):
-            skipped.append(f"{cal}:销量/收入不全")
+        if any(x is None for x in (v_c, v_p)):
+            skipped.append(f"{cal}:销量不全")
+            continue
+        rev_metric, relation, relation_note = _same_scope_revenue(
+            dataset, metric, (prev_p, cur_p), _scope_of(v_c))
+        # 范围错配（含"公司收入÷白酒销量"）**拒绝出数**：留缺口，不给替代吨价。
+        if relation in ("mismatch", "different_scope"):
+            skipped.append(f"{cal}:范围错配拒绝出数——{relation_note}")
+            continue
+        r_c = dataset.get(rev_metric, cur_p, caliber=cal)
+        r_p = dataset.get(rev_metric, prev_p, caliber=cal)
+        if any(x is None for x in (r_c, r_p)):
+            skipped.append(f"{cal}:收入不全（{rev_metric}）")
             continue
         q_c, q_p = _d(v_c.value), _d(v_p.value)
         if q_c == 0 or q_p == 0:
@@ -324,22 +400,27 @@ def _volume_price(dataset, prev_p, cur_p) -> tuple[dict | None, list]:
         vol_exact = (q_c - q_p) * (p_c + p_p) / 2
         vol_q, price_q = _split(d_r, vol_exact)
         _product_caliber = metric != "sales_volume"
+        _same = relation == "same_scope"
         cand = {
             "caliber": cal,
             # 口径写进**标签**（diagnostics 在落库时会被丢掉，标签会随输出进正文/图表）：
-            # 用产品口径时必须让读者看见"销量＝白酒口径、收入＝公司口径"。
-            "label": (f"{cal}量价分解"
-                      + ("（销量＝白酒口径，收入＝公司口径）" if _product_caliber else "")),
+            # 同口径时写「分产品:白酒」；退回公司收入时如实写范围不同。
+            "label": (f"{cal}量价分解" + ("" if _same else
+                                          "（销量＝白酒口径，收入＝公司口径，范围不同）")),
             "volume_metric": metric,
+            "revenue_metric": rev_metric,
+            "revenue_relation": relation,
+            "dimension": _scope_of(v_c),
             "volume_cur": float(q_c), "volume_prev": float(q_p),
             "price_cur": float(p_c), "price_prev": float(p_p),
             "volume_effect": vol_q, "price_effect": price_q,
             "d_rev": _q(d_r), "unit": str(r_c.unit or ""),
             "volume_unit": str(v_c.unit or ""),
-            "price_formula": f"{r_c.value}/{v_c.value}（收入/销量，含结构混合）",
-            "caliber_note": ("销量取产品口径（白酒销售量，吨），收入为公司口径；"
-                             "两者范围不同，差额留在残差里，不摊到量/价两项"
-                             if _product_caliber else ""),
+            "price_formula": f"{r_c.value}/{v_c.value}（{'白酒收入' if _same else '公司收入'}/销量，"
+                             f"单位实现收入含产品结构，不是披露的挂牌价）",
+            "caliber_note": (relation_note if not _same else
+                             "销量与收入同取分产品:白酒；R/Q 是**单位实现收入（含产品结构）**，"
+                             "含结构混合，不得读成主动降价/提价，也不代表终端动销"),
             "gap": float((q_c - q_p) * (p_c + p_p) / 2 - Decimal(str(vol_q))
                          + ((p_c - p_p) * (q_c + q_p) / 2 - Decimal(str(price_q)))),
             "_rev": _d(r_c.value),
@@ -349,6 +430,91 @@ def _volume_price(dataset, prev_p, cur_p) -> tuple[dict | None, list]:
     if best is not None:
         best.pop("_rev", None)
     return best, skipped
+
+
+def _revenue_reconciliation(dataset, prev_p, cur_p, vp: dict | None) -> tuple[dict | None, list]:
+    """分产品收入勾稽（C2c）：白酒（量＋单位实现收入）＋红酒＋其他 ＝ 公司营业收入变化。
+
+    纪律（架构师 2026-10-11）：
+    - 只用**原表披露**的分产品行；不编第三个结构项（不引入分地区/分渠道/分行业切法）；
+    - 两层闭合各自独立：(1) 白酒收入变化 ＝ 数量贡献 ＋ 单位实现收入贡献（差 ≤0.01 元）；
+      (2) 白酒＋红酒＋其他 ＝ 公司营业收入变化（差 ≤0.01 元）；
+    - **范围错配**（公司收入被当白酒收入）不产生"已解释"结论：白酒行等于公司合计而
+      红酒/其他不为零 ⇒ 识别为错配，拒绝出勾稽输出并留下具体原因；
+    - 任何一行缺失 ⇒ 只报缺口，不拿别的年度/科目顶。
+    """
+    skipped: list[str] = []
+    company_c = dataset.get("revenue", cur_p)
+    company_p = dataset.get("revenue", prev_p)
+    if company_c is None or company_p is None:
+        return None, ["公司营业收入两期不全"]
+    items = (("白酒", "revenue_product_baijiu"), ("红酒", "revenue_product_hongjiu"),
+             ("其他", "revenue_product_other"))
+    parts: list[dict] = []
+    missing: list[str] = []
+    for label, metric in items:
+        c = dataset.get(metric, cur_p)
+        p = dataset.get(metric, prev_p)
+        if c is None or p is None:
+            missing.append(label)
+            continue
+        parts.append({"label": label, "metric": metric, "cur": _d(c.value), "prev": _d(p.value),
+                      "dimension": _scope_of(c), "fact_ids": [c.fact_id, p.fact_id]})
+    if missing:
+        return None, [f"分产品行缺失：{'、'.join(missing)}（不拿别的年度/科目顶，两层闭合无法完成）"]
+    baijiu = next(x for x in parts if x["label"] == "白酒")
+    others = [x for x in parts if x["label"] != "白酒"]
+    d_company = _d(company_c.value) - _d(company_p.value)
+    # —— 反例闸门：白酒行＝公司合计而红酒/其他不为零 ⇒ 白酒行其实是公司口径 ——
+    non_baijiu = sum((x["cur"] - x["prev"] for x in others), Decimal("0"))
+    if abs(baijiu["cur"] - baijiu["prev"] - d_company) <= Decimal("0.01") and non_baijiu != 0:
+        return None, [f"范围错配：分产品白酒收入变化 {_q(baijiu['cur'] - baijiu['prev'])} 元 "
+                      f"等于公司营业收入变化 {_q(d_company)} 元，而红酒/其他合计变化 "
+                      f"{_q(non_baijiu)} 元不为零 ⇒ 这一行是**公司口径**，不能当白酒收入用"]
+    if vp is None:
+        return None, ["白酒量价分解未取到（缺同口径销量/收入）：白酒行只能给收入变化，"
+                      "不给量价拆分"]
+    if str(vp.get("revenue_metric") or "") != "revenue_product_baijiu":
+        return None, [f"白酒收入未按同口径取到时不做勾稽（当前收入指标 {vp.get('revenue_metric')}，"
+                      f"关系 {vp.get('revenue_relation')}）"]
+    baijiu_delta = baijiu["cur"] - baijiu["prev"]
+    vol = _d(vp["volume_effect"])
+    price = _d(vp["price_effect"])
+    layer1_gap = baijiu_delta - (vol + price)
+    comps = [
+        {"component_id": "baijiu_volume_effect",
+         "label": "白酒数量贡献",
+         "value": float(vol), "unit": str(company_c.unit or ""),
+         "formula": "(Q₁−Q₀)×(U₁+U₀)/2（Q＝白酒销量、U＝单位实现收入）"},
+        {"component_id": "baijiu_unit_revenue_effect",
+         "label": "白酒单位实现收入贡献（含产品结构）",
+         "value": float(price), "unit": str(company_c.unit or ""),
+         "formula": "(U₁−U₀)×(Q₁+Q₀)/2"},
+    ]
+    for x in others:
+        comps.append({"component_id": f"revenue_product_{'hongjiu' if x['label'] == '红酒' else 'other'}",
+                      "label": f"{x['label']}收入变化",
+                      "value": _q(x["cur"] - x["prev"]), "unit": str(company_c.unit or ""),
+                      "formula": "本期−上期（原表披露行）"})
+    residual = d_company - sum((_d(c["value"]) for c in comps), Decimal("0"))
+    out = {
+        "company_delta": _q(d_company),
+        "baijiu_delta": _q(baijiu_delta),
+        "baijiu_revenue_prev": _q(baijiu["prev"]), "baijiu_revenue_cur": _q(baijiu["cur"]),
+        "items": [{"label": x["label"], "metric": x["metric"], "prev": _q(x["prev"]),
+                   "cur": _q(x["cur"]), "delta": _q(x["cur"] - x["prev"]),
+                   "dimension": x["dimension"], "fact_ids": list(x["fact_ids"])} for x in parts],
+        "layer1_gap": float(layer1_gap),
+        "layer2_residual": _q(residual),
+        "volume_cur": vp["volume_cur"], "volume_prev": vp["volume_prev"],
+        "unit_revenue_cur": vp["price_cur"], "unit_revenue_prev": vp["price_prev"],
+        "volume_unit": vp["volume_unit"], "unit": str(company_c.unit or ""),
+        "components": comps,
+        "item_fact_ids": [x["fact_ids"] for x in parts],
+        "dimensions": {x["label"]: x["dimension"] for x in parts},
+    }
+    return out, skipped
+
 
 
 def compute(dataset, params: dict | None = None) -> dict:
@@ -455,17 +621,33 @@ def compute(dataset, params: dict | None = None) -> dict:
             "metric": "volume_price_decomposition", "label": vp["label"],
             "value": vp["d_rev"], "unit": unit, "output_period": period_label,
             "residual": vp["gap"],
-            # 口径如实随输出走：销量取的是通用口径还是产品口径（白酒），不靠调用方猜
+            # 口径如实随输出走：销量取的是通用口径还是产品口径（白酒），收入取的是公司还是
+            # 分产品白酒（同口径/范围不同），不靠调用方猜
             "volume_metric": str(vp.get("volume_metric") or ""),
+            "revenue_metric": str(vp.get("revenue_metric") or ""),
+            "dimension": str(vp.get("dimension") or ""),
             "note": str(vp.get("caliber_note") or ""),
             "components": [
                 {"component_id": "volume_effect", "label": "销量效应",
                  "value": vp["volume_effect"], "unit": unit,
-                 "formula": "ΔQ×(p1+p0)/2（均价=收入/销量）"},
-                {"component_id": "price_effect", "label": "单位价格效应",
+                 "formula": "ΔQ×(U1+U0)/2（U＝收入/销量）"},
+                {"component_id": "price_effect", "label": "单位实现收入效应（含产品结构）",
                  "value": vp["price_effect"], "unit": unit,
-                 "formula": "Δp×(Q1+Q0)/2；含产品结构混合，不得称“提价效果”"},
+                 "formula": "ΔU×(Q1+Q0)/2（U＝收入/销量）；含产品结构混合，"
+                            "不得称“提价效果”，也不代表终端动销"},
             ]})
+
+    # 分产品收入勾稽（C2c 新增）：白酒（数量＋单位实现收入）＋红酒＋其他 ＝ 公司营业收入变化。
+    # 与上面的量价分解是**两层**：第一层在白酒行内部拆量价，第二层用分产品行勾回公司合计。
+    rec, rec_skipped = _revenue_reconciliation(dataset, prev_p, cur_p, vp)
+    if rec is not None:
+        outputs.append({
+            "metric": "revenue_product_reconciliation", "label": "分产品收入勾稽（白酒量＋价＋红酒＋其他＝公司）",
+            "value": rec["company_delta"], "unit": unit, "output_period": period_label,
+            "residual": rec["layer2_residual"],
+            "dimension": "公司合计",
+            "components": rec["components"],
+        })
 
     # 替代解释（U1）：数值贡献是会计分解，**业务原因需要证据**。这里把两条**确定性**的
     # 反证/口径提醒一并给出，供报告层与读者判断"这个贡献是不是经营改善"：
@@ -553,12 +735,49 @@ def compute(dataset, params: dict | None = None) -> dict:
             "volume_price_skipped": vp_skipped,
             "volume_price_caliber": (vp or {}).get("caliber", ""),
             "volume_price_metric": (vp or {}).get("volume_metric", ""),
+            "volume_price_revenue_metric": (vp or {}).get("revenue_metric", ""),
+            "volume_price_revenue_relation": (vp or {}).get("revenue_relation", ""),
+            "volume_price_dimension": (vp or {}).get("dimension", ""),
             "volume_price_note": (vp or {}).get("caliber_note", ""),
+            # 同表相邻行（生产量/期末库存量）：只作**补充观察**，不进量价分解（进分解会让
+            # 分子分母范围不一致）。报告据此区分"公司库存下降"与"渠道库存未知"。
+            "volume_price_extra": _volume_price_extra(dataset, prev_p, cur_p, vp),
+            "volume_price_inputs": ({} if vp is None else {
+                "volume_prev": vp["volume_prev"], "volume_cur": vp["volume_cur"],
+                "unit_revenue_prev": vp["price_prev"], "unit_revenue_cur": vp["price_cur"],
+                "volume_unit": vp["volume_unit"], "unit": vp["unit"],
+                "volume_effect_yuan": vp["volume_effect"],
+                "unit_revenue_effect_yuan": vp["price_effect"],
+                "revenue_delta_yuan": vp["d_rev"], "closure_gap_yuan": vp["gap"],
+                # 同口径收入的**水平值**（报告要上期/本期两列，装配层不重算）
+                "revenue_prev_yuan": (None if rec is None else rec["baijiu_revenue_prev"]),
+                "revenue_cur_yuan": (None if rec is None else rec["baijiu_revenue_cur"]),
+            }),
+            # C2c 分产品勾稽：两层闭合各自的差值、范围错配的判定依据、逐项原观察 fact_id
+            "revenue_reconciliation": ({} if rec is None else {
+                "company_delta_yuan": rec["company_delta"],
+                "baijiu_delta_yuan": rec["baijiu_delta"],
+                "baijiu_revenue_prev_yuan": rec["baijiu_revenue_prev"],
+                "baijiu_revenue_cur_yuan": rec["baijiu_revenue_cur"],
+                "items": rec["items"],
+                "layer1_volume_price_gap_yuan": rec["layer1_gap"],
+                "layer2_residual_yuan": rec["layer2_residual"],
+                "volume_prev": rec["volume_prev"], "volume_cur": rec["volume_cur"],
+                "unit_revenue_prev": rec["unit_revenue_prev"],
+                "unit_revenue_cur": rec["unit_revenue_cur"],
+                "volume_unit": rec["volume_unit"], "unit": rec["unit"],
+                "dimensions": rec["dimensions"],
+                "item_fact_ids": rec["item_fact_ids"],
+            }),
+            "revenue_reconciliation_skipped": rec_skipped,
             "alternative_explanations": alt,
             "caveats": (
                 "未解释差额 = 未取得的披露项目；不得当作零或摊到已列项目",
                 "分段是同一口径的不同切法，不可相加；未分类差额单独列出",
-                "均价含产品结构混合，量价分解不等于“提价/降价”",
+                "单位实现收入含产品结构混合，量价分解不等于“提价/降价”，"
+                "也不等于终端动销（出货口径）",
+                "分产品行与原表逐字核对；白酒收入与白酒销量同取“分产品:白酒”范围，"
+                "缺任一行只报缺口、不拿别的年度/科目顶",
             ),
         },
         "outputs": outputs,

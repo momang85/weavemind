@@ -1,0 +1,327 @@
+{
+  "scope": "C5-2 市场对照三窗口（只读；参考值取自 C4 受理证据 c5_market_window_check.json）",
+  "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+  "calendar_id": "49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435",
+  "evaluation_as_of": "2026-10-09",
+  "total": 63,
+  "passed": 63,
+  "failed": 0,
+  "results": [
+    {
+      "check": "2ce860dddd94e5a6: status=observed",
+      "ok": true,
+      "detail": "observed "
+    },
+    {
+      "check": "2ce860dddd94e5a6: 事件日=登记披露日",
+      "ok": true,
+      "detail": "2025-08-19 vs 2025-08-19"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 锚点收盘=70.88",
+      "ok": true,
+      "detail": "70.88"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 三窗口=1/5/20交易日",
+      "ok": true,
+      "detail": "[0, 4, 19]"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset0 股票=-0.002681",
+      "ok": true,
+      "detail": "-0.002681"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset0 基准=0.011371",
+      "ok": true,
+      "detail": "0.011371"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset0 几何相对=-0.013894",
+      "ok": true,
+      "detail": "-0.013894"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset0 相对=几何超额",
+      "ok": true,
+      "detail": "-0.0138940111986600367224292569"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset4 股票=0.011428",
+      "ok": true,
+      "detail": "0.011428"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset4 基准=0.054273",
+      "ok": true,
+      "detail": "0.054273"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset4 几何相对=-0.040639",
+      "ok": true,
+      "detail": "-0.040639"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset4 相对=几何超额",
+      "ok": true,
+      "detail": "-0.0406393789843807059461828198"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset19 股票=-0.024125",
+      "ok": true,
+      "detail": "-0.024125"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset19 基准=0.071024",
+      "ok": true,
+      "detail": "0.071024"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset19 几何相对=-0.088839",
+      "ok": true,
+      "detail": "-0.088839"
+    },
+    {
+      "check": "2ce860dddd94e5a6: offset19 相对=几何超额",
+      "ok": true,
+      "detail": "-0.0888392790451007633815862203"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 相对显示两位",
+      "ok": true,
+      "detail": "-4.06%"
+    },
+    {
+      "check": "2ce860dddd94e5a6: delivery_eligible=False",
+      "ok": true,
+      "detail": "False"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 带对外拦截原因",
+      "ok": true,
+      "detail": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 在包内标记 internal_only",
+      "ok": true,
+      "detail": "True"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 冻结了行情/日历 id",
+      "ok": true,
+      "detail": "{\"price_dataset_id\": \"3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148\", \"calendar_id\": \"49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435\", \"input_kind\": {\"input_kind\":"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 冻结了算子与公式",
+      "ok": true,
+      "detail": "{\"benchmark\": \"000300\", \"offsets\": [0, 4, 19], \"operator\": \"event_returns_v1\", \"impl_version\": \"event_returns/1.0.0\", \"anchor_rule\": \"锚点＝披露日（或其前最后一个交易日）收盘价，只用披露日前的信息\", \"formula\": \"相对收益＝(1+股票收益)/(1+基准收"
+    },
+    {
+      "check": "2ce860dddd94e5a6: 重放逐字节同一块",
+      "ok": true,
+      "detail": "重放不一致"
+    },
+    {
+      "check": "ee4429eecac66f50: status=observed",
+      "ok": true,
+      "detail": "observed "
+    },
+    {
+      "check": "ee4429eecac66f50: 事件日=登记披露日",
+      "ok": true,
+      "detail": "2026-04-28 vs 2026-04-28"
+    },
+    {
+      "check": "ee4429eecac66f50: 锚点收盘=47.68",
+      "ok": true,
+      "detail": "47.68"
+    },
+    {
+      "check": "ee4429eecac66f50: 三窗口=1/5/20交易日",
+      "ok": true,
+      "detail": "[0, 4, 19]"
+    },
+    {
+      "check": "ee4429eecac66f50: offset0 股票=0.005663",
+      "ok": true,
+      "detail": "0.005663"
+    },
+    {
+      "check": "ee4429eecac66f50: offset0 基准=0.010958",
+      "ok": true,
+      "detail": "0.010958"
+    },
+    {
+      "check": "ee4429eecac66f50: offset0 几何相对=-0.005238",
+      "ok": true,
+      "detail": "-0.005238"
+    },
+    {
+      "check": "ee4429eecac66f50: offset0 相对=几何超额",
+      "ok": true,
+      "detail": "-0.0052376063100544236259073077"
+    },
+    {
+      "check": "ee4429eecac66f50: offset4 股票=-0.024119",
+      "ok": true,
+      "detail": "-0.024119"
+    },
+    {
+      "check": "ee4429eecac66f50: offset4 基准=0.023896",
+      "ok": true,
+      "detail": "0.023896"
+    },
+    {
+      "check": "ee4429eecac66f50: offset4 几何相对=-0.046894",
+      "ok": true,
+      "detail": "-0.046894"
+    },
+    {
+      "check": "ee4429eecac66f50: offset4 相对=几何超额",
+      "ok": true,
+      "detail": "-0.0468944111511325368982787314"
+    },
+    {
+      "check": "ee4429eecac66f50: offset19 股票=-0.083054",
+      "ok": true,
+      "detail": "-0.083054"
+    },
+    {
+      "check": "ee4429eecac66f50: offset19 基准=0.028144",
+      "ok": true,
+      "detail": "0.028144"
+    },
+    {
+      "check": "ee4429eecac66f50: offset19 几何相对=-0.108154",
+      "ok": true,
+      "detail": "-0.108154"
+    },
+    {
+      "check": "ee4429eecac66f50: offset19 相对=几何超额",
+      "ok": true,
+      "detail": "-0.1081541107082276412642587031"
+    },
+    {
+      "check": "ee4429eecac66f50: 相对显示两位",
+      "ok": true,
+      "detail": "-4.69%"
+    },
+    {
+      "check": "ee4429eecac66f50: delivery_eligible=False",
+      "ok": true,
+      "detail": "False"
+    },
+    {
+      "check": "ee4429eecac66f50: 带对外拦截原因",
+      "ok": true,
+      "detail": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+    },
+    {
+      "check": "ee4429eecac66f50: 在包内标记 internal_only",
+      "ok": true,
+      "detail": "True"
+    },
+    {
+      "check": "ee4429eecac66f50: 冻结了行情/日历 id",
+      "ok": true,
+      "detail": "{\"price_dataset_id\": \"3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148\", \"calendar_id\": \"49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435\", \"input_kind\": {\"input_kind\":"
+    },
+    {
+      "check": "ee4429eecac66f50: 冻结了算子与公式",
+      "ok": true,
+      "detail": "{\"benchmark\": \"000300\", \"offsets\": [0, 4, 19], \"operator\": \"event_returns_v1\", \"impl_version\": \"event_returns/1.0.0\", \"anchor_rule\": \"锚点＝披露日（或其前最后一个交易日）收盘价，只用披露日前的信息\", \"formula\": \"相对收益＝(1+股票收益)/(1+基准收"
+    },
+    {
+      "check": "ee4429eecac66f50: 重放逐字节同一块",
+      "ok": true,
+      "detail": "重放不一致"
+    },
+    {
+      "check": "缺行情集→pending＋原因",
+      "ok": true,
+      "detail": "pending 没有选行情数据集（price_dataset_id 需 64 位十六进制，从已登记清单里选）"
+    },
+    {
+      "check": "缺日历→pending＋原因",
+      "ok": true,
+      "detail": "pending 没有选交易日历（calendar_id 需 64 位十六进制，从已登记清单里选）"
+    },
+    {
+      "check": "缺评价时点→pending＋原因",
+      "ok": true,
+      "detail": "pending 没有选评价时点（evaluation_as_of 需 YYYY-MM-DD；三窗口是否已走完按它判）"
+    },
+    {
+      "check": "缺事件→pending＋原因",
+      "ok": true,
+      "detail": "pending 没有选披露事件（material_id）：市场对照要用户显式选一个披露，不默认用新材料"
+    },
+    {
+      "check": "未登记行情集→refused（不拿别的顶替）",
+      "ok": true,
+      "detail": "refused 行情数据集 ffffffffffff… 加载失败（没有可用数据集）：不拿别的数据集顶替（载回的 id 与所选必须一致）"
+    },
+    {
+      "check": "未登记日历→refused（不拿别的顶替）",
+      "ok": true,
+      "detail": "refused 交易日历 ffffffffffff… 加载失败（没有可用日历）：不拿别的日历顶替（载回的 id 与所选必须一致）"
+    },
+    {
+      "check": "跨公司材料→refused",
+      "ok": true,
+      "detail": "refused 材料主体 600031 与所选主体 002304.SZ 不是同一公司：市场对照只对同一主体，不跨公司取数"
+    },
+    {
+      "check": "评价时点不足→非 observed",
+      "ok": true,
+      "detail": "partial"
+    },
+    {
+      "check": "评价时点不足→缺数不报 0",
+      "ok": true,
+      "detail": "[{\"offset\": 4, \"window\": \"第5个交易日\", \"date\": \"2025-08-26\", \"close\": null, \"stock_return\": null, \"benchmark_return\": null, \"excess_return\": null, \"stock_return_pct\": \"\", \"benchmark_return_pct\": \"\", \"rela"
+    },
+    {
+      "check": "三一另一事件同一路径可用",
+      "ok": true,
+      "detail": "observed "
+    },
+    {
+      "check": "三一窗内相对=几何超额",
+      "ok": true,
+      "detail": "-0.0456415507454247191833801642"
+    },
+    {
+      "check": "清单含内部行情集",
+      "ok": true,
+      "detail": "[\"46d37bbb61f9\", \"3d6b4acb451a\", \"9378fd5c4c63\"]"
+    },
+    {
+      "check": "清单含交易日历",
+      "ok": true,
+      "detail": "[\"49413c7d1c48\"]"
+    },
+    {
+      "check": "基准推导唯一解=000300",
+      "ok": true,
+      "detail": "000300"
+    },
+    {
+      "check": "基准不唯一→空（要人显式给）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "check": "三窗口＝算子版本里的 offsets",
+      "ok": true,
+      "detail": "event_returns/1.0.0"
+    },
+    {
+      "check": "读数哈希来自算子",
+      "ok": true,
+      "detail": "reading_hash 形态不对"
+    }
+  ],
+  "failures": []
+}

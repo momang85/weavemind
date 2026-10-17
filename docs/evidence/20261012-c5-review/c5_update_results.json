@@ -1,0 +1,207 @@
+{
+ "scope": "C5-3/C5-2 端到端只读探针：沿冻结原判更新＋三市场窗＋保存重开",
+ "study": "0af20919e6245b88",
+ "baseline_experiment_id": "245bcd5e56ef7c5eafaf11e2",
+ "new_experiment_id": "80693f9870e8337f394fcf49",
+ "new_content_sha256": "80693f9870e8337f394fcf498d83ec518dfcdc1553dde516126361bb75f15859",
+ "checks": [
+  {
+   "check": "A1 baseline_kind=frozen_experiment",
+   "ok": true,
+   "detail": "got 'frozen_experiment'"
+  },
+  {
+   "check": "A2 记下原版内容身份（与冻结 JSON 同值）",
+   "ok": true,
+   "detail": "245bcd5e56ef7c5e vs 245bcd5e56ef7c5e"
+  },
+  {
+   "check": "A3 记下原版判据哈希",
+   "ok": true,
+   "detail": "c2aa6f49211015df"
+  },
+  {
+   "check": "A4 更新页标沿冻结原判（historical_rebuild=False）",
+   "ok": true,
+   "detail": "historical_rebuild=False bid=245bcd5e56ef7c5eafaf11e2"
+  },
+  {
+   "check": "A5 较早一侧读数**照抄冻结实验**（不现场重建）",
+   "ok": true,
+   "detail": "readings.earlier 逐键相同"
+  },
+  {
+   "check": "A6 较早一侧来源标注 experiments 冻结读数",
+   "ok": true,
+   "detail": "earlier_side_source"
+  },
+  {
+   "check": "A7 旧材料沿用基线登记（不另选）",
+   "ok": true,
+   "detail": "old_material_id=f42e747c73850b59"
+  },
+  {
+   "check": "A8 旧截止核过：新材料时点晚于旧截止",
+   "ok": true,
+   "detail": "2025-04-30 → 2026-04-28"
+  },
+  {
+   "check": "B1 每张卡的判据哈希与冻结基线相同（原判据同版）",
+   "ok": true,
+   "detail": "5/5 相同"
+  },
+  {
+   "check": "B2 卡片数不减（冻结卡原样带过来）",
+   "ok": true,
+   "detail": "5 → 5"
+  },
+  {
+   "check": "B3 状态按新窗口重判（本期读数只改方向）",
+   "ok": true,
+   "detail": "{\"profit_mechanism_and_buffer\": \"加强\", \"volume_contraction\": \"加强\", \"finished_goods_inventory_build\": \"削弱\", \"cash_from_working_capital\": \"加强\", \"cash_buffer_structure\": \"削弱\"}"
+  },
+  {
+   "check": "B4 判据里不再有未执行的「ΔOCF 由正转负」文案",
+   "ok": true,
+   "detail": "C5-3 删除项"
+  },
+  {
+   "check": "B5 库存：单窗口削弱与两窗口持续确认**分开**（不把一次下降写成消化）",
+   "ok": true,
+   "detail": "satisfied=单窗口削弱已满足；两窗口确认未满足（需要再一个同口径窗口）｜single=同口径库存量同比转负（**单窗口**削弱：只说明这一期没有继续累积）"
+  },
+  {
+   "check": "B6 单窗口转负的措辞＝本窗口不再累积＋待持续确认（不再写『消化出现』）",
+   "ok": true,
+   "detail": "本期半年库存量同比转负（-0.34%）——**本窗口不再累积**（单窗口削弱）；是否写成库存消化要看**持续确认**：下一同口径窗口仍为负／不再累积才算（上期全年 +0.16%，**不作半年与全年差值**；企业口径，不代表渠道库存）"
+  },
+  {
+   "check": "C1 市场对照 status=observed",
+   "ok": true,
+   "detail": "status=observed reason="
+  },
+  {
+   "check": "C2 事件＝所选登记材料（同主体披露日）",
+   "ok": true,
+   "detail": "{\"code\": \"002304\", \"date\": \"2026-04-28\", \"date_precision\": \"day\", \"date_basis\": \"source_url_format\", \"title\": \"2025年年度报告\", \"category\": \"定期报告\", \"matched\": \"年度报告\""
+  },
+  {
+   "check": "C3 锚点＝披露日（或前一交易日）收盘＝参考 47.68",
+   "ok": true,
+   "detail": "anchor={'offset': -1, 'window': '锚点（价格起点）', 'date': '2026-04-28', 'close': 47.68, 'stock_return': None, 'benchmark_return': None, 'excess_return': None, 'stock_return_pct': '', 'benchmark_return_pct': '', 'relative_return_pct': '', 'state': 'anchor', 'note': '锚点（价格起点）：无收益读数，仅用于定位'}"
+  },
+  {
+   "check": "C4 三窗口逐值＝C4 受理参考（1/5/20 交易日＝offsets 0/4/19）",
+   "ok": true,
+   "detail": "三窗口 × 股票/基准/相对 原值全部相同"
+  },
+  {
+   "check": "C4b 同值按 2 位百分数呈现（页面口径）",
+   "ok": true,
+   "detail": "{\"0\": \"+0.57%\", \"4\": \"-2.41%\", \"19\": \"-8.31%\"}"
+  },
+  {
+   "check": "C5 几何相对自查 (1+s)/(1+b)−1（算子在 6 位小数上呈现，自核 1e-6 内）",
+   "ok": true,
+   "detail": "逐窗口（1e-6 内：差 ≤4.2e-7 全来自 6 位小数呈现）"
+  },
+  {
+   "check": "C6 窗口状态 observed（评价时点够）",
+   "ok": true,
+   "detail": "observed"
+  },
+  {
+   "check": "C7 绑定记下所选数据集/日历 id 与算子版本",
+   "ok": true,
+   "detail": "{\"benchmark\": \"000300\", \"offsets\": [0, 4, 19], \"operator\": \"event_returns_v1\", \"impl_version\": \"event_returns/1.0.0\", \"anchor_rule\": \"锚点＝披露日（或其前最后一个交易日）收盘价，只用披露日前的信息\", \"formula\": \"相对收益＝(1+股票收益)/(1+基准收"
+  },
+  {
+   "check": "D1 并列经营支持/削弱（与机制卡同源）",
+   "ok": true,
+   "detail": "[{\"judgment_id\": \"profit_mechanism_and_buffer\", \"title\": \"利润下降中的**税费缓冲**仍然存在（税费对利润变化的贡献为正）\", \"status\": \"加强\", \"pending\": false}, {\"judgment_id\": \"volume_contraction\", \"title\": \"销量压力延续（数量收缩没有转正）\", \"status\": \"加强\", \"pending\": false}, {\"judgment"
+  },
+  {
+   "check": "D2 下一观察随行（用户闭环要的一页）",
+   "ok": true,
+   "detail": "取「经营性应付项目的增加（减少以“－”号填列）」的下一层分项（现金流量表补充资料细项＋相关附注）与结算时点，再判读它的作用"
+  },
+  {
+   "check": "D3 一页摘要含三窗口与并列判断",
+   "ok": true,
+   "detail": "# 研究行动摘要（洋河股份 002304.SZ） /  / - 研究 `0af20919e6245b888974ee17321f327f99580ab745687e80aca6dae6921e7f4f`｜结果 `0f21c7a36f0e28fd…`｜run `370dba92a40e36a3…`（report_continuation）｜旧截止 2025-04-30 / - **本期额（披露 OCF）｜回撤项"
+  },
+  {
+   "check": "E1 同输入两次装配 → 同一 experiment_id",
+   "ok": true,
+   "detail": "80693f9870e8337f394fcf49"
+  },
+  {
+   "check": "E2 内容哈希逐字节同一（无时钟时间）",
+   "ok": true,
+   "detail": "80693f9870e8337f394f"
+  },
+  {
+   "check": "E3 机器验收/研究状态/人工复核三态原样",
+   "ok": true,
+   "detail": "{\"state\": \"research_draft\", \"human_review\": \"unreviewed\", \"human_review_label\": \"未复核\", \"external_delivery_allowed\": false, \"experiment_state\": \"not_applicable\", \"experiment_state_note\": \"本实验不产出研究结论（无评"
+  },
+  {
+   "check": "H1 免费源读数：delivery_eligible=False",
+   "ok": true,
+   "detail": "delivery_eligible=False"
+  },
+  {
+   "check": "H2 internal_only 与阻断原因随行",
+   "ok": true,
+   "detail": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+  },
+  {
+   "check": "H3 实验对外交付位未被本段改成 True",
+   "ok": true,
+   "detail": "False"
+  },
+  {
+   "check": "G1 无原版 → baseline_kind=historical_rebuild",
+   "ok": true,
+   "detail": "historical_rebuild"
+  },
+  {
+   "check": "G2 无原版 → 更新页仍明示历史重建（不称原假说）",
+   "ok": true,
+   "detail": "page.version.historical_rebuild=True ＋ 摘要标注"
+  },
+  {
+   "check": "G3 两条路都不写回原研究（identity.note 仍声明另存）",
+   "ok": true,
+   "detail": "新实验的**独立内容身份**：与原 study/result_hash 无回写关系；原研究与已交付包只读，本实验另存 `experiments/`。"
+  },
+  {
+   "check": "F1 保存得到 24 位实验 id 且未覆盖基线",
+   "ok": true,
+   "detail": "80693f9870e8337f394fcf49"
+  },
+  {
+   "check": "F2 重开身份自校验 True",
+   "ok": true,
+   "detail": "True"
+  },
+  {
+   "check": "F3 重开保留事件/行情/条件",
+   "ok": true,
+   "detail": "event/windows/readings.earlier 均在"
+  },
+  {
+   "check": "F4 保存幂等（同内容不重写；基线 JSON 字节哈希本轮前后一致）",
+   "ok": true,
+   "detail": "8176dca48ade57ed…"
+  },
+  {
+   "check": "F5 冻结基线本轮未被改写（读回身份自校验 True、字节哈希不变）",
+   "ok": true,
+   "detail": "245bcd5e56ef7c5eafaf11e2"
+  }
+ ],
+ "total": 39,
+ "passed": 39,
+ "fails": []
+}

@@ -47,6 +47,7 @@ _MODEL_CN = {
     "operating_drivers": "经营驱动",
     "cash_reconciliation": "现金调节桥",
     "scenario_sensitivity": "条件情景",
+    "cash_pressure": "现金压力",
     "profit_bridge": "利润桥",
     "profit_to_cash": "利润到现金",
     "cash_quality": "现金质量",
@@ -919,6 +920,164 @@ def summary_lines(runs, limit: int = 3) -> list[str]:
     return out
 
 
+def resilience_lines(runs, *, dataset=None, reference_runs=()) -> list[str]:
+    """**经营韧性卡**（10-08 §14）：利润目标与条件门槛／天数冲击占用／优先核查的两项假设。
+
+    读者产物，不是新模型：两段读数分别来自
+
+    - `scenario_sensitivity` 的**单因素反推**（同一目标、同一模式、同一组假设）：
+      目标已高于基准 → 给**可承受空间**（收入可下降多少／毛利率可降多少 pp），
+      目标未达到 → 给**恢复门槛**；两条杠杆是并列路径，不是必须同时满足；
+    - `cash_pressure` 的**天数冲击**：两项占用＋合计＋每 1 天资金量，
+      天数为 0 时合计 0（基准复现）。
+
+    缺哪一段就如实写缺；一个都没有就返回 `[]`（正文一字不变）。卡里**不编数**：
+    所有数字都是运行输出值。`runs` 是**选定**运行（卡里的读数只从它们来）；
+    `reference_runs` 只用于「优先核查假设」里的**基准天数依据**——那是另一条已验证
+    运行（营运资金）的期末口径周转天数，取不到就写"未取得"，绝不现算一个没有运行
+    背书的比率。
+    """
+    runs = [r for r in (runs or ())
+            if str(_attr(r, "status")) == str(RunStatus.VALIDATED)]
+    sc = _pick(runs, "scenario_sensitivity")
+    cp = _pick(runs, "cash_pressure")
+    if sc is None and cp is None:
+        return []
+    out = ["## 经营韧性卡（利润门槛与天数冲击）", ""]
+    # ── 一、利润目标与条件门槛（或可承受空间）──────────────────────────────
+    if sc is not None:
+        diag = _diag(sc)
+        th = dict(diag.get("thresholds") or {})
+        base = dict(diag.get("base") or {})
+        unit = _unit_of(sc)
+        target = th.get("target_net_profit")
+        tgt_src = str(th.get("target_source") or "")
+        base_np = base.get("net_profit")
+        out.append(f"- **利润目标与条件门槛**：目标归母净利 {_yi_plain(target, unit)} 亿元"
+                   + (f"（{tgt_src}）" if tgt_src else "")
+                   + (f"；基准归母净利 {_yi_plain(base_np, unit)} 亿元"
+                      f"（{_fmt_period(diag)}）" if base_np is not None else ""))
+        rev_th = _num_of(_attr(_out(sc, "revenue_growth_to_hold_target"), "value"))
+        mar_th = _num_of(_attr(_out(sc, "margin_threshold_to_hold_base_profit"), "value"))
+        mar_gap = _num_of(_attr(_out(sc, "margin_gap_to_threshold_pp"), "value"))
+        mar_base = _num_of(th.get("margin_base_pct"))
+        above = (base_np is not None and target is not None
+                 and float(base_np) >= float(target))
+        if above:
+            bits = []
+            if rev_th is not None:
+                bits.append(f"收入可下降 **{abs(rev_th):.4f}%**")
+            if mar_th is not None and mar_base is not None:
+                bits.append(f"毛利率可降到 **{mar_th:.4f}%**"
+                            + (f"（较基期 **{mar_gap:+.2f}pp**）"
+                               if mar_gap is not None else ""))
+            out.append("  - **已在目标之上：可承受空间**——"
+                       + "、".join(bits) if bits else
+                       "  - **已在目标之上**：本期归母净利已高于目标（单因素阈值未取得，"
+                       "不编数）")
+            out.append("    这是**单因素**各自的空间（收入侧固定毛利率、毛利率侧固定收入），"
+                       "两条是并列路径，不是必须同时成立。")
+        else:
+            bits = []
+            if rev_th is not None:
+                bits.append(f"收入侧需 **{rev_th:+.4f}%**（毛利率固定基期）")
+            if mar_th is not None:
+                # 差额与阈值写进**同一个子句**：拆成两个子句时"较基期 +11.58pp"会被
+                # 主体抽取当成主语（已知的散文前缀误判），使这个百分点数判不成可溯源。
+                bits.append(f"毛利率侧需 **{mar_th:.4f}%**"
+                            + (f"（较基期 **{mar_gap:+.2f}pp**）"
+                               if mar_gap is not None else ""))
+            out.append("  - **恢复/维持目标的门槛**：" + ("、".join(bits) if bits else
+                       "未取得可达阈值（超出允许范围＝不可达）"))
+            out.append("    单因素反推给出「需要什么」，**不表示可达**；两条杠杆共用同一目标"
+                       "与同一假设模式。")
+        _mode = str(((diag.get("below_gross") or {}).get("mode")) or "") \
+            or str((_attr(sc, "params") or {}).get("below_gross_mode") or "fixed")
+        out.append(f"  - 假设模式：`{_mode}`（毛利线以下规则与情景运行同一套；"
+                   "缺必要数据不伪造精细预测）")
+    else:
+        out.append("- **利润目标与条件门槛**：本次未运行条件情景（缺基期收入/毛利/归母净利），"
+                   "不给门槛读数。")
+    out.append("")
+    # ── 二、天数冲击占用 ────────────────────────────────────────────────
+    if cp is not None:
+        diag = _diag(cp)
+        unit = _unit_of(cp)
+        days = dict(diag.get("days") or {})
+        comps = {str(_attr(c, "component_id")): _attr(c, "value")
+                 for c in (_attr(_out(cp, "incremental_capital_occupation"),
+                                 "components") or ())}
+        total = _attr(_out(cp, "incremental_capital_occupation"), "value")
+        per_day_rev = _attr(_out(cp, "collection_days_capital_per_day"), "value")
+        per_day_cost = _attr(_out(cp, "inventory_days_capital_per_day"), "value")
+        out.append(f"- **天数冲击占用**（**同一收入/毛利情景**，与上一条门槛同一组假设；"
+                   f"Δ回款 {float(days.get('collection_days_delta') or 0):+.2f} 天、Δ库存 "
+                   f"{float(days.get('inventory_days_delta') or 0):+.2f} 天；全年 "
+                   f"{days.get('days_in_year')} 天为计算约定）：")
+        out.append(f"  - 回款天数变化带来的额外占用 **{_yi(comps.get('collection_days'), unit)} 亿元**"
+                   f"（每 1 天 {_yi(per_day_rev, unit)} 亿元）；"
+                   f"库存天数变化带来的额外占用 **{_yi(comps.get('inventory_days'), unit)} 亿元**"
+                   f"（每 1 天 {_yi(per_day_cost, unit)} 亿元）")
+        out.append(f"  - **合计 {_yi(total, unit)} 亿元额外占用**（两项相加＝合计；"
+                   "天数为 0 时合计为 0）")
+        out.append("  - 边界：营业收入代**赊销额**、营业成本代**现金采购支出**；天数是"
+                   "**使用者设定**的假设，不是披露账期；不含收入增长自身新增的基础占款，"
+                   "**不与利润相加**冒充 CFO 预测或融资缺口；半年数据不乘二凑全年。")
+    else:
+        out.append("- **天数冲击占用**：本次未运行现金压力算子（缺基期收入/毛利），"
+                   "不给占用增量。")
+    out.append("")
+    # ── 三、优先核查的两项假设（及其依据）────────────────────────────────
+    _assumptions: list[str] = []
+    if cp is not None:
+        days = dict(_diag(cp).get("days") or {})
+        _assumptions = _pressure_assumptions(days, runs=list(runs) + list(reference_runs))
+    if _assumptions:
+        out.append("- **优先核查的两项假设**（天数不是事实，依据见下）：")
+        for i, txt in enumerate(_assumptions[:2], 1):
+            out.append(f"  {i}. {txt}")
+    out.append("")
+    out.append(f"- 数据来源：{'／'.join(_MODEL_CN.get(str(_attr(r, 'model_id')), str(_attr(r, 'model_id'))) for r in (sc, cp) if r is not None)}"
+               "（选定运行；完整卡与运行标识见底稿 `analysis/analysis_cards.md`，"
+               "同版附件 `analysis/resilience_card.md`）。")
+    return out
+
+
+def _fmt_period(diag: dict) -> str:
+    periods = [str(p) for p in (diag.get("periods") or [])]
+    return periods[-1] if periods else "本期"
+
+
+def _pressure_assumptions(days: dict, *, runs=()) -> list[str]:
+    """两项优先核查的假设及其**依据**。
+
+    基准天数**只从已验证运行取**（`working_capital` 的期末口径应收/存货周转天数）——
+    卡片现算一个数据集比率会变成一个"没有运行背书"的数字，验收溯源也不认它。
+    取不到就如实写"未取得基准天数"，不编。
+    """
+    dc = float(days.get("collection_days_delta") or 0)
+    di = float(days.get("inventory_days_delta") or 0)
+    n_days = int(days.get("days_in_year") or 365)
+    wc = _pick(list(runs or ()), "working_capital")
+    ar_days = _num_of(_attr(_out(wc, "receivable_days"), "value")) if wc is not None else None
+    inv_days = _num_of(_attr(_out(wc, "inventory_days"), "value")) if wc is not None else None
+    _basis = ("（期末口径周转天数，来自已验证的营运资金运行；**不是平均余额**）"
+              if wc is not None else
+              "（未运行营运资金算子：**未取得基准天数**，本项只作条件占用增量）")
+    return [
+        f"**回款代理天数 Δ{dc:+.0f} 天**（回款额外占用按 R1/{n_days}×Δ天数）："
+        + (f"基准 ≈ **{ar_days:,.2f} 天**" if ar_days is not None else "基准天数未取得")
+        + _basis.replace("周转天数", "应收周转天数")
+        + "要核的是：实际账期与结算方式（票据、预收、渠道返利）是否支持这个天数变化——"
+          "披露里没有就给不出来。",
+        f"**库存代理天数 Δ{di:+.0f} 天**（库存额外占用按 C1/{n_days}×Δ天数）："
+        + (f"基准 ≈ **{inv_days:,.2f} 天**" if inv_days is not None else "基准天数未取得")
+        + _basis.replace("周转天数", "存货周转天数")
+        + "要核的是：按成本口径的存货构成与备货节奏是否支持这个天数变化；"
+          "负向天数只能标「条件释放」，不能宣称实际可缩短到该水平。",
+    ]
+
+
 def _engineering_index(runs, charts) -> list[str]:
     """底稿索引：run / dataset / output / component_id / 事实身份 / 图文件名（正文之外）。"""
     runs = [r for r in (runs or ())]
@@ -946,7 +1105,8 @@ def _engineering_index(runs, charts) -> list[str]:
 
 def research_brief(runs, *, provenance=None, charts=None, label_of=None,
                    records=None, doc=None, volume_price=None,
-                   direct_cash=None, wc_flow=None, detail_hint: str = "") -> dict:
+                   direct_cash=None, wc_flow=None, dataset=None,
+                   detail_hint: str = "") -> dict:
     """已验证运行 → `{front, note, detail}`（X0：**输入收集齐后只渲染一次**）。
 
     - `front`：三项主判断（前两页读得到：判断句＋关键读数＋依据位置＋会削弱它的读数）；
@@ -1010,10 +1170,12 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
     try:
         from . import judgments as _jd
         js = _jd.research_judgments(runs, volume_price=volume_price, records=records,
-                                    direct_cash=direct_cash, wc_flow=wc_flow, limit=0)
-        reader = _jd.select_reader_judgments(js, limit=5)
+                                    direct_cash=direct_cash, wc_flow=wc_flow,
+                                    dataset=dataset, limit=0)
+        reader = _jd.select_reader_judgments(js, limit=4)
         front = _jd.render_reader_judgments(
-            reader, detail_hint=detail_hint or "analysis/analysis_detail.md")
+            reader, detail_hint=detail_hint or "analysis/analysis_detail.md",
+            short=True)
         detail = _jd.render_judgments(js)
         if detail:
             detail = ["## 研究判断明细（七段式，另附）", "",
@@ -1195,7 +1357,7 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
 
 def research_note(runs, *, provenance=None, charts=None, label_of=None,
                   records=None, doc=None, volume_price=None,
-                  direct_cash=None, detail_hint: str = "") -> str:
+                  direct_cash=None, dataset=None, detail_hint: str = "") -> str:
     """兼容入口：`research_brief(...)` 的三块合并成一份文本（front → note → detail）。
 
     脚本与既有调用方拿到的是**完整**正文（判断、论证线、七段式明细、底稿索引都在），
@@ -1203,6 +1365,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
     """
     parts = research_brief(runs, provenance=provenance, charts=charts, label_of=label_of,
                            records=records, doc=doc, volume_price=volume_price,
-                           direct_cash=direct_cash, detail_hint=detail_hint)
+                           direct_cash=direct_cash, dataset=dataset,
+                           detail_hint=detail_hint)
     out = [p for p in (parts.get("front"), parts.get("note"), parts.get("detail")) if p]
     return ("\n".join(out).rstrip() + "\n") if out else ""

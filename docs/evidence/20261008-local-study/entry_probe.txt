@@ -1,0 +1,30 @@
+① GET /api/research-study/sample → 200；文件 README.md(5294B)、calendar.csv(354B)、credit_labels.json(998B)、daily_prices.csv(9949B)、financials.csv(762B)、fraud_labels.json(517B)、news.json(1098B)、study.json(1272B)
+   spec：synthetic=True cutoff=2025-04-30 models=['scenario_sensitivity', 'cash_pressure', 'cash_quality']
+② POST /api/research-study/preview → 200
+   主体=['900001.SH', '900002.SH']；研究状态=research_draft／人工=unreviewed；外部交付={'allowed': False, 'reason': '本批仅生成内部研究产物'}
+   预览[financial] financials.csv：44 条候选、状态 ready、可用 44、问题 0、原字段 19 个、标的 ['900001.SH', '900002.SH']
+   预览[market] daily_prices.csv：87 条候选、状态 ready、可用 87、问题 0、原字段 10 个、标的 ['900001.SH', '900002.SH', '900300.SH']
+   经营[900001.SH] scenario_sensitivity=validated；cash_pressure=validated；cash_quality=validated
+   经营[900002.SH] scenario_sensitivity=validated；cash_pressure=validated；cash_quality=validated
+   事件候选 2／排除 1；历史检验 {"event_returns": {"status": "ok", "reason": ""}, "backtest": {"status": "ok", "reason": ""}}
+   风险[900001.SH] synthetic_research_features：特征 4、缺口 1、线索 ['receivables_outpace_revenue', 'inventory_outpaces_cost']
+   风险[900002.SH] synthetic_research_features：特征 4、缺口 1、线索 ['inventory_outpaces_cost']
+③ 反例·未确认直接运行 → 400 preview_required
+   反例·确认主体与文件不符 → 409 subjects_unconfirmed；文件里=['900001.SH', '900002.SH']
+④ POST /api/research-study/run → 200 status=ok
+   研究ID=f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828
+   目录=C:\Users\ding0\Desktop\ai_agent\织光\tmp\research-studies-1008\f6469defdb1eac21｜adopted=False｜外部交付={'allowed': False, 'reason': '本批仅生成内部研究产物'}
+   内部附件 13 个：events.json(4646B)、excluded.json(37B)、financial.json(238020B)、inputs.json(208229B)、label_readiness.json(3882B)、previews.json(189851B)、quant/backtest.json(16554B)、quant/event_returns.json(9487B)、quant/quant_detail.md(2051B)、quant/quant_manifest.json(3097B)、risk.json(9493B)、study_manifest.json(6494B)、summary.md(3884B)
+⑤ POST verify → 200 ok=True｜核对 12 个｜失败 []
+   POST replay → 200 ok=True｜同实质结果=True
+⑥ POST hypothesis-card → 200｜hypothesis_card.md｜hash=3f0081f3be2fb71e
+   900001.SH：方向=现金转化<100%（利润未完全转成现金）｜现金转化=62.5%｜应收/收入=0.15｜存货/成本=0.2857142857142857｜设定情景占用=558904.11元
+      可知时点：特征截止 2025-04-30／材料最晚可用 2025-04-26
+      原始来源：calendar=calendar.csv；credit_labels=credit_labels.json；events=news.json；financial=financials.csv；fraud_labels=fraud_labels.json；market=daily_prices.csv
+      下一同口径披露：3 项；反证条件：3 项
+   900002.SH：方向=现金转化<100%（利润未完全转成现金）｜现金转化=96.0%｜应收/收入=0.21818181818181817｜存货/成本=0.23076923076923078｜设定情景占用=994520.55元
+      可知时点：特征截止 2025-04-30／材料最晚可用 2025-04-26
+      原始来源：calendar=calendar.csv；credit_labels=credit_labels.json；events=news.json；financial=financials.csv；fraud_labels=fraud_labels.json；market=daily_prices.csv
+      下一同口径披露：3 项；反证条件：3 项
+
+产物目录文件：events.json、excluded.json、financial.json、hypothesis_card.json、hypothesis_card.md、inputs.json、label_readiness.json、previews.json、quant、risk.json、study_manifest.json、summary.md

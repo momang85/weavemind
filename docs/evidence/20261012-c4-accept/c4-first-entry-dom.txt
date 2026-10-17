@@ -1,0 +1,393 @@
+- complementary:
+  - generic: 织光 WeaveMind
+  - navigation:
+    - link "任务控制台":
+      - /url: /
+      - generic: 任务控制台
+    - link "智能体":
+      - /url: /agents
+      - generic: 智能体
+    - link "历史":
+      - /url: /history
+      - generic: 历史
+    - link "健康":
+      - /url: /health
+      - generic: 健康
+    - link "记忆与进化":
+      - /url: /memory
+      - generic: 记忆与进化
+    - link "评测":
+      - /url: /evals
+      - generic: 评测
+    - link "Skill":
+      - /url: /skills
+      - generic: Skill
+    - link "本地研究试验":
+      - /url: /research-study
+      - generic: 本地研究试验
+    - link "指标":
+      - /url: /metrics
+      - generic: 指标
+    - link "审计":
+      - /url: /audit
+      - generic: 审计
+    - link "设置":
+      - /url: /settings
+      - generic: 设置
+  - button "演示 OFF":
+    - text: 演示 OFF
+  - button "收起侧栏":
+    - generic: 收起侧栏
+- banner:
+  - heading "本地研究试验" [level=1]
+  - button "本地 LoRA":
+    - generic: 本地 LoRA
+  - generic "后端连接正常":
+    - generic: 在线
+  - generic: "智能体: 11"
+  - generic: momang · 管理员
+  - button "退出":
+    - text: 退出
+- main:
+  - heading "本地研究试验" [level=1]
+  - generic: 离线·不建任务·不调模型·内部研究文件
+  - button "刷新":
+  - generic: 先看清这份产物的性质
+  - generic: ① 内置样例公司/证券代码/财务/新闻/行情/日历/标签**全部为模拟**：只验证流程，不证明收益或风险模型有效性。
+  - generic: ② 输出是**内部研究草稿**，人工未复核；**不自动采纳**、不进 MD/PDF/ZIP 交付包、不对外分发。
+  - generic: ③ 学校/供应商的“允许查看”不等于商业使用或云端处理授权；许可状态在本入口一律未核实。
+  - generic: 这一步没成功
+  - generic: 需要 entity_id（从已选研究的主体里选）
+  - heading "① 选定输入" [level=2]
+  - generic: 内置模拟样例
+  - button "用内置两公司模拟样例"
+  - generic: 上传 CSV/JSON（可多选，单件上限与材料入口相同）
+  - table:
+    - rowgroup:
+      - row "文件 字节 sha256 用途":
+        - columnheader "文件"
+        - columnheader "字节"
+        - columnheader "sha256"
+        - columnheader "用途"
+    - rowgroup:
+      - row "README.md 5,294 f199ce58faff… 按样例 spec":
+        - cell "README.md"
+        - cell "5,294"
+        - cell "f199ce58faff…"
+        - cell "按样例 spec"
+      - row "calendar.csv 354 5d26fe75879e… 按样例 spec":
+        - cell "calendar.csv"
+        - cell "354"
+        - cell "5d26fe75879e…"
+        - cell "按样例 spec"
+      - row "credit_labels.json 998 3f49c38131e8… 按样例 spec":
+        - cell "credit_labels.json"
+        - cell "998"
+        - cell "3f49c38131e8…"
+        - cell "按样例 spec"
+      - row "daily_prices.csv 9,949 8f720e3c000f… 按样例 spec":
+        - cell "daily_prices.csv"
+        - cell "9,949"
+        - cell "8f720e3c000f…"
+        - cell "按样例 spec"
+      - row "financials.csv 762 6a6e785d80b2… 按样例 spec":
+        - cell "financials.csv"
+        - cell "762"
+        - cell "6a6e785d80b2…"
+        - cell "按样例 spec"
+      - row "fraud_labels.json 517 93b4be186c24… 按样例 spec":
+        - cell "fraud_labels.json"
+        - cell "517"
+        - cell "93b4be186c24…"
+        - cell "按样例 spec"
+      - row "news.json 1,098 8e47131b7ed6… 按样例 spec":
+        - cell "news.json"
+        - cell "1,098"
+        - cell "8e47131b7ed6…"
+        - cell "按样例 spec"
+      - row "study.json 1,272 f26bf94ebb3d… 按样例 spec":
+        - cell "study.json"
+        - cell "1,272"
+        - cell "f26bf94ebb3d…"
+        - cell "按样例 spec"
+  - heading "② 明确截止与公司 → 文件预览" [level=2]
+  - generic: 特征截止只定特征，结果评价截止允许之后的行情作为结果
+  - text: 特征截止（feature_cutoff）
+  - textbox "特征截止（feature_cutoff）": 2025-04-30
+  - text: 结果评价截止（evaluation_as_of）
+  - textbox "结果评价截止（evaluation_as_of）": 2026-10-09
+  - text: 预览后需逐个勾选确认的**文件内主体**
+  - generic: 公司身份只从文件读，不按请求里的名字替换材料
+  - button "文件预览（只读）":
+    - text: 文件预览（只读）
+  - heading "③ 运行并保存内部研究产物" [level=2]
+  - generic: 同一研究已存在则不覆盖；改参数或输入会得到新的研究ID
+  - button "运行并保存" [disabled]:
+    - text: 运行并保存
+  - generic: 需先「文件预览」并确认 文件里的公司
+  - heading "④ 从冻结研究生成公司报告（B4 直连）" [level=2]
+  - generic: 绑定三要素显式选定：study_id + entity_id + result_hash；界面没有「最新研究」，也不重新上传文件
+  - text: 研究ID：
+  - generic: 4dba42a6bdde9227…
+  - text: ； 结果哈希
+  - generic: 0195b5f103decad9…
+  - generic: —
+  - generic: 特征截止 2025-04-30 · 评价截止 2026-10-09； 研究状态 research_draft / 人工 unreviewed
+  - generic: 模型周期 —； 主体 —
+  - button "查看原版（按冻结研究恢复，不重传）":
+    - text: 查看原版（按冻结研究恢复，不重传）
+  - heading "⑤ Q1 读数：3×3「利润目标＋天数冲击占用」网格 / 目标核查 / 补证提示" [level=2]
+  - generic: 数值句从 ModelRun 读数装配；本节只读回显，不在渲染期改参数或重算
+  - generic: 这份产物没有 Q1 网格
+  - generic: 只有带 q1.joint_grid 块的研究才有 3×3 读数；旧产物保持原样，不回填。
+  - heading "⑥ 同一入口改参：改共享天数或这家的 g/m/B，产出新版研究" [level=2]
+  - generic: 新版=新研究ID；同一次 run 重算两家；旧目录与旧卡不回填
+  - generic: 克隆当前单一参数源（activeSpec：选定研究的冻结 spec，或预览解析后的 spec），覆盖 两公司共同假设的天数与本公司 g/m/B 后走同一条 run 通道。 不是「改一格只重算那一格」：同一次 run 对两家同时生效；输入目录与特征截止不动。 百分比填数：0, 10, 20 表示 0%/+10%/+20%；三一填 -10, -5, 0。预算 B 留空 = 未设（不自动给值）。
+  - generic: 两公司共同假设：同一套天数冲击（每次 run 两家同时生效）
+  - text: 回款天数冲击（日）
+  - textbox "共享 回款天数冲击": "10"
+  - text: 库存天数冲击（日）
+  - textbox "共享 库存天数冲击": "10"
+  - generic: 填 0 = 该维度冲击关闭；范围 -30..30；只在这里改一处，两家共用。
+  - heading "⑦ 已保存的内部研究产物" [level=2]
+  - generic: 20 个
+  - table:
+    - rowgroup:
+      - row "选定 研究ID 主体 特征截止 模拟 状态 人工 附件":
+        - columnheader "选定"
+        - columnheader "研究ID"
+        - columnheader "主体"
+        - columnheader "特征截止"
+        - columnheader "模拟"
+        - columnheader "状态"
+        - columnheader "人工"
+        - columnheader "附件"
+    - rowgroup:
+      - row "选定 f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828 f6469defdb1eac21… — 2025-04-30 模拟 research_draft unreviewed":
+        - cell "选定 f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828":
+          - button "选定 f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828": 选定
+        - cell "f6469defdb1eac21…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "模拟"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "15 件"
+      - row "选定 ee663372244db85a586371cb038c50381bf1f9ffeeafac2c5652891a28720a66 ee663372244db85a… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 ee663372244db85a586371cb038c50381bf1f9ffeeafac2c5652891a28720a66":
+          - button "选定 ee663372244db85a586371cb038c50381bf1f9ffeeafac2c5652891a28720a66": 选定
+        - cell "ee663372244db85a…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 d93e5c4a07e0fcbd6303bbb582597c149c31a3bf13d460980c34cd82ee756c7e d93e5c4a07e0fcbd… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 d93e5c4a07e0fcbd6303bbb582597c149c31a3bf13d460980c34cd82ee756c7e":
+          - button "选定 d93e5c4a07e0fcbd6303bbb582597c149c31a3bf13d460980c34cd82ee756c7e": 选定
+        - cell "d93e5c4a07e0fcbd…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 c99068abe588e00222c9c07f01b073443ff5d860606a4ddc44db5d4fdfd6c229 c99068abe588e002… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 c99068abe588e00222c9c07f01b073443ff5d860606a4ddc44db5d4fdfd6c229":
+          - button "选定 c99068abe588e00222c9c07f01b073443ff5d860606a4ddc44db5d4fdfd6c229": 选定
+        - cell "c99068abe588e002…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 c99068abe588e00222c9c07f01b073443ff5d860606a4ddc44db5d4fdfd6c229 c99068abe588e002… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 c99068abe588e00222c9c07f01b073443ff5d860606a4ddc44db5d4fdfd6c229":
+          - button "选定 c99068abe588e00222c9c07f01b073443ff5d860606a4ddc44db5d4fdfd6c229": 选定
+        - cell "c99068abe588e002…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 c3a2c9af3a49728fb3108c137fa9f87e9b69be331a0dd5a9501f554d4b1e1353 c3a2c9af3a49728f… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 c3a2c9af3a49728fb3108c137fa9f87e9b69be331a0dd5a9501f554d4b1e1353":
+          - button "选定 c3a2c9af3a49728fb3108c137fa9f87e9b69be331a0dd5a9501f554d4b1e1353": 选定
+        - cell "c3a2c9af3a49728f…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 b354a8e7453f94a4b4c0965560062656417a6047150f3106b040b1ed2848dd64 b354a8e7453f94a4… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 b354a8e7453f94a4b4c0965560062656417a6047150f3106b040b1ed2848dd64":
+          - button "选定 b354a8e7453f94a4b4c0965560062656417a6047150f3106b040b1ed2848dd64": 选定
+        - cell "b354a8e7453f94a4…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 b2a7b0ed02b70d603887a8ac3d1e2a331d5626c303f2b5083fd1554a0f54a6b3 b2a7b0ed02b70d60… — 2024-04-27 真实 research_draft unreviewed":
+        - cell "选定 b2a7b0ed02b70d603887a8ac3d1e2a331d5626c303f2b5083fd1554a0f54a6b3":
+          - button "选定 b2a7b0ed02b70d603887a8ac3d1e2a331d5626c303f2b5083fd1554a0f54a6b3": 选定
+        - cell "b2a7b0ed02b70d60…"
+        - cell "—"
+        - cell "2024-04-27"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "18 件"
+      - row "选定 af6016bf57073e878a7b34789fa3d3a2f6eb4a9de91382cf2f5564d81cf4a685 af6016bf57073e87… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 af6016bf57073e878a7b34789fa3d3a2f6eb4a9de91382cf2f5564d81cf4a685":
+          - button "选定 af6016bf57073e878a7b34789fa3d3a2f6eb4a9de91382cf2f5564d81cf4a685": 选定
+        - cell "af6016bf57073e87…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 a4a787721bcb3e395eca84704c3a503d49d97d602985cf20502853193f506417 a4a787721bcb3e39… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 a4a787721bcb3e395eca84704c3a503d49d97d602985cf20502853193f506417":
+          - button "选定 a4a787721bcb3e395eca84704c3a503d49d97d602985cf20502853193f506417": 选定
+        - cell "a4a787721bcb3e39…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 94932805c800384985179f0471edc0027dabc011a63bcb63caabbab2f159a6b1 94932805c8003849… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 94932805c800384985179f0471edc0027dabc011a63bcb63caabbab2f159a6b1":
+          - button "选定 94932805c800384985179f0471edc0027dabc011a63bcb63caabbab2f159a6b1": 选定
+        - cell "94932805c8003849…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 6baef421eb1a60c4473c8253f3fc3ae63e56f4da95cdba666455d87e81a44c98 6baef421eb1a60c4… — 2026-04-28 真实 research_draft unreviewed":
+        - cell "选定 6baef421eb1a60c4473c8253f3fc3ae63e56f4da95cdba666455d87e81a44c98":
+          - button "选定 6baef421eb1a60c4473c8253f3fc3ae63e56f4da95cdba666455d87e81a44c98": 选定
+        - cell "6baef421eb1a60c4…"
+        - cell "—"
+        - cell "2026-04-28"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 684305431cc8dbc3d5729bba1724fd4be960225bde5bd0fc3b7461597a728e2a 684305431cc8dbc3… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 684305431cc8dbc3d5729bba1724fd4be960225bde5bd0fc3b7461597a728e2a":
+          - button "选定 684305431cc8dbc3d5729bba1724fd4be960225bde5bd0fc3b7461597a728e2a": 选定
+        - cell "684305431cc8dbc3…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e 5ee4814b3721b61e… — 2026-10-09 真实 research_draft unreviewed":
+        - cell "选定 5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e":
+          - button "选定 5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e": 选定
+        - cell "5ee4814b3721b61e…"
+        - cell "—"
+        - cell "2026-10-09"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "18 件"
+      - row "选定 4dba42a6bdde92276c4dabe428e9e4e77c1a31d39f3959b8631e0f6061ae8548 4dba42a6bdde9227… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 4dba42a6bdde92276c4dabe428e9e4e77c1a31d39f3959b8631e0f6061ae8548":
+          - button "选定 4dba42a6bdde92276c4dabe428e9e4e77c1a31d39f3959b8631e0f6061ae8548": 已选定
+        - cell "4dba42a6bdde9227…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 3913767fb6971c1c893737eebbe4c7adb395f3af22badaf7d486351379180ccc 3913767fb6971c1c… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 3913767fb6971c1c893737eebbe4c7adb395f3af22badaf7d486351379180ccc":
+          - button "选定 3913767fb6971c1c893737eebbe4c7adb395f3af22badaf7d486351379180ccc": 选定
+        - cell "3913767fb6971c1c…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 357445c14e88196e0dd9ab76bead3e492e53f6afbb39664ed48d45a623943229 357445c14e88196e… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 357445c14e88196e0dd9ab76bead3e492e53f6afbb39664ed48d45a623943229":
+          - button "选定 357445c14e88196e0dd9ab76bead3e492e53f6afbb39664ed48d45a623943229": 选定
+        - cell "357445c14e88196e…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 2eab348e1c4aa1a3d60338507fee83b4c3354ee19d5803916a5c2885c5672be0 2eab348e1c4aa1a3… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 2eab348e1c4aa1a3d60338507fee83b4c3354ee19d5803916a5c2885c5672be0":
+          - button "选定 2eab348e1c4aa1a3d60338507fee83b4c3354ee19d5803916a5c2885c5672be0": 选定
+        - cell "2eab348e1c4aa1a3…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "17 件"
+      - row "选定 25f3b8ebbfdbaee2c901f466a00eb9e9d3b9801bcfc682c54c4bccdb317dcdc7 25f3b8ebbfdbaee2… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 25f3b8ebbfdbaee2c901f466a00eb9e9d3b9801bcfc682c54c4bccdb317dcdc7":
+          - button "选定 25f3b8ebbfdbaee2c901f466a00eb9e9d3b9801bcfc682c54c4bccdb317dcdc7": 选定
+        - cell "25f3b8ebbfdbaee2…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "16 件"
+      - row "选定 0af20919e6245b888974ee17321f327f99580ab745687e80aca6dae6921e7f4f 0af20919e6245b88… — 2025-04-30 真实 research_draft unreviewed":
+        - cell "选定 0af20919e6245b888974ee17321f327f99580ab745687e80aca6dae6921e7f4f":
+          - button "选定 0af20919e6245b888974ee17321f327f99580ab745687e80aca6dae6921e7f4f": 选定
+        - cell "0af20919e6245b88…"
+        - cell "—"
+        - cell "2025-04-30"
+        - cell "真实"
+        - cell "research_draft"
+        - cell "unreviewed"
+        - cell:
+          - generic "21 件"
+  - heading "⑧ 研究实验台：选研究 → 挑战判断 → 新披露更新 → 保存行动" [level=2]
+  - generic: 浏览器只传标识与枚举；数值/阈值/公式由服务端从冻结结果与登记材料解析（C4）
+  - text: 研究
+  - generic: 4dba42a6bdde9227…
+  - text: · 结果哈希
+  - generic: 0195b5f103decad9…
+  - text: · 特征截止 2025-04-30
+  - button "① 取这家研究的主体"

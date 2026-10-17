@@ -817,6 +817,26 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
     return out
 
 
+_PLAN_NUM_RE = None
+
+
+def is_numeric_plan(text: str) -> bool:
+    """这一段是不是**含数字的经营计划**（如"2024 年……力争营业收入同比增长 5%-10%"）。
+
+    10-07 第二次复核 §目标兑现：计划段是目标对照的**候选与原件定位**来源，此前它与
+    其它 business_background 段争同一个每类上限，于是被行业/业务介绍挤掉（实测 2023 年报：
+    计划段被丢，只剩 2024 年报里"报告期初…"的事后回顾段）。含数字的计划段允许**多留一条**，
+    不改别的类别、不改上限语义。
+    """
+    global _PLAN_NUM_RE
+    if _PLAN_NUM_RE is None:
+        _PLAN_NUM_RE = re.compile(
+            r"(?:规划|计划|力争|目标|预算)[^。；\n]{0,40}?"
+            r"(?:营业收入|收入)[^。；\n]{0,20}?(?:同比)?(?:增长|增加|提升|增幅)\s*"
+            r"[0-9]+(?:\.[0-9]+)?\s*%")
+    return bool(_PLAN_NUM_RE.search(str(text or "")))
+
+
 def extract_sections(doc: dict, *, periods=None, company: str = "",
                      company_id: str = "", as_of: str = "",
                      max_per_kind: int = MAX_PER_KIND,
@@ -852,7 +872,9 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
             continue
         seen.add(key)
         bucket = picked.setdefault(kind, [])
-        if len(bucket) >= max_per_kind:
+        # 含数字的经营计划段允许**多留一条**（它只作目标对照的候选，不当已发生解释）
+        _is_plan = is_numeric_plan(sec["body"])
+        if len(bucket) >= max_per_kind and not (_is_plan and len(bucket) < max_per_kind + 1):
             continue
         hint = next((y for y in years if y in (sec["path"] + snip)), "")
         _missing = _span_gap(int(sec["start"]), int(sec["end"]),
@@ -1182,7 +1204,9 @@ def _vp_line_volume(text: str, label: str) -> dict | None:
         pos = end
         if label not in line:
             continue
-        if not re.search(rf"{re.escape(label)}\s*[（(]", line):
+        # 行形状两种：年报 `销售量(吨) 139,076.05 …`；半年报把单位单列
+        # `销售量 吨 78,192.32 115,586.48 -32.35%`（10-08 复核：H1 原件即这种）。
+        if not re.search(rf"{re.escape(label)}\s*(?:[（(]\s*吨\s*[）)]|吨)", line):
             continue
         tk = _vp_tokens(line)
         nums = [v for _k, v in tk]
@@ -1333,23 +1357,40 @@ def _prev_from_yoy(cur, yoy_pct) -> float | None:
 def extract_profit_decomposition(docs, *, periods=None) -> dict:
     """从已准入年报正文抽**利润端分解**（确定性、离线、不编数）。
 
-    返回 `{ok, groups, expenses, components, derived, boundary, locator, url, title}`；
-    三个组成部分（毛利端 / 期间费用 / 税项与非经常性损益）逐一给绑定状态——
-    利润问题的完成判据读 `components`，不读任何自报覆盖。
+    **期间身份**（10-08 复核 §1）：毛利率表（"1、按不同类型披露主营业务构成"）的表头
+    只有列名（`划分类型 营业收入 同比增减 营业成本 同比增减 毛利率 同比增减`）——它
+    **不声明年份**，所以这张表的适用期只能取**文档自己声明的报告期**（标题"2024年年度报告"）；
+    期间对不上的材料一律不取数（未知，不按文档新旧猜）。实机反例：新增 2023 年报后，
+    "毛利率/营业成本"命中次数更多的那份被选中，2023/2022 的毛利额被写进 2023/2024 正文
+    （正文毛利端 −38.01 亿 vs 覆盖 +24.43 亿自相矛盾）。
+
+    返回 `{ok, groups, expenses, components, derived, boundary, locator, url, title,
+    document_period, periods}`；三个组成部分（毛利端 / 期间费用 / 税项与非经常性损益）
+    逐一给绑定状态——利润问题的完成判据读 `components`，不读任何自报覆盖。
     """
-    years = [int(y) for y in (periods or ())]
+    years = sorted({int(y) for y in (periods or ())})
+    want_year = years[-1] if years else None
     best: dict | None = None
+    rejected: list[str] = []
     for d in (docs or []):
         if not isinstance(d, dict) or not str(d.get("text") or "").strip():
+            continue
+        dy = _doc_year(d)
+        if want_year is not None and dy != want_year:
+            rejected.append(f"{str(d.get('title') or d.get('url') or '材料')[:24]}"
+                            f"（报告期 {dy if dy else '未声明'}）")
             continue
         text = str(d.get("text") or "")
         hits = sum(text.count(k) for k in ("毛利率", "销售费用", "管理费用", "营业成本"))
         if hits and (best is None or hits > best.get("_hits", 0)):
-            best = {"doc": d, "_hits": hits}
+            best = {"doc": d, "_hits": hits, "_year": dy}
     if not best:
         return {"ok": False, "groups": [], "expenses": [], "derived": [], "boundary": [],
                 "components": [], "locator": "", "url": "", "title": "",
-                "reason": "未取得利润端明细（毛利率表或期间费用行）"}
+                "document_period": "", "periods": [],
+                "reason": ("未取得适用期（" + "/".join(str(y) for y in years)
+                           + "）的利润端明细（毛利率表或期间费用行）：候选材料的报告期不符"
+                           + ("；" + "、".join(rejected[:3]) if rejected else ""))}
     doc = best["doc"]
     text = str(doc.get("text") or "")
     sections = split_sections(text, page_offsets=doc.get("page_offsets"),
@@ -1498,6 +1539,8 @@ def extract_profit_decomposition(docs, *, periods=None) -> dict:
             # 本材料对应的报告期：调用方（正文装配）据此给派生读数**标年份**。
             # 只放在 boundary 文案里不够——正文渲染时无从可靠解析。
             "periods": list(years),
+            # 表**不声明年份**的那一类：适用期取文档自己声明的报告期（10-08 复核 §1）
+            "document_period": str(best.get("_year") or ""),
             "locator": (gross[0].get("locator") if gross else
                         (expenses[0].get("locator") if expenses else "")),
             "url": str(doc.get("url") or ""), "title": str(doc.get("title") or "")}
@@ -1505,6 +1548,60 @@ def extract_profit_decomposition(docs, *, periods=None) -> dict:
 
 def _yoy_from_yoy_abs(cur, prev) -> float | None:
     return _yoy_from(cur, prev)
+
+
+# ── 表头期间身份（10-08 复核 §1）────────────────────────────────
+# 实机反例：新增 2023 年报后，"主要产品的生产量、销售量、库存量"按**整篇关键词次数**
+# 选 doc，选中 2023 年报（12 命中 > 2024 年报 11 命中），于是 2023/2022 的销量
+# 166,154.73/195,322.68 吨（−14.93%）被当成 2024/2023 读数写进正文；正确为
+# 139,076.05/166,154.73 吨（−16.30%）。行业表自己**声明了期间**（表头
+# `产品类别 项目 2024年 2023年 同比增减`），所以按表头期间准入，不按文档新旧或标题年份猜。
+_PERIOD_PAIR_RE = re.compile(r"((?:19|20)\d{2})\s*年")
+_PAGE_HEADER_TAIL_RE = re.compile(r"年\s*年?度?报告全文|年度报告全文")
+
+
+def _years_before(text: str, pos: int, *, window: int = 700) -> list[int]:
+    """行前 window 字符内的**年份**（按出现顺序），排除页眉"…年度报告全文"里的年份。
+
+    页眉常插在表头与数据行之间；它带一个年份，会让"最近两年"读成 (2024, 2024)。
+    """
+    head = str(text or "")[max(0, pos - window):pos]
+    out: list[int] = []
+    for m in _PERIOD_PAIR_RE.finditer(head):
+        tail = head[m.end():m.end() + 12]
+        if _PAGE_HEADER_TAIL_RE.search(tail):
+            continue
+        out.append(int(m.group(1)))
+    return out
+
+
+def table_period_pair(text: str, anchor_re: str) -> tuple[int, int] | None:
+    """表头声明的**期间对** `(本期年, 上期年)`：取 anchor 命中处**前面最近两个年份**。
+
+    表头是这张表唯一声明"本期/上期是哪两年"的地方（行内只有数字）。找不到就返回
+    `None`——调用方据此**保持未知**，不用文档年份或标题年份顶替。
+    """
+    m = re.search(anchor_re, str(text or ""))
+    if not m:
+        return None
+    yrs = _years_before(str(text or ""), m.start())
+    if len(yrs) < 2:
+        return None
+    return int(yrs[-2]), int(yrs[-1])
+
+
+def _doc_year(doc: dict) -> int | None:
+    """文档自身声明的报告年：年度→`2024`；半年度→`2025H1` 取其年 `2025`。
+
+    取不到返回 None（不猜）。表**不声明年份**的那一类（毛利率表）只能靠它定适用期。
+    """
+    key = doc_period_key(str((doc or {}).get("title") or ""),
+                         str((doc or {}).get("url") or ""))
+    m = re.match(r"((?:19|20)\d{2})", str(key or ""))
+    try:
+        return int(m.group(1)) if m else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _span_locator(doc: dict, sections, gaps, start: int, end: int,
@@ -1529,25 +1626,55 @@ def _span_locator(doc: dict, sections, gaps, start: int, end: int,
     return f"{where}（字符 {start}-{end}）{note}"
 
 
+# 实物量表的行锚点：年报 `销售量(吨)` / 半年报 `销售量 吨`
+_VOLUME_ROW_ANCHOR = r"销售量\s*(?:[（(]\s*吨\s*[）)]|吨)"
+# 营业收入构成表：表头 `2024 年 2023 年 同比增减` + 行 `营业收入合计 …`
+_COMPOSITION_ROW_ANCHOR = r"营业收入合计\s"
+
+
+def volume_table_periods(text: str) -> tuple[int, int] | None:
+    """实物量表（产量与库存量）**表头期间**。"""
+    return table_period_pair(text, _VOLUME_ROW_ANCHOR)
+
+
+def composition_table_periods(text: str) -> tuple[int, int] | None:
+    """营业收入构成表**表头期间**。"""
+    return table_period_pair(text, _COMPOSITION_ROW_ANCHOR)
+
+
 def extract_volume_price(docs, *, periods=None) -> dict:
     """从已准入的年报/公告正文抽"量价与结构"事实（确定性、离线、不编数）。
 
-    返回 `{ok, facts, derived, boundary, locator, source_n, url, title, text_sha256}`；
-    没有对应披露时 `ok=False`（调用方据此照实显示"未取得"，不填零）。
+    **期间身份**（10-08 复核 §1）：只在**表头期间**与服务期一致的材料上取数——
+    `产品类别 项目 2024年 2023年 同比增减` 声明的是这张表自己的本期/上期；
+    按整篇关键词次数选 doc 会把 2023/2022 的表当 2024/2023 用（实机 −14.93% 冒充 −16.30%）。
+    候选表头期间不符或读不到表头 ⇒ `ok=False`（未知，不猜、不用文档年份顶替）。
+
+    返回 `{ok, facts, derived, boundary, locator, source_n, url, title, text_sha256,
+    periods, document_period}`；没有对应披露时 `ok=False`（调用方据此照实显示"未取得"，不填零）。
     """
-    years = [int(y) for y in (periods or [])]
+    years = sorted({int(y) for y in (periods or [])})
     best: dict | None = None
+    rejected: list[str] = []
     for d in (docs or []):
         if not isinstance(d, dict) or not str(d.get("text") or "").strip():
             continue
         text = str(d.get("text") or "")
+        hdr = volume_table_periods(text)
+        if years and (hdr is None or sorted(hdr) != years):
+            rejected.append(f"{str(d.get('title') or d.get('url') or '材料')[:24]}"
+                            f"（表头期间 {'/'.join(str(y) for y in hdr) if hdr else '未声明'}）")
+            continue
         hits = sum(text.count(k) for k in ("销售量", "分产品", "分地区", "批发经销"))
         if hits and (best is None or hits > best.get("_hits", 0)):
-            best = {"doc": d, "_hits": hits}
+            best = {"doc": d, "_hits": hits, "_hdr": hdr}
     if not best:
         return {"ok": False, "facts": [], "derived": [], "boundary": [],
                 "locator": "", "source_n": "", "url": "", "title": "",
-                "text_sha256": "", "reason": "未取得量价/结构披露（销售量或收入构成）"}
+                "text_sha256": "", "periods": [], "document_period": "",
+                "reason": ("未取得适用期（" + "/".join(str(y) for y in years)
+                           + "）的量价/结构披露：候选材料的表头期间不符或未声明"
+                           + ("；" + "、".join(rejected[:3]) if rejected else ""))}
     doc = best["doc"]
     text = str(doc.get("text") or "")
     sections = split_sections(text, page_offsets=doc.get("page_offsets"),
@@ -1691,6 +1818,12 @@ def extract_volume_price(docs, *, periods=None) -> dict:
         "text_sha256": sample.get("text_sha256") or "",
         "chunk_offsets": doc.get("chunk_offsets") or [],
         "chunk_gaps": gaps,
+        # **适用期身份**（10-08 复核 §1）：表头声明的本期/上期 + 文档报告期 + 披露日。
+        # 下游（覆盖/判断/图表/附件）读同一份对象，不再各自猜期间。
+        "periods": [int(y) for y in (best.get("_hdr") or ())],
+        "document_period": doc_period_key(str(doc.get("title") or ""),
+                                          str(doc.get("url") or "")),
+        "published_at": str(doc.get("published_at") or ""),
     }
 
 
@@ -1792,7 +1925,15 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
                   if r.get("kind") == kind and r.get("has_location")
                   and r.get("admission") in ("admitted", "comparison")]
         bucket.sort(key=lambda r: (str(r.get("url") or ""), int(r.get("char_start") or 0)))
-        ordered.extend(bucket[:MAX_PER_KIND])
+        keep = bucket[:MAX_PER_KIND]
+        # 10-07 第二次复核 §目标兑现：**含数字的经营计划段额外保留一条**——它是目标对照的
+        # 候选与原句定位（角色仍是"计划/假设"，不当已发生解释）。全局重排这里若也按上限截，
+        # 计划段会被同一类别的其它段落挤掉（实测：2023 年报的原计划段正是这样丢的）。
+        for r in bucket[MAX_PER_KIND:]:
+            if is_numeric_plan(str(r.get("snippet") or "")):
+                keep.append(r)
+                break
+        ordered.extend(keep)
     # 非准入记录（错主体/超截止/期间不符/缺字段）与无定位的检索摘要照实保留：
     # 前者用于向读者说明"为什么这些材料没被采用"，不静默丢弃
     ordered.extend(r for r in dedup.values()

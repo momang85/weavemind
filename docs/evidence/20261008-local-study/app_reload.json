@@ -1,0 +1,16 @@
+{
+ "why": "本批改了 web_ui.py（新增 8 个端点）与前端 dist：运行中的 webui 进程是提交前启动的，不会自动加载新代码。按总指令『实现完成明确提交/加载项，无在飞任务时正常加载』执行 `launcher.py stop` + `up`（当时无进行中任务）。",
+ "commit_note": "本文件记的是加载与探针事实；提交身份见 `git log`（文件内不写 hash，避免自引用）",
+ "webui_pid": 23536,
+ "services_started": 16,
+ "probes": {
+  "GET /": 200,
+  "GET /assets/ResearchStudy-COoVdPMw.js": {
+   "status": 200,
+   "bytes": 19432
+  },
+  "GET /api/research-study/sample (未登录)": 401
+ },
+ "note": "未认证访问任何 `/api/*` 都是 401（鉴权门在路由表之前）⇒ 该探针只能证明鉴权生效，**不能**证明新路由已加载；新路由的加载由『服务在提交之后重启』（pid 时间戳晚于提交）与离线端到端（同一批端点函数 ± 15 项测试）共同证明。真正的界面点击仍待用户登录。",
+ "ui_blocked": "工作台需要管理员登录；口令属用户凭据（README 明确没有固定默认管理员密码）⇒ 代理侧不读配置密钥、不改账号权限、不绕过登录。恢复条件见 ui_recovery.md。"
+}

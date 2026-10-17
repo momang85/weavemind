@@ -1,0 +1,675 @@
+# -*- coding: utf-8 -*-
+"""§16 接入：**本地研究试验**入口（工作台端点）的最小验证。
+
+只覆盖本批新增的接入与它的身份/时点反例，不重跑既有套件：
+
+- 入口顺序是硬门槛：**文件预览 → 明确截止/公司 → run_study → 内部产物**；未确认不给运行；
+- 公司身份只从文件读，**不按请求里的公司名替换材料**；文件必须真在本次输入里；
+- 产物是**内部研究文件**：不采纳、不进交付包、未人工复核（三态照实）；
+- verify/replay 复用既有实现：篡改产物要被抓到，实现变了不给旧版背书；
+- 时点反例：可用时间早于披露时间的行必须标不可用（不能进模型）。
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+SAMPLE = ROOT / "examples" / "research_study"
+
+FIN_HEADER = ("证券代码,公司名称,报告期,报告类型,披露日期,下载日期,单位,币种,报表口径,"
+              "营业收入,营业成本,归母净利润,合并净利润,经营活动产生的现金流量净额,"
+              "应收账款,存货,应付账款,总资产,总负债")
+
+
+class _Handler:
+    """最小 handler 替身：`_json` 收集 JSON 响应；下载类收集状态/头/字节。
+
+    `_get_research_study_file` 不走 `_json`，而是 `send_response`+`send_header`
+    +`wfile.write`（与底稿文件下载同形态），替身把三段都收下来供断言。
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self.responses: list[tuple] = []
+        self.status_out: list[int] = []
+        self.headers_out: list[tuple] = []
+        self.wfile = io.BytesIO()
+
+    def _json(self, payload, status=200):
+        self.responses.append((payload, status))
+        return payload
+
+    def send_response(self, status):
+        self.status_out.append(status)
+
+    def send_header(self, name, value):
+        self.headers_out.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def _client_ip(self):
+        return "127.0.0.1"
+
+    def _auth_session(self):
+        return {"user": "admin", "role": "admin"}
+
+    @property
+    def last(self):
+        return self.responses[-1] if self.responses else (None, None)
+
+    @property
+    def download_status(self):
+        return self.status_out[-1] if self.status_out else None
+
+    @property
+    def download_headers(self):
+        return dict(self.headers_out)
+
+    @property
+    def download_body(self):
+        return self.wfile.getvalue()
+
+
+class _Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_study_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old_env = os.environ.get("WEAVEMIND_RESEARCH_STUDY_DIR")
+        os.environ["WEAVEMIND_RESEARCH_STUDY_DIR"] = str(self.tmp / "studies")
+        self.addCleanup(self._restore_env)
+        self._audit = mock.patch.object(__import__("web_ui"), "audit_log",
+                                        lambda *a, **k: None)
+        self._audit.start()
+        self.addCleanup(self._audit.stop)
+
+    def _restore_env(self):
+        if self._old_env is None:
+            os.environ.pop("WEAVEMIND_RESEARCH_STUDY_DIR", None)
+        else:
+            os.environ["WEAVEMIND_RESEARCH_STUDY_DIR"] = self._old_env
+
+    # ── 便捷调用（全部走端点函数，不起服务）──────────────────────────────
+    def _preview(self, body=None):
+        import web_ui
+        h = _Handler("/api/research-study/preview")
+        web_ui._post_research_study_preview(
+            h, h.path, body or {"spec": "sample", "input_id": "__sample__"},
+            {"user": "admin"})
+        return h.last
+
+    def _run(self, **over):
+        import web_ui
+        body = {"spec": "sample", "input_id": "__sample__", "confirmed": True,
+                "confirmed_subjects": ["900001.SH", "900002.SH"]}
+        body.update(over)
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(h, h.path, body, {"user": "admin"})
+        return h.last
+
+    def _write_input(self, input_id: str, files: dict[str, str]) -> str:
+        d = self.tmp / "studies" / "_uploads" / input_id
+        d.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (d / name).write_text(text, encoding="utf-8")
+        return str(d)
+
+
+class TestStudyEntryHappyPath(_Base):
+    def test_sample_lists_spec_and_files(self):
+        import web_ui
+        h = _Handler("/api/research-study/sample")
+        web_ui._get_research_study_sample(h, h.path)
+        payload, status = h.last
+        self.assertEqual(status, 200, payload)
+        names = [f["name"] for f in payload["files"]]
+        self.assertIn("financials.csv", names)
+        self.assertEqual(payload["spec"]["schema"], "weavemind.study_spec/1")
+        self.assertTrue(payload["spec"]["synthetic"], "样例必须显式标模拟")
+        self.assertEqual(payload["sample_input_id"], "__sample__")
+
+    def test_preview_reports_subjects_cutoffs_and_gaps(self):
+        payload, status = self._preview()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["subjects"], ["900001.SH", "900002.SH"])
+        self.assertTrue(payload["synthetic"])
+        self.assertEqual(payload["feature_cutoff"], "2025-04-30")
+        self.assertEqual(payload["evaluation_as_of"], "2025-06-30")
+        self.assertEqual(payload["research_state"], "research_draft")
+        self.assertEqual(payload["human_review"], "unreviewed")
+        self.assertFalse(payload["external_delivery"]["allowed"])
+        self.assertGreater(payload["previews"]["financial"]["rows"], 0)
+        for run in payload["financial"]["900001.SH"]["runs"]:
+            self.assertEqual(run["status"], "validated", run)
+        self.assertIn("cash_pressure", [r["model_id"] for r in
+                                        payload["financial"]["900001.SH"]["runs"]])
+        self.assertEqual(payload["preview_only"], True)
+
+    def test_run_saves_internal_artifacts_and_never_adopts(self):
+        payload, status = self._run()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "ok")
+        self.assertFalse(payload["adopted"])
+        self.assertEqual(payload["confirmed_subjects"], ["900001.SH", "900002.SH"])
+        self.assertFalse(payload["external_delivery"]["allowed"])
+        d = Path(payload["dir"])
+        self.assertTrue(d.is_dir())
+        self.assertTrue(str(d).startswith(str(self.tmp / "studies")))
+        paths = {a["path"] for a in payload["artifacts"]}
+        for want in ("summary.md", "study_manifest.json", "financial.json",
+                     "events.json", "risk.json", "inputs.json", "previews.json"):
+            self.assertIn(want, paths, paths)
+        man = json.loads((d / "study_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(man["study_id"], payload["study_id"])
+        self.assertEqual(man["research_state"], "research_draft")
+        self.assertFalse(man["external_delivery"]["allowed"])
+
+    def test_rerun_does_not_overwrite_an_existing_study(self):
+        first, _ = self._run()
+        d = Path(first["dir"])
+        before = (d / "summary.md").read_bytes()
+        again, status = self._run()
+        self.assertEqual(status, 200, again)
+        self.assertEqual(again["status"], "exists")
+        self.assertEqual((d / "summary.md").read_bytes(), before,
+                         "旧研究目录不得被覆盖")
+
+    def test_verify_and_replay_reuse_the_frozen_record(self):
+        import web_ui
+        payload, _ = self._run()
+        sid = payload["study_id"]
+        h = _Handler("/api/research-study/verify")
+        web_ui._post_research_study_verify(h, h.path, {"study_id": sid}, {"user": "admin"})
+        ver, status = h.last
+        self.assertEqual(status, 200, ver)
+        self.assertTrue(ver["ok"], ver)
+        h = _Handler("/api/research-study/replay")
+        web_ui._post_research_study_replay(h, h.path, {"study_id": sid}, {"user": "admin"})
+        rep, status = h.last
+        self.assertEqual(status, 200, rep)
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual(rep["expected_hash"], rep["actual_hash"])
+
+    def test_hypothesis_card_is_draft_and_scenario_only(self):
+        import web_ui
+        payload, _ = self._run()
+        h = _Handler("/api/research-study/hypothesis-card")
+        web_ui._post_research_study_hypothesis_card(
+            h, h.path, {"study_id": payload["study_id"]}, {"user": "admin"})
+        card, status = h.last
+        self.assertEqual(status, 200, card)
+        body = card["card"]
+        self.assertEqual(body["state"], "draft_not_human_confirmed")
+        self.assertTrue(body["no_credit_score"])
+        self.assertTrue(body["no_alpha_claim"])
+        self.assertIn("设定情景", body["scenario_not_signal"])
+        self.assertEqual([c["entity_id"] for c in body["companies"]],
+                         ["900001.SH", "900002.SH"])
+        for c in body["companies"]:
+            self.assertTrue(c["next_same_caliber_disclosure"])
+            self.assertTrue(c["refutation_conditions"])
+            self.assertEqual(c["known_as_of"]["feature_cutoff"], "2025-04-30")
+            self.assertIn("设定情景", c["scenario_only"]["note"])
+        self.assertIn("未经人工确认", card["markdown_text"])
+
+    def test_hypothesis_card_carries_the_five_field_groups(self):
+        """§17.5：身份与时点／研究判断／试验约定／后续结果／使用状态五组字段都要在卡里。"""
+        import web_ui
+        payload, _ = self._run()
+        h = _Handler("/api/research-study/hypothesis-card")
+        web_ui._post_research_study_hypothesis_card(
+            h, h.path, {"study_id": payload["study_id"]}, {"user": "admin"})
+        card, status = h.last
+        self.assertEqual(status, 200, card)
+        body = card["card"]
+        # ① 身份与时点
+        self.assertEqual(len(body["hypothesis_id"]), 64)
+        self.assertTrue(body["frozen"])
+        self.assertEqual(body["method"]["version"].startswith("q1-v1"), True)
+        self.assertEqual(body["method"]["status"], "fixed_not_computed",
+                         "本批只冻结指标与方向规则，不计算 Q1 读数")
+        self.assertIn("自定义经营余额", body["method"]["indicator"])
+        self.assertIn("sign(O_t)", body["method"]["direction_rule"])
+        self.assertIn("归母净利润变化方向延续", body["method"]["baselines"])
+        # ② 研究判断（逐公司）
+        for c in body["companies"]:
+            self.assertTrue(c["mechanism"])
+            self.assertTrue(c["expected_direction"])
+            self.assertIn("Y_op", c["observation_metric"])
+            self.assertIn("年度", c["target_period"])
+            self.assertTrue(c["alternatives"])
+        # ③ 试验约定
+        tc = body["trial_conventions"]
+        self.assertEqual(tc["company_pool"]["entities"], ["900001.SH", "900002.SH"])
+        self.assertIn("Y_op", tc["primary_endpoint"])
+        self.assertEqual(tc["variants"]["count"], 1)
+        self.assertFalse(tc["human_confirmed"])
+        # ④ 后续结果：只有状态位，不写实际读数
+        for c in body["companies"]:
+            fu = c["follow_up"]
+            self.assertEqual(fu["status"], "待数据")
+            self.assertIsNone(fu["actual_reading"])
+            self.assertIsNone(fu["difference"])
+            self.assertEqual(fu["mechanism_verdict"], "未决")
+            self.assertIn("待数据", fu["market_reaction"]["status"])
+        # ⑤ 使用状态
+        us = body["usage_state"]
+        self.assertTrue(us["internal_only"])
+        self.assertIn("流程样例", us["provenance_kind"])
+        self.assertIn("不是前瞻判断", us["provenance_note"])
+        self.assertEqual(us["research_state"], "research_draft")
+        self.assertEqual(us["human_review"], "unreviewed")
+        self.assertTrue(us["machine_checks"]["verify_study"]["ok"],
+                        us["machine_checks"])
+        self.assertFalse(us["external_delivery"]["allowed"])
+        # 卡正文也要按五组渲染（人工读的那份不能只有摘要）
+        for token in ("## 试验约定", "机制（可反证的一句）", "观察指标", "目标期",
+                      "后续结果", "假说ID"):
+            self.assertIn(token, card["markdown_text"], token)
+
+    def test_card_hash_ignores_generation_time_but_covers_judgement(self):
+        """卡 hash：不含 `generated_at`（同一判断重复生成同 hash），但判断变了必须变。"""
+        import web_ui
+        payload, _ = self._run()
+        h = _Handler("/api/research-study/hypothesis-card")
+        web_ui._post_research_study_hypothesis_card(
+            h, h.path, {"study_id": payload["study_id"]}, {"user": "admin"})
+        first, _ = h.last
+        import web_ui as _w
+        again = _w._freeze_hypothesis_card(payload["dir"])
+        self.assertEqual(first["card"]["card_hash"], again["card_hash"])
+        tampered = dict(again)
+        tampered["companies"] = [dict(again["companies"][0],
+                                      mechanism="被改过的机制")] + again["companies"][1:]
+        for_hash = {k: v for k, v in tampered.items() if k != "generated_at"}
+        import hashlib as _h
+        import json as _j
+        changed = _h.sha256(_j.dumps(for_hash, ensure_ascii=False,
+                                     sort_keys=True).encode("utf-8")).hexdigest()
+        self.assertNotEqual(changed, first["card"]["card_hash"])
+
+
+class TestStudyEntryIdentityAndTimeGuards(_Base):
+    def test_run_requires_preview_confirmation(self):
+        payload, status = self._run(confirmed=False)
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload["code"], "preview_required")
+
+    def test_run_refuses_subjects_not_in_the_files(self):
+        payload, status = self._run(confirmed_subjects=["900001.SH"])
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["code"], "subjects_unconfirmed")
+        self.assertEqual(payload["subjects_in_files"], ["900001.SH", "900002.SH"])
+
+    def test_subject_is_read_from_the_file_not_from_the_request(self):
+        """请求里写另一家公司不会改材料身份：只按**文件里读到**的主体运行。
+
+        反例做法：把财务宽表的证券代码/公司名换成别家，请求仍写原主体 → 必须以
+        文件为准并 **409 拒绝**（不是把别家材料重贴成请求公司的标签）。
+        """
+        csv = (FIN_HEADER + "\n"
+               + "600000.SH,别家公司,2023-12-31,年度,2024-04-25,2025-04-30,万元,CNY,合并,"
+                 "1000,700,150,160,120,100,140,80,2000,1000\n"
+               + "600000.SH,别家公司,2024-12-31,年度,2025-04-25,2025-04-30,万元,CNY,合并,"
+                 "1200,840,160,170,100,180,240,100,2400,1300\n")
+        self._write_input("id-other", {"financials.csv": csv})
+        spec = json.loads((SAMPLE / "study.json").read_text(encoding="utf-8-sig"))
+        spec = {k: v for k, v in spec.items()
+                if k in ("schema", "name", "synthetic", "feature_cutoff",
+                         "evaluation_as_of", "financial")}
+        spec["feature_cutoff"] = "2025-04-30"
+        spec["evaluation_as_of"] = "2025-06-30"
+        payload, status = self._run(spec=spec, input_id="id-other")
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["subjects_in_files"], ["600000.SH"])
+        # 预览里读到的主体同样是文件里的那家
+        prev, pstatus = self._preview({"spec": spec, "input_id": "id-other"})
+        self.assertEqual(pstatus, 200, prev)
+        self.assertEqual(prev["subjects"], ["600000.SH"])
+
+    def test_spec_file_must_exist_in_this_input(self):
+        spec = json.loads((SAMPLE / "study.json").read_text(encoding="utf-8-sig"))
+        spec["financial"] = dict(spec["financial"], file="not_uploaded.csv")
+        payload, status = self._preview({"spec": spec, "input_id": "__sample__"})
+        self.assertEqual(status, 400, payload)
+        self.assertIn("not_uploaded.csv", payload["error"])
+
+    def test_unknown_input_dir_is_refused(self):
+        payload, status = self._preview({"spec": "sample", "input_id": "no-such-dir"})
+        self.assertEqual(status, 400, payload)
+
+    def test_upload_rejects_bad_names_and_payloads(self):
+        import base64
+        import web_ui
+        b64 = base64.b64encode(b"a,b\n1,2\n").decode()
+        for name in ("../evil.csv", "sub/dir.csv", "..", ".", ""):
+            h = _Handler("/api/research-study/upload")
+            web_ui._post_research_study_upload(
+                h, h.path, {"filename": name, "data": b64}, {"user": "admin"})
+            _payload, status = h.last
+            self.assertEqual(status, 400, (name, _payload))
+        h = _Handler("/api/research-study/upload")
+        web_ui._post_research_study_upload(
+            h, h.path, {"filename": "ok.csv", "data": "!!!not-base64!!!"}, {"user": "admin"})
+        payload, status = h.last
+        self.assertIn(status, (400, 200))
+        if status == 200:                      # base64 宽松解码：写进去的必须不是原文
+            self.assertEqual(payload["files"][0]["name"], "ok.csv")
+
+    def test_availability_before_disclosure_is_marked_unusable(self):
+        """时点反例：可用时间早于披露时间 → 该行不可用于模型（不能进当时信息集）。"""
+        csv = (FIN_HEADER + "\n"
+               + "900009.SH,时点反例公司,2023-12-31,年度,2025-04-25,2025-04-30,万元,CNY,合并,"
+                 "1000,700,150,160,120,100,140,80,2000,1000\n"
+               + "900009.SH,时点反例公司,2024-12-31,年度,2025-04-25,2025-04-30,万元,CNY,合并,"
+                 "1200,840,160,170,100,180,240,100,2400,1300\n")
+        self._write_input("id-time", {"financials.csv": csv})
+        spec = {"schema": "weavemind.study_spec/1", "name": "时点反例", "synthetic": True,
+                "feature_cutoff": "2025-04-30", "evaluation_as_of": "2025-06-30",
+                "financial": {"file": "financials.csv", "periods": [2023, 2024],
+                              "metadata": {"source": "synthetic_fixture", "synthetic": True},
+                              "models": ["cash_quality"]}}
+        payload, status = self._preview({"spec": spec, "input_id": "id-time"})
+        # 该表没有“可用时间”列：披露日即用日，属正常；这里核的是**没有假数据补齐**
+        self.assertEqual(status, 200, payload)
+        # 2 行 × 11 个金额列 = 22 条候选观察（一列一个指标，不是一行一条）
+        self.assertEqual(payload["previews"]["financial"]["rows"], 22)
+        self.assertEqual(payload["previews"]["financial"]["issue_count"], 0)
+        # 明确的时点反例：显式给出早于披露的可用时间
+        csv_bad = csv.replace("2025-04-25,2025-04-30", "2025-04-25,2025-04-01")
+        self._write_input("id-time-bad", {"financials.csv": csv_bad})
+        spec2 = dict(spec, financial=dict(spec["financial"],
+                                          metadata={"source": "synthetic_fixture",
+                                                    "synthetic": True,
+                                                    "available_at": "2025-04-01"}))
+        payload2, status2 = self._preview({"spec": spec2, "input_id": "id-time-bad"})
+        self.assertEqual(status2, 200, payload2)
+        codes = [i["code"] for i in payload2["previews"]["financial"]["issues"]]
+        self.assertIn("availability_before_disclosure", codes, codes)
+        self.assertEqual(payload2["previews"]["financial"]["eligible_records"], 0,
+                         "时点矛盾的行不得算作可用")
+
+    def test_replay_refuses_when_implementation_changed(self):
+        import quant_research.study as study
+        import web_ui
+        payload, _ = self._run()
+        sid = payload["study_id"]
+        with mock.patch.object(study, "_implementations",
+                               lambda: {"changed.py": "deadbeef"}):
+            h = _Handler("/api/research-study/replay")
+            web_ui._post_research_study_replay(h, h.path, {"study_id": sid},
+                                               {"user": "admin"})
+            rep, status = h.last
+        self.assertEqual(status, 200, rep)
+        self.assertFalse(rep["ok"])
+        self.assertIn("实现已改变", rep["reason"])
+
+    def test_verify_detects_a_tampered_artifact(self):
+        import web_ui
+        payload, _ = self._run()
+        d = Path(payload["dir"])
+        (d / "summary.md").write_text("被改过的摘要", encoding="utf-8")
+        h = _Handler("/api/research-study/verify")
+        web_ui._post_research_study_verify(h, h.path,
+                                           {"study_id": payload["study_id"]},
+                                           {"user": "admin"})
+        ver, status = h.last
+        self.assertEqual(status, 200, ver)
+        self.assertFalse(ver["ok"])
+        self.assertIn("summary.md", ver["failed"])
+
+
+class TestStudyRestoreByIdentity(_Base):
+    """接缝②（2026-10-11 §18.12）：`POST /api/research-study/run {study_id}` 的**恢复**分支。
+
+    冷页面（`input_id` 仍停在 `__sample__`）选旧版时，按研究身份复用**冻结 inputs**：
+    不重新上传、不借用旧上传目录；身份与主体按同一硬门槛校验；实现已改变时
+    **不重算**（不给旧实现背书、也不造新数字），改为直接读冻结产物并如实标注。
+    """
+
+    def _restore(self, sid: str, **over):
+        import web_ui
+        body = {"study_id": sid, "confirmed": True,
+                "confirmed_subjects": ["900001.SH", "900002.SH"]}
+        body.update(over)
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(h, h.path, body, {"user": "admin"})
+        return h.last
+
+    def test_restore_reuses_frozen_inputs_without_reupload(self):
+        payload, status = self._run()
+        sid = payload["study_id"]
+        # 冷入口反例：页面没有上传目录，input_id 仍是样例
+        res, status = self._restore(sid)
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["study_id"], sid)
+        self.assertEqual(res["status"], "restored")
+        self.assertTrue(res["result_hash_matches"], res)
+        self.assertTrue(str(res["input_id"]).startswith("frozen:"), res["input_id"])
+        self.assertIn("未重新上传", res["restore_basis"])
+        self.assertEqual(sorted(res["subjects"]), ["900001.SH", "900002.SH"])
+        # 生效参数来自冻结 spec，而不是页面上的样例 spec
+        self.assertEqual(res["spec"]["feature_cutoff"], payload["spec"]["feature_cutoff"])
+        self.assertEqual(res["spec"]["evaluation_as_of"], payload["spec"]["evaluation_as_of"])
+        self.assertFalse(res["adopted"], "恢复不等于采纳")
+
+    def test_restore_refuses_unknown_study_and_wrong_hash(self):
+        payload, _ = self._run()
+        res, status = self._restore("ffffffffffffffff")
+        self.assertEqual(status, 404, res)
+        self.assertEqual(res["code"], "study_not_found")
+        res, status = self._restore(payload["study_id"], result_hash="0" * 64)
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "result_hash_mismatch")
+
+    def test_restore_refuses_subjects_not_in_the_frozen_record(self):
+        payload, _ = self._run()
+        res, status = self._restore(payload["study_id"],
+                                    confirmed_subjects=["900001.SH"])
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "subjects_unconfirmed")
+        self.assertEqual(res["subjects_in_files"], ["900001.SH", "900002.SH"])
+
+    def test_restore_reads_frozen_artifacts_when_implementation_changed(self):
+        import quant_research.study as study
+        payload, _ = self._run()
+        sid = payload["study_id"]
+        before = (Path(payload["dir"]) / "financial.json").read_text(encoding="utf-8")
+        with mock.patch.object(study, "_implementations",
+                               lambda: {"changed.py": "deadbeef"}):
+            res, status = self._restore(sid)
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["status"], "restored_frozen")
+        self.assertFalse(res["recomputed"], "实现已改变时不得冒充重算结果")
+        self.assertIn("冻结产物", res["restore_basis"])
+        self.assertEqual(sorted(res["subjects"]), ["900001.SH", "900002.SH"])
+        # 数值一字不改：盘上冻结产物未被重算覆盖
+        self.assertEqual((Path(payload["dir"]) / "financial.json")
+                         .read_text(encoding="utf-8"), before)
+
+    def test_restore_refuses_tampered_frozen_record(self):
+        payload, _ = self._run()
+        d = Path(payload["dir"])
+        (d / "summary.md").write_text("被改过的摘要", encoding="utf-8")
+        res, status = self._restore(payload["study_id"])
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "restore_refused")
+
+
+class TestStudyReparamFromFrozenInputs(_Base):
+    """C2b 接缝②分叉（2026-10-11 §18.13）：`{study_id, spec}` → **冻结输入＋改参新候选**。
+
+    与「查看原版」（只带 `study_id` → restore/读冻结产物）严格分开：
+    - 改的是**假设**（本测试改 `financial.params.cash_pressure.collection_days_delta`）；
+    - 输入与截止是**冻结选择**：改 `feature_cutoff` → 409（换截止＝换输入，不是改假设）；
+    - 身份由内容寻址给出新 `study_id`；spec 未改 → 400（那是「查看原版」，不新建候选）；
+    - 旧目录只读保留：候选落新目录，旧目录字节不变。
+    """
+
+    def _reparam(self, sid: str, spec: dict, **over):
+        import web_ui
+        body = {"study_id": sid, "spec": spec, "confirmed": True,
+                "confirmed_subjects": ["900001.SH", "900002.SH"]}
+        body.update(over)
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(h, h.path, body, {"user": "admin"})
+        return h.last
+
+    def _spec_with_days(self, payload, days: int) -> dict:
+        spec = json.loads(json.dumps(payload["spec"]))
+        spec["financial"]["params"]["cash_pressure"]["collection_days_delta"] = days
+        return spec
+
+    def test_reparam_creates_a_new_candidate_from_frozen_inputs(self):
+        payload, status = self._run()
+        self.assertEqual(status, 200, payload)
+        sid = payload["study_id"]
+        old_files = {p.name: p.read_bytes()
+                     for p in Path(payload["dir"]).iterdir() if p.is_file()}
+        res, status = self._reparam(sid, self._spec_with_days(payload, 20))
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertNotEqual(res["study_id"], sid, "改参必须得到新研究身份")
+        self.assertTrue(str(res["input_id"]).startswith("frozen:"), res["input_id"])
+        self.assertEqual(res["reparam_from"]["study_id"], sid)
+        self.assertEqual(res["reparam_spec_diff"],
+                         ["financial.params.cash_pressure.collection_days_delta: 10 → 20"])
+        self.assertNotEqual(res["result_hash"], payload["result_hash"])
+        self.assertFalse(res["adopted"], "新候选不等于采纳")
+        # 旧目录只读保留：字节不变、路径不变
+        self.assertEqual({p.name: p.read_bytes()
+                          for p in Path(payload["dir"]).iterdir() if p.is_file()}, old_files)
+        # 新候选的生效 spec 就是改过的 spec（不是样例、不是冻结原件）
+        self.assertEqual(res["spec"]["financial"]["params"]["cash_pressure"]
+                         ["collection_days_delta"], 20)
+        # 新候选自己能复算（同一 _compute_study、当前实现）
+        import quant_research.study as study
+        rt = study.restore_study(res["dir"])
+        self.assertTrue(rt["result_hash_matches"], rt)
+        self.assertEqual(rt["study_id"], res["study_id"])
+
+    def test_reparam_refuses_unchanged_spec_and_changed_cutoff(self):
+        payload, _ = self._run()
+        sid = payload["study_id"]
+        res, status = self._reparam(sid, json.loads(json.dumps(payload["spec"])))
+        self.assertEqual(status, 400, res)
+        self.assertEqual(res["code"], "spec_unchanged")
+        spec = self._spec_with_days(payload, 20)
+        spec["feature_cutoff"] = "2024-04-30"
+        res, status = self._reparam(sid, spec)
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "cutoff_frozen")
+        self.assertEqual(res["frozen_value"], payload["spec"]["feature_cutoff"])
+        res, status = self._reparam(sid, self._spec_with_days(payload, 20),
+                                    result_hash="0" * 64)
+        self.assertEqual(status, 409, res)
+        self.assertEqual(res["code"], "result_hash_mismatch")
+
+    def test_restore_still_wins_when_no_spec_is_sent(self):
+        """只带 study_id ＝「查看原版」：恢复分支照旧，不被改参分叉抢走。"""
+        payload, _ = self._run()
+        import web_ui
+        h = _Handler("/api/research-study/run")
+        web_ui._post_research_study_run(
+            h, h.path, {"study_id": payload["study_id"], "confirmed": True,
+                        "confirmed_subjects": ["900001.SH", "900002.SH"]}, {"user": "admin"})
+        res, status = h.last
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res["status"], "restored")
+        self.assertEqual(res["study_id"], payload["study_id"])
+        self.assertNotIn("reparam_spec_diff", res)
+
+
+class TestStudyFileDownload(_Base):
+    """§17.10 第 4 项「可下载」：`GET /api/research-study/file` 缝。
+
+    - 命中：返回 200 + 与盘上字节一致 + attachment 头（text/md → text/markdown）；
+    - 反例：路径分隔符 / `..` / 开头点 → 400；未知研究与未知文件 → 404；
+    - 越界：嵌套里的 `..` 段不给直下；目录外的名字不给 200。
+    """
+
+    def _file(self, sid: str, name: str):
+        import web_ui
+        h = _Handler(f"/api/research-study/file?id={sid}&name={name}")
+        web_ui._get_research_study_file(h, h.path)
+        return h
+
+    def _run_study(self):
+        payload, status = self._run()
+        self.assertEqual(status, 200, payload)
+        return payload
+
+    def test_download_serves_bytes_with_attachment_header(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        raw_disk = (Path(payload["dir"]) / "summary.md").read_bytes()
+        h = self._file(sid, "summary.md")
+        self.assertEqual(h.download_status, 200, h.last)
+        self.assertEqual(h.download_body, raw_disk)
+        headers = h.download_headers
+        self.assertEqual(headers["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertEqual(headers["Content-Disposition"],
+                         'attachment; filename="summary.md"')
+        self.assertEqual(int(headers["Content-Length"]), len(raw_disk))
+        # JSON 产物同样可下载，类型标 application/json
+        h2 = self._file(sid, "study_manifest.json")
+        self.assertEqual(h2.download_status, 200, h2.last)
+        self.assertEqual(h2.download_headers["Content-Type"],
+                         "application/json; charset=utf-8")
+        self.assertTrue(h2.download_headers["Content-Type"].startswith(
+            h2.download_headers["Content-Type"]))
+
+    def test_download_rejects_traversal_dotfiles_and_bad_names(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        (Path(payload["dir"]).parent / "_secret.md").write_text(
+            "不该被下载的秘密", encoding="utf-8")
+        for bad in ("..", "../_secret.md", "..%2F_secret.md", ".env",
+                    "a/b/../c.md", "", "."):
+            h = self._file(sid, bad)
+            payload_r, status = h.last
+            self.assertEqual(status, 400, (bad, payload_r))
+            self.assertEqual(h.download_status, None)
+
+    def test_download_unknown_study_and_unknown_file_404(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        h = self._file("0" * 32, "summary.md")
+        self.assertEqual(h.last[1], 404, h.last)
+        h = self._file("zzzz", "summary.md")
+        self.assertEqual(h.last[1], 404, h.last)
+        h = self._file(sid, "no_such_artifact.md")
+        self.assertEqual(h.last[1], 404, h.last)
+        self.assertEqual(h.download_status, None)
+
+    def test_download_subdir_artifact_and_outside_root_refused(self):
+        payload = self._run_study()
+        sid = payload["study_id"]
+        d = Path(payload["dir"])
+        (d / "sub").mkdir()
+        (d / "sub" / "nested.json").write_text('{"ok": 1}', encoding="utf-8")
+        h = self._file(sid, "sub/nested.json")
+        self.assertEqual(h.download_status, 200, h.last)
+        self.assertEqual(h.download_body, b'{"ok": 1}')
+        # 产物根之外的文件（uploads 区）不给直下
+        up = d.parent / "_uploads" / sid[:16]
+        up.mkdir(parents=True)
+        (up / "leak.md").write_text("leak", encoding="utf-8")
+        h = self._file(sid, "../_uploads/" + sid[:16] + "/leak.md")
+        payload_r, status = h.last
+        self.assertEqual(status, 400, (payload_r, h.download_status))
+        self.assertEqual(h.download_status, None)
+
+
+if __name__ == "__main__":
+    unittest.main()

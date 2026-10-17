@@ -1,0 +1,381 @@
+{
+  "checks": [
+    {
+      "check": "A sany.current 四格精确一致",
+      "ok": true,
+      "detail": {
+        "got": {
+          "applicable": "True",
+          "metric": "operating_payable_increase",
+          "base_yuan": "1.4814278E+10",
+          "item_yuan": "5.592854E+9",
+          "points": [
+            "1.4814278E+10",
+            "1.2017851E+10",
+            "9.221424E+9"
+          ],
+          "zero_lambda": "2.648786826904474888849235113",
+          "reachable_within_0_1": "False"
+        },
+        "want": {
+          "applicable": "True",
+          "metric": "operating_payable_increase",
+          "base_yuan": "1.4814278E+10",
+          "item_yuan": "5.592854E+9",
+          "points": [
+            "1.4814278E+10",
+            "1.2017851E+10",
+            "9.221424E+9"
+          ],
+          "zero_lambda": "2.648786826904474888849235113",
+          "reachable_within_0_1": "False"
+        }
+      }
+    },
+    {
+      "check": "A sany.yoy 四格精确一致",
+      "ok": true,
+      "detail": {
+        "got": {
+          "applicable": "True",
+          "metric": "operating_payable_increase",
+          "base_yuan": "9.106058E+9",
+          "item_yuan": "1.1613185E+10",
+          "points": [
+            "9.106058E+9",
+            "3.2994655E+9",
+            "-2.507127E+9"
+          ],
+          "zero_lambda": "0.784113746573399114885365212",
+          "reachable_within_0_1": "True"
+        },
+        "want": {
+          "applicable": "True",
+          "metric": "operating_payable_increase",
+          "base_yuan": "9.106058E+9",
+          "item_yuan": "1.1613185E+10",
+          "points": [
+            "9.106058E+9",
+            "3.2994655E+9",
+            "-2.507127E+9"
+          ],
+          "zero_lambda": "0.784113746573399114885365212",
+          "reachable_within_0_1": "True"
+        }
+      }
+    },
+    {
+      "check": "A yanghe.current 四格精确一致",
+      "ok": true,
+      "detail": {
+        "got": {
+          "applicable": "True",
+          "metric": "operating_payable_increase",
+          "base_yuan": "-763040326.79",
+          "item_yuan": "-4558396295.73",
+          "points": [
+            "-763040326.79",
+            "1516157821.075",
+            "3795355968.94"
+          ],
+          "zero_lambda": "0.1673922751088502363681697682",
+          "reachable_within_0_1": "True"
+        },
+        "want": {
+          "applicable": "True",
+          "metric": "operating_payable_increase",
+          "base_yuan": "-763040326.79",
+          "item_yuan": "-4558396295.73",
+          "points": [
+            "-763040326.79",
+            "1516157821.075",
+            "3795355968.94"
+          ],
+          "zero_lambda": "0.1673922751088502363681697682",
+          "reachable_within_0_1": "True"
+        }
+      }
+    },
+    {
+      "check": "A yanghe.yoy 四格精确一致",
+      "ok": true,
+      "detail": {
+        "got": {
+          "applicable": "True",
+          "metric": "change_in_net_profit",
+          "base_yuan": "-5391751564.07",
+          "item_yuan": "-4475468458.51",
+          "points": [
+            "-5391751564.07",
+            "-3154017334.815",
+            "-916283105.56"
+          ],
+          "zero_lambda": "1.204734568918189741345669703",
+          "reachable_within_0_1": "False"
+        },
+        "want": {
+          "applicable": "True",
+          "metric": "change_in_net_profit",
+          "base_yuan": "-5391751564.07",
+          "item_yuan": "-4475468458.51",
+          "points": [
+            "-5391751564.07",
+            "-3154017334.815",
+            "-916283105.56"
+          ],
+          "zero_lambda": "1.204734568918189741345669703",
+          "reachable_within_0_1": "False"
+        }
+      }
+    },
+    {
+      "check": "B 三一旧快照下现金卡条件写「营运资本项」",
+      "ok": true,
+      "detail": "下一期同口径经营现金流变化的**主导项**是否仍是营运资本项（主导项换了才叫方向改变；缓冲大小不改变主导项身份）"
+    },
+    {
+      "check": "B 三一不再写「利润仍主导」（跨类型不可照抄旧说法）",
+      "ok": true,
+      "detail": "同口径现金桥主导项换位（营运资本项 → 利润项）；或 ΔOCF 由正转负"
+    },
+    {
+      "check": "B 三一（新材料未取得）如实 pending/无法判断",
+      "ok": true,
+      "detail": "无法判断"
+    },
+    {
+      "check": "B 洋河五卡（H1 回放：一支持一削弱）",
+      "ok": true,
+      "detail": {
+        "profit_mechanism_and_buffer": "加强",
+        "volume_contraction": "加强",
+        "finished_goods_inventory_build": "削弱",
+        "cash_from_working_capital": "加强",
+        "cash_buffer_structure": "削弱"
+      }
+    },
+    {
+      "check": "B 洋河成品库存卡《削弱》",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "B 每卡带单窗口削弱/确认门槛/判据哈希",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "B 判据哈希与冻结产物一致",
+      "ok": true,
+      "detail": "c2aa6f49211015df…"
+    },
+    {
+      "check": "C 重放内容身份 == 冻结 id",
+      "ok": true,
+      "detail": "245bcd5e56ef7c5eafaf11e2"
+    },
+    {
+      "check": "C 重放内容哈希 == 冻结内容哈希",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "C 再冻结同 id／同字节／不新增文件",
+      "ok": true,
+      "detail": {
+        "files": [
+          "245bcd5e56ef7c5eafaf11e2.json",
+          "245bcd5e56ef7c5eafaf11e2.md",
+          "245bcd5e56ef7c5eafaf11e2.pdf"
+        ]
+      }
+    },
+    {
+      "check": "C 重开同版（内容身份一致＋摘要非空）",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "C 摘要 PDF 实页数 == 1",
+      "ok": true,
+      "detail": "1 页 / 5271257B"
+    },
+    {
+      "check": "C C3 基线 JSON 两份仍在（只读未覆盖）",
+      "ok": true,
+      "detail": [
+        "c3_experiment_002304.SZ.json",
+        "c3_experiment_600031.SH.json"
+      ]
+    },
+    {
+      "check": "D adapter 优先 C4 冻结实验",
+      "ok": true,
+      "detail": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies\\0af20919e6245b88\\experiments\\245bcd5e56ef7c5eafaf11e2.json"
+    },
+    {
+      "check": "D 视图块带判据/内容身份/依据/下一步动作",
+      "ok": true,
+      "detail": {
+        "experiment_id": "245bcd5e56ef7c5eafaf11e2",
+        "old_cutoff": "2025-04-30",
+        "next_actions": 2
+      }
+    },
+    {
+      "check": "D staging 的 JSON 与冻结产物逐字节同版",
+      "ok": true,
+      "detail": "142193B"
+    },
+    {
+      "check": "D exact_values_in 指向真实成员",
+      "ok": true,
+      "detail": {
+        "pointer": "analysis/c3_experiment_002304.SZ.json",
+        "members": [
+          "analysis/c3_experiment_002304.SZ.json"
+        ]
+      }
+    },
+    {
+      "check": "D 附件渲染稿同时生成",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "D 交付管线收录 analysis/c3_experiment_*.json",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "D 旧脚本产物仍回落（三一，没有 C4 冻结实验）",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "E 候选 run 现场解析（冻结＋续页）且逐条给出视角可用性",
+      "ok": true,
+      "detail": {
+        "57b3b9fa": [
+          "study_frozen",
+          false
+        ],
+        "370dba92": [
+          "report_continuation",
+          true
+        ]
+      }
+    },
+    {
+      "check": "E 显式候选项（非默认，按 id 传）可算",
+      "ok": true,
+      "detail": {
+        "metric": "operating_receivable_decrease",
+        "points": [
+          "-763040326.79",
+          "-1430776689.325",
+          "-2098513051.86"
+        ]
+      }
+    },
+    {
+      "check": "E λ* == C/a（同源求值，非另算）",
+      "ok": true,
+      "detail": "-0.5713634673819374014420731669"
+    },
+    {
+      "check": "E 三一另一 run／另一主体同样可算（无需改代码）",
+      "ok": true,
+      "detail": {
+        "current": [
+          true,
+          "operating_payable_increase"
+        ],
+        "yoy": [
+          true,
+          "operating_payable_increase"
+        ]
+      }
+    },
+    {
+      "check": "F 未知视角：不造数（applicable=False ＋原因）",
+      "ok": true,
+      "detail": "未知视角 `__nope__`（只支持 current/yoy）"
+    },
+    {
+      "check": "F 身份不符不装配",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "check": "F 内容身份对同一产物稳定",
+      "ok": true,
+      "detail": null
+    }
+  ],
+  "detail": {
+    "cells": {
+      "sany.current": {
+        "applicable": "True",
+        "metric": "operating_payable_increase",
+        "base_yuan": "1.4814278E+10",
+        "item_yuan": "5.592854E+9",
+        "points": [
+          "1.4814278E+10",
+          "1.2017851E+10",
+          "9.221424E+9"
+        ],
+        "zero_lambda": "2.648786826904474888849235113",
+        "reachable_within_0_1": "False"
+      },
+      "sany.yoy": {
+        "applicable": "True",
+        "metric": "operating_payable_increase",
+        "base_yuan": "9.106058E+9",
+        "item_yuan": "1.1613185E+10",
+        "points": [
+          "9.106058E+9",
+          "3.2994655E+9",
+          "-2.507127E+9"
+        ],
+        "zero_lambda": "0.784113746573399114885365212",
+        "reachable_within_0_1": "True"
+      },
+      "yanghe.current": {
+        "applicable": "True",
+        "metric": "operating_payable_increase",
+        "base_yuan": "-763040326.79",
+        "item_yuan": "-4558396295.73",
+        "points": [
+          "-763040326.79",
+          "1516157821.075",
+          "3795355968.94"
+        ],
+        "zero_lambda": "0.1673922751088502363681697682",
+        "reachable_within_0_1": "True"
+      },
+      "yanghe.yoy": {
+        "applicable": "True",
+        "metric": "change_in_net_profit",
+        "base_yuan": "-5391751564.07",
+        "item_yuan": "-4475468458.51",
+        "points": [
+          "-5391751564.07",
+          "-3154017334.815",
+          "-916283105.56"
+        ],
+        "zero_lambda": "1.204734568918189741345669703",
+        "reachable_within_0_1": "False"
+      }
+    },
+    "baseline_hashes": {
+      "c3_experiment_002304.SZ.json": "2c4451fc81fe76a23eb8120c84de15e630c2111e5310b2a455b4f35d0e8c85fd",
+      "c3_experiment_600031.SH.json": "101dca966aa39b2eb7cbc99d564bb6752d0f5486d5e24487f02f48142cdac9f6"
+    }
+  },
+  "summary": {
+    "total": 31,
+    "passed": 31,
+    "all_pass": true
+  }
+}

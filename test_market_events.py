@@ -507,6 +507,44 @@ class TimeContractTest(unittest.TestCase):
                 self.assertIsNone(p_["return"])
                 self.assertNotEqual(p_["return"], 0.0)
 
+    def test_missing_available_at_still_cannot_cross_the_evaluation_date(self):
+        """10-07 复核 §随样品最小收口-1 反例：**删掉 `available_at` 也不能越过评价日**。
+
+        复核给的纯计算反例：评价日 2025-01-02，把逐行 `available_at` 删掉后，
+        01-03/01-06 的两点仍被判 observed（有无日历都一样）。日期自身必须不晚于评价日，
+        可用时间缺失**不能解除**这个条件。
+        """
+        rows = [{"code": "A", "date": d, "close": c, "open": c}       # 无 available_at
+                for d, c in (("2025-01-02", 100.0), ("2025-01-03", 110.0),
+                             ("2025-01-06", 120.0), ("2025-01-07", 130.0))]
+        p = {"schema": "weavemind.market_history/0", "dataset_id": "fixture-no-avail",
+             "source": "synthetic", "license": "免费源·仅内部试验",
+             "adj_basis": "前复权(qfq)", "rows": len(rows), "instruments": ["A"],
+             "date_range": ["2025-01-02", "2025-01-07"], "data": rows}
+        # ① 无日历
+        r = er.compute(p, [{"code": "A", "date": "2025-01-02", "label": "fixture"}],
+                       offsets=(0, 1), evaluation_as_of="2025-01-02")
+        it = (r.get("readings") or [{}])[0]
+        pts = {q["offset"]: q for q in it.get("points") or []}
+        for off in (0, 1):
+            self.assertEqual(pts[off]["state"], "pending", pts[off])
+            self.assertIsNone(pts[off]["return"], "越过评价日的点不得给收益")
+            self.assertNotEqual(pts[off]["return"], 0.0)
+            self.assertIn("不得晚于评价日", pts[off]["unavailable"])
+        # ② 有日历也一样（日历只决定"哪一天"，不能把未来价格变成已观察）
+        cal = {"schema": "weavemind.trading_calendar/0", "dataset_id": "fixture-cal",
+               "source": "fixture", "range": ["2025-01-01", "2025-01-31"],
+               "sessions": ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"]}
+        r2 = er.compute(p, [{"code": "A", "date": "2025-01-02", "label": "fixture"}],
+                        offsets=(0, 1), evaluation_as_of="2025-01-02", calendar=cal)
+        it2 = (r2.get("readings") or [{}])[0]
+        pts2 = {q["offset"]: q for q in it2.get("points") or []}
+        for off in (0, 1):
+            self.assertEqual(pts2[off]["state"], "pending", pts2[off])
+            self.assertIn("不得晚于评价日", pts2[off]["unavailable"])
+        # ③ 评价日之后的点仍按"未成熟"处理：不是 missing（那会暗示停牌）
+        self.assertNotIn("missing", [q["state"] for q in pts2.values()])
+
     def test_offsets_count_subject_own_sessions_and_gap_is_flagged(self):
         """标的缺一天（停牌/缺行）时：offsets 按标的自身交易日计，**并把缺口报成疑似**。
 

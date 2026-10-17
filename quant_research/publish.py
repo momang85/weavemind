@@ -8,6 +8,9 @@
 1. **落盘**：读数写进工作区 `quant/`（`event_returns.json` / `backtest.json` / …）；
 2. **随包**：`payload_bytes(ws)` 交出 `{"quant/…": bytes}`，与 `analysis/*` 同一套"有才进包、
    不制造空文件"契约 ⇒ **没有量化读数的工作区，交付包内容一字不变**（零存量影响）；
+   注意：内部快照收下这些附件**不等于**可以对外——交付包（对外交付面）在打包时还要过
+   `delivery_pipeline.external_delivery_projection()`：无权外发的 `quant/*` 不进入交付包
+   （换成一份限制说明 + 被移出成员的 sha256），财报正文不受影响（10-06 复核 §3D）；
 3. **许可门**：`external_delivery_gate()` 按每条读数自带的 `delivery_eligible` 判"能否对外"，
    免费源/个人非商业一律 `allowed=False` 并写原因；结果写进 `quant/quant_manifest.json`。
 
@@ -76,9 +79,33 @@ def external_delivery_gate(readings: dict) -> dict:
     判定用读数自带的 `delivery_eligible`（由算子按价格许可算出来），这里**不重新解释许可**，
     也不因为"我们内部看过了"就放行。没有读数 ⇒ `allowed=False` + `reason=没有量化读数`
     （不默认放行）。
+
+    10-07 复核 §随样品最小收口-2：**坏/未知的量化成员也必须挡住外发**。此前
+    `load_readings` 把解析失败的文件记在 `_unreadable`（下划线键），而这里只挑非下划线键
+    判定 ⇒ 一个"授权 event_returns + 坏 backtest.json"的组合被判 `allowed=True`，
+    坏文件照样随包外发。判不出许可**不是放行**（fail-closed）：坏成员与未登记成员一律阻止
+    量化外发；**内部快照照旧保留**，财报正文照常交付（由外发投影只移出 `quant/*`）。
     """
-    real = {k: v for k, v in (readings or {}).items()
-            if isinstance(v, dict) and not k.startswith("_")}
+    readings = readings or {}
+    unreadable = [str(x) for x in (readings.get("_unreadable") or [])]
+    # 其余下划线键＝算子/管线留下的**未登记成员**（不是读数）：不知道它是什么就不放行。
+    unknown = sorted(k for k in readings
+                     if str(k).startswith("_") and k != "_unreadable")
+    real = {k: v for k, v in readings.items()
+            if isinstance(v, dict) and not str(k).startswith("_")}
+    if unreadable or unknown:
+        why: list[str] = []
+        if unreadable:
+            why.append("无法解析（坏 JSON/读不出的成员）：" + "、".join(unreadable))
+        if unknown:
+            why.append("未登记的成员键：" + "、".join(unknown))
+        blocked = sorted(set(unreadable) | set(unknown))
+        return {"allowed": False, "blocked_by": blocked,
+                "reason": ("存在**判不出许可**的量化成员 ⇒ 不默认放行（fail-closed）："
+                           + "；".join(why)
+                           + "。内部快照保留原件、财报正文照常交付，只阻止量化附件外发"),
+                "readings_checked": sorted(real),
+                "unreadable": unreadable, "unknown_members": unknown}
     if not real:
         return {"allowed": False, "reason": "没有量化读数：不产对外许可结论（不默认放行）",
                 "blocked_by": []}

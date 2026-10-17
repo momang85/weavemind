@@ -3543,6 +3543,40 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertIsNone(_match_derived_fact(n2, other, [fact],
                                               goal="研究洋河股份 2023 与 2024 年的营业收入"))
 
+    def test_derived_amount_matches_across_amount_units_but_not_percent(self):
+        """同一量纲内允许元/万元/亿元换算；金额与百分比**不得互认**（10-06 实测反例）。
+
+        反例：正文按读者口径写"归母净利润变化 -33.43亿元"，底稿派生事实以**元**记
+        （-3342541438.15）。此前要求缩放系数完全相等 ⇒ 亿元读数永远配不上元记事实，
+        唯一首屏与财务对照里的关键读数全部落进"不可溯源"示例。
+        """
+        from acceptance_checker import _match_derived_fact
+        fact_yuan = {"value": -3342541438.15, "unit": "元", "subject": "洋河股份",
+                     "formula": "6673388602.12 - 10015930040.27",
+                     "inputs": ["fact-a", "fact-b"]}
+        clause = "- 关键读数：归母净利润变化 -33.43亿元（＝毛利端 ＋ 毛利线以下）"
+        report = "前言。" + clause
+        n = {"raw": "33.43亿元", "value": "33.43", "unit": "亿元",
+             "pos": report.index("33.43亿元")}
+        self.assertEqual(_match_derived_fact(n, report, [fact_yuan],
+                                            goal="研究洋河股份 2023 与 2024 年经营"),
+                         "workpaper_derived", "元/亿元是同一量纲，必须互认")
+        # 万元写法同样互认
+        n_wan = {"raw": "334254.14万元", "value": "334254.14", "unit": "万元",
+                 "pos": report.index("33.43亿元")}
+        self.assertEqual(_match_derived_fact(n_wan, report, [fact_yuan],
+                                            goal="研究洋河股份 2023 与 2024 年经营"),
+                         "workpaper_derived")
+        # 百分比事实不得给金额读数背书（量纲不同）
+        fact_pct = dict(fact_yuan, value=-33.43, unit="%")
+        self.assertIsNone(_match_derived_fact(n, report, [fact_pct],
+                                             goal="研究洋河股份 2023 与 2024 年经营"))
+        # 金额事实也不得给百分比读数背书
+        n_pct = {"raw": "33.43%", "value": "33.43", "unit": "%",
+                 "pos": report.index("33.43亿元")}
+        self.assertIsNone(_match_derived_fact(n_pct, report, [fact_yuan],
+                                             goal="研究洋河股份 2023 与 2024 年经营"))
+
     def test_abridged_quote_never_cuts_a_number_in_half(self):
         """C 批反例：摘录把 `378,003.53` 截成 `378,003.…` → 报告里的数字被判不可溯源。"""
         import re as _re
@@ -6610,6 +6644,40 @@ class TestReportPdfLayout(unittest.TestCase):
         self.assertIn("图片未能嵌入", text,
                       "缺图必须留可见占位，不能静默消失")
         self.assertIn("no_such_chart.png", text, "占位应带上原路径便于排查")
+
+    def test_numbered_list_with_indented_subitems_keeps_counting(self):
+        """编号列表带缩进子项时**编号继续**（实机首屏四条判断曾全印成"1."）。
+
+        正文形状：`1. 判断句` ＋ 缩进的 `- 关键读数…`；旧实现一遇子项就结束这一块，
+        下一条编号又从 1 开始——四条判断在 PDF 里全编号为 1。
+        """
+        import report_pdf
+        md = ("# 结论\n\n"
+              "1. 第一条判断\n   - 关键读数：甲\n"
+              "2. 第二条判断\n   - 关键读数：乙\n"
+              "3. 第三条判断\n   - 关键读数：丙\n")
+        text = self._flat(report_pdf.markdown_to_pdf(md, title="结论", workspace=None))[0]
+        # `_flat` 会去掉空白：断言也用去空白形式
+        for marker in ("1.第一条判断", "2.第二条判断", "3.第三条判断"):
+            self.assertIn(marker, text, f"编号丢失：{marker}")
+        self.assertIn("-关键读数：丙", text, "缩进子项仍要印出来")
+
+    def test_assembly_html_comments_never_reach_the_pdf(self):
+        """10-07 第二次复核 §阅读层：**工程注释不得印在读者页面上**。
+
+        实机反例：装配器留在正文里的 `<!-- 主文收束:pointer … -->`／
+        `<!-- 主文收束:begin … -->`（给 `compact_main_body` 做幂等改写用）被当普通段落
+        画进了 PDF —— 复核点名"第 4 页工程 HTML 注释可见"。
+        """
+        import report_pdf
+        md = ("# 复核结论\n\n正文。\n\n"
+              "<!-- 主文收束:pointer（本行由 report_brief 维护，勿手改） -->\n"
+              "<!-- 主文收束:begin\n多行注释也要整块跳过\n-->\n\n"
+              "结论边界如下。\n")
+        text = "\n".join(self._flat(report_pdf.markdown_to_pdf(md, workspace=None)))
+        self.assertNotIn("主文收束", text, "工程注释不得进 PDF")
+        self.assertNotIn("<!--", text, "HTML 注释标记不得进 PDF")
+        self.assertIn("结论边界如下", text, "注释前后的正文都要在（只跳注释）")
 
 
 class TestNewDataAdapters(unittest.TestCase):

@@ -1,0 +1,1546 @@
+{
+  "cards": {
+    "002304.SZ": {
+      "_card_hash_before_follow_up": "2683eef8e892175f92f53f978c204b7cb64d20d3afc67ed61e43efcae2cf2444",
+      "caliber": {
+        "currency": "CNY",
+        "period": "年度（累计；不混入 H1/YTD/单季）",
+        "scope": "合并",
+        "unit": "元"
+      },
+      "card_hash": "2879d504a2c890576afdd44715e4f4f804ef93b06e845a474dde06df39488dd6",
+      "card_version": "q1_card/1.0.0",
+      "cash_turnover_alternatives": {
+        "anomaly_clues": [
+          {
+            "alternatives": [
+              "正常替代解释：结算日期、信用期变化、客户结构或合并范围变化；补账龄与合同条款核实",
+              "差异线索不是舞弊或违约标签"
+            ],
+            "name": "receivables_outpace_revenue",
+            "unit": "growth_rate_difference",
+            "value": 0.29324343464836683
+          },
+          {
+            "alternatives": [
+              "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
+              "差异线索不是舞弊或违约标签"
+            ],
+            "name": "inventory_outpaces_cost",
+            "unit": "growth_rate_difference",
+            "value": 0.32873756395972487
+          }
+        ],
+        "cash_reconciliation_status": "validated",
+        "cashflow_coverage_pct": -34.59,
+        "cfo_minus_profit": -2969099253.47,
+        "inventory_to_cost": 3.7348370952159113,
+        "liabilities_to_assets": 0.19971602265520086,
+        "note": "现金与周转是**替代解释**，不是 E 的组成部分；收款加快/去库存/延迟付款/季节性都可能改变现金，不能仅凭 CFO/净利润认定盈利质量上升",
+        "period_of_run": "2025年",
+        "receivables_to_revenue": 0.0004487988258461718
+      },
+      "entity": "洋河股份",
+      "entity_id": "002304.SZ",
+      "follow_up": {
+        "actual_reading": {
+          "next_year": "2025",
+          "sign_y": "负",
+          "t": "2024",
+          "y_op": -0.19239375144358076
+        },
+        "case_id": "002304.SZ::t=2024",
+        "difference": {
+          "actual_sign": "负",
+          "hit": true,
+          "predicted_sign": "负"
+        },
+        "maturity": "mature",
+        "mechanism_verdict": "支持",
+        "note": "历史重建下的核验：用**已公开**的下一同口径年度结果比对原卡方向；不构成样本外预测证明",
+        "status": "已核验",
+        "verify_by": "2026-04-28"
+      },
+      "human_confirmation_note": "人工确认只能确认**卡的内容与来源**，不能把历史重建卡变成事前预测：本卡生成时后续年度结果已公开",
+      "identity": {
+        "formula": {
+          "E": "毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加",
+          "O": "(E_t − E_{t−1}) / 收入_{t−1}",
+          "Y_op": "(E_{t+1} − E_t) / 收入_t",
+          "excluded_items": [
+            "finance_expense",
+            "investment_income",
+            "fair_value_change",
+            "credit_impairment",
+            "asset_impairment",
+            "other_income",
+            "asset_disposal_income",
+            "non_operating_income",
+            "non_operating_expense",
+            "income_tax_expense",
+            "minority_interest"
+          ],
+          "not_claimed": [
+            "不是法定营业利润或 EBIT",
+            "不与归母净利润拼成同一闭合关系",
+            "不是对既有文献因子的复制"
+          ],
+          "terms": [
+            {
+              "metric": "gross_profit",
+              "weight": 1
+            },
+            {
+              "metric": "selling_expense",
+              "weight": -1
+            },
+            {
+              "metric": "admin_expense",
+              "weight": -1
+            },
+            {
+              "metric": "rd_expense",
+              "weight": -1
+            },
+            {
+              "metric": "taxes_and_surcharges",
+              "weight": -1
+            }
+          ]
+        },
+        "formula_status": "computed",
+        "input_fact_ids": [
+          "wind:10297c5bde023f1871fc19f4",
+          "wind:3217128dcfea1114850422c7",
+          "wind:871b6e8b3a890b9f0a79c22a",
+          "wind:8918fdce8781b766d76a87cc",
+          "wind:fdff330c93580794f2f6e23f"
+        ],
+        "known_as_of": {
+          "evaluation_as_of": "2026-10-09",
+          "feature_cutoff": "2026-10-09"
+        },
+        "method_version": "q1-v1",
+        "result_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+        "sources": [
+          {
+            "disclosed_at": "2024-04-27",
+            "material_id": "77185ce8ec83f3bc",
+            "sha256": "48e137d4d0b90f82ac1cf363f9c4f579ad83175bbb69d7f5bd0d0b0be45c3545",
+            "source_label": "official_disclosure_cache",
+            "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF"
+          },
+          {
+            "disclosed_at": "2025-04-29",
+            "material_id": "f42e747c73850b59",
+            "sha256": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0",
+            "source_label": "official_disclosure_cache",
+            "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF"
+          },
+          {
+            "disclosed_at": "2026-04-28",
+            "material_id": "ee4429eecac66f50",
+            "sha256": "b01f7d7cf8cf4a438e33bb0f0cd1afcf44a157e857624a2c49a7d5022b60ac42",
+            "source_label": "official_disclosure_cache",
+            "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF"
+          }
+        ],
+        "study_id": "5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e"
+      },
+      "judgement": {
+        "alternatives": [
+          "毛利变化可来自结构/价格/渠道费用归类，不等同需求改善",
+          "费用项变化可来自一次性计提、口径重分类或合并范围变化",
+          "税金及附加与消费税/附加税费相关，不随收入等比例变化"
+        ],
+        "direction_rule": "sign(O_t) → sign(Y_op)",
+        "expected_direction": "偏承压（sign(Y_op) = 负）",
+        "mechanism": "2024 年 E 比 2023 年变化 -34.67 亿元，主要来自毛利 -38.01 亿元、税金及附加 +4.43 亿元；O_2024 符号为「负」",
+        "observation_metric": "下一同口径年度 Y_op = (E_{t+1} − E_t)/收入_t",
+        "refutation_conditions": [
+          "下一同口径年度 sign(Y_op) 与 sign(O_t) 相反（分母收入为正）",
+          "同一 (指标, 期间) 出现重述后的不同值 ⇒ 本期读数作废，重算",
+          "可用时点晚于决策时点（版本可用时间晚于决策）"
+        ],
+        "target_period": "2024 年的下一同口径年度"
+      },
+      "next_material": [
+        "下一期同口径年度报告（同主体/同合并范围/同科目口径）",
+        "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
+        "若为真实材料：下一期行情（事后反应观察；缺合格行情只停价格域）"
+      ],
+      "no_alpha_claim": true,
+      "no_credit_score": true,
+      "provenance_kind": "历史重建",
+      "provenance_note": "用已公开的 2023、2024、2025 年报在结果公开**之后**生成：不因人工确认变成事前预测",
+      "readings": {
+        "baseline_profit": {
+          "base_year": "2023",
+          "delta": -3342541438.15,
+          "note": "归母净利润变化方向（与 E 的合并口径不同归属）",
+          "sign": "负",
+          "state": "ok"
+        },
+        "composition": [
+          {
+            "contribution": -3800953659.189996,
+            "delta": -3800953659.189996,
+            "metric": "gross_profit",
+            "prev_value": 24926032296.089996,
+            "value": 21125078636.9
+          },
+          {
+            "contribution": 443158639.71,
+            "delta": -443158639.71,
+            "metric": "taxes_and_surcharges",
+            "prev_value": 5269245592.35,
+            "value": 4826086952.64
+          },
+          {
+            "contribution": 179957474.07,
+            "delta": -179957474.07,
+            "metric": "rd_expense",
+            "prev_value": 284753881.33,
+            "value": 104796407.26
+          },
+          {
+            "contribution": -160307153.29,
+            "delta": 160307153.29,
+            "metric": "admin_expense",
+            "prev_value": 1764423149.06,
+            "value": 1924730302.35
+          },
+          {
+            "contribution": -129284844.17,
+            "delta": 129284844.17,
+            "metric": "selling_expense",
+            "prev_value": 5386953700.62,
+            "value": 5516238544.79
+          }
+        ],
+        "delta_e": -3467429542.869996,
+        "e_prev": 12220655972.729996,
+        "e_t": 8753226429.86,
+        "identity_ok": true,
+        "o_t": -0.10467308128654919,
+        "prev_year": "2023",
+        "primary_t": "2024",
+        "sign_o": "负",
+        "t": "2024"
+      },
+      "scenario_not_signal": "交易日数压力是设定情景，不当历史信号",
+      "schema": "weavemind.mechanism_card/1",
+      "target_condition_to_check": {
+        "incremental_capital_occupation": 675796727.38,
+        "margin_gap_to_threshold_pp": 23.2539,
+        "note": "目标门槛是**替代路径**（收入或毛利率，不同时成立）；交易日数冲击是设定情景，不是历史信号；研究者设定/回到上年水平都不叫管理层承诺",
+        "revenue_growth_to_hold_target": 32.4766,
+        "target_source": "目标归母净利 6673388602.12（上一期（2024年）归母净利：回到上年水平）；收入阈值与毛利率阈值共用这一目标"
+      },
+      "usage_state": {
+        "external_delivery": {
+          "allowed": false,
+          "reason": "本批仅生成内部研究产物"
+        },
+        "human_review": "unreviewed",
+        "internal_only": true,
+        "machine_checks": {
+          "verify_study": {
+            "checked": 17,
+            "failed": [],
+            "note": "字节核对只证明产物一致，不证明事实正确/人工复核",
+            "ok": true
+          }
+        },
+        "research_state": "research_draft",
+        "synthetic": false
+      }
+    },
+    "600031.SH": {
+      "_card_hash_before_follow_up": "fda81f19c6c179cd79bc1b667b56c5559286a536700ef89123978790bd430f78",
+      "caliber": {
+        "currency": "CNY",
+        "period": "年度（累计；不混入 H1/YTD/单季）",
+        "scope": "合并",
+        "unit": "元"
+      },
+      "card_hash": "3b5e6004ed699bdc9b6331a1a8313529d6743feec1ab7c9ff33778e4615897ce",
+      "card_version": "q1_card/1.0.0",
+      "cash_turnover_alternatives": {
+        "anomaly_clues": [],
+        "cash_reconciliation_status": "validated",
+        "cashflow_coverage_pct": 247.92,
+        "cfo_minus_profit": 8838827000.0,
+        "inventory_to_cost": 0.34863756041281396,
+        "liabilities_to_assets": 0.5201842812185391,
+        "note": "现金与周转是**替代解释**，不是 E 的组成部分；收款加快/去库存/延迟付款/季节性都可能改变现金，不能仅凭 CFO/净利润认定盈利质量上升",
+        "period_of_run": "2024年",
+        "receivables_to_revenue": 0.3280881760703992
+      },
+      "entity": "三一重工",
+      "entity_id": "600031.SH",
+      "follow_up": {
+        "actual_reading": null,
+        "case_id": "600031.SH::t=2024",
+        "difference": null,
+        "maturity": "pending",
+        "mechanism_verdict": "未决",
+        "note": "下一同口径年度尚未取得：不写实际读数",
+        "status": "待数据",
+        "verify_by": ""
+      },
+      "human_confirmation_note": "人工确认只能确认**卡的内容与来源**，不能把历史重建卡变成事前预测：本卡生成时后续年度结果已公开",
+      "identity": {
+        "formula": {
+          "E": "毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加",
+          "O": "(E_t − E_{t−1}) / 收入_{t−1}",
+          "Y_op": "(E_{t+1} − E_t) / 收入_t",
+          "excluded_items": [
+            "finance_expense",
+            "investment_income",
+            "fair_value_change",
+            "credit_impairment",
+            "asset_impairment",
+            "other_income",
+            "asset_disposal_income",
+            "non_operating_income",
+            "non_operating_expense",
+            "income_tax_expense",
+            "minority_interest"
+          ],
+          "not_claimed": [
+            "不是法定营业利润或 EBIT",
+            "不与归母净利润拼成同一闭合关系",
+            "不是对既有文献因子的复制"
+          ],
+          "terms": [
+            {
+              "metric": "gross_profit",
+              "weight": 1
+            },
+            {
+              "metric": "selling_expense",
+              "weight": -1
+            },
+            {
+              "metric": "admin_expense",
+              "weight": -1
+            },
+            {
+              "metric": "rd_expense",
+              "weight": -1
+            },
+            {
+              "metric": "taxes_and_surcharges",
+              "weight": -1
+            }
+          ]
+        },
+        "formula_status": "computed",
+        "input_fact_ids": [
+          "wind:110fe7eae093b3fff3640c79",
+          "wind:23ac4f6303fd026f00d42a25",
+          "wind:a8e58367f9c782631ef8aebd",
+          "wind:a9d6e571b4f1cb61ff95e839",
+          "wind:fc76900df17965e47d9fe5f3"
+        ],
+        "known_as_of": {
+          "evaluation_as_of": "2026-10-09",
+          "feature_cutoff": "2026-10-09"
+        },
+        "method_version": "q1-v1",
+        "result_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+        "sources": [
+          {
+            "disclosed_at": "2025-04-18",
+            "material_id": "0c3e82056e977adc",
+            "sha256": "aeaf2e836e2af6741003258b2cc8cf7f0799b8b939e5643a835675258aa33ef5",
+            "source_label": "official_disclosure_cache",
+            "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF"
+          }
+        ],
+        "study_id": "5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e"
+      },
+      "judgement": {
+        "alternatives": [
+          "毛利变化可来自结构/价格/渠道费用归类，不等同需求改善",
+          "费用项变化可来自一次性计提、口径重分类或合并范围变化",
+          "税金及附加与消费税/附加税费相关，不随收入等比例变化"
+        ],
+        "direction_rule": "sign(O_t) → sign(Y_op)",
+        "expected_direction": "偏改善（sign(Y_op) = 正）",
+        "mechanism": "2024 年 E 比 2023 年变化 +11.55 亿元，主要来自毛利 +13.86 亿元、研发费用 +4.84 亿元；O_2024 符号为「正」",
+        "observation_metric": "下一同口径年度 Y_op = (E_{t+1} − E_t)/收入_t",
+        "refutation_conditions": [
+          "下一同口径年度 sign(Y_op) 与 sign(O_t) 相反（分母收入为正）",
+          "同一 (指标, 期间) 出现重述后的不同值 ⇒ 本期读数作废，重算",
+          "可用时点晚于决策时点（版本可用时间晚于决策）"
+        ],
+        "target_period": "2024 年的下一同口径年度"
+      },
+      "next_material": [
+        "下一期同口径年度报告（同主体/同合并范围/同科目口径）",
+        "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
+        "若为真实材料：下一期行情（事后反应观察；缺合格行情只停价格域）"
+      ],
+      "no_alpha_claim": true,
+      "no_credit_score": true,
+      "provenance_kind": "历史重建",
+      "provenance_note": "用已公开的 2024 年报在结果公开**之后**生成：不因人工确认变成事前预测",
+      "readings": {
+        "baseline_profit": {
+          "base_year": "2023",
+          "delta": 1448000000.0,
+          "note": "归母净利润变化方向（与 E 的合并口径不同归属）",
+          "sign": "正",
+          "state": "ok"
+        },
+        "composition": [
+          {
+            "contribution": 1385760000.0,
+            "delta": 1385760000.0,
+            "metric": "gross_profit",
+            "prev_value": 19170672000.0,
+            "value": 20556432000.0
+          },
+          {
+            "contribution": 483974000.0,
+            "delta": -483974000.0,
+            "metric": "rd_expense",
+            "prev_value": 5864595000.0,
+            "value": 5380621000.0
+          },
+          {
+            "contribution": -362288000.0,
+            "delta": 362288000.0,
+            "metric": "selling_expense",
+            "prev_value": 5101926000.0,
+            "value": 5464214000.0
+          },
+          {
+            "contribution": -345468000.0,
+            "delta": 345468000.0,
+            "metric": "admin_expense",
+            "prev_value": 2650981000.0,
+            "value": 2996449000.0
+          },
+          {
+            "contribution": -7453000.0,
+            "delta": 7453000.0,
+            "metric": "taxes_and_surcharges",
+            "prev_value": 423706000.0,
+            "value": 431159000.0
+          }
+        ],
+        "delta_e": 1154525000.0,
+        "e_prev": 5129464000.0,
+        "e_t": 6283989000.0,
+        "identity_ok": true,
+        "o_t": 0.015767519817376605,
+        "prev_year": "2023",
+        "primary_t": "2024",
+        "sign_o": "正",
+        "t": "2024"
+      },
+      "scenario_not_signal": "交易日数压力是设定情景，不当历史信号",
+      "schema": "weavemind.mechanism_card/1",
+      "target_condition_to_check": {
+        "incremental_capital_occupation": 3698365753.42,
+        "margin_gap_to_threshold_pp": -1.8618,
+        "note": "目标门槛是**替代路径**（收入或毛利率，不同时成立）；交易日数冲击是设定情景，不是历史信号；研究者设定/回到上年水平都不叫管理层承诺",
+        "revenue_growth_to_hold_target": -7.044,
+        "target_source": "目标归母净利 4527451000.0（上一期（2023年）归母净利：回到上年水平）；收入阈值与毛利率阈值共用这一目标"
+      },
+      "usage_state": {
+        "external_delivery": {
+          "allowed": false,
+          "reason": "本批仅生成内部研究产物"
+        },
+        "human_review": "unreviewed",
+        "internal_only": true,
+        "machine_checks": {
+          "verify_study": {
+            "checked": 17,
+            "failed": [],
+            "note": "字节核对只证明产物一致，不证明事实正确/人工复核",
+            "ok": true
+          }
+        },
+        "research_state": "research_draft",
+        "synthetic": false
+      }
+    }
+  },
+  "compositions": {
+    "002304.SZ": {
+      "2023": {
+        "delta_e": 517994535.619996,
+        "identity_note": "逐项 Δ 贡献之和 = ΔE（同一份输入、同一精度）；相等只说明算对，不证明机制成立",
+        "identity_ok": true,
+        "items": [
+          {
+            "contribution": 2466669374.109996,
+            "delta": 2466669374.109996,
+            "fact_id": "wind:86b1c7d900487a59fcd180ce",
+            "metric": "gross_profit",
+            "prev_fact_id": "wind:606ea9c004482322899c2101",
+            "prev_value": 22459362921.98,
+            "value": 24926032296.089996,
+            "weight": 1
+          },
+          {
+            "contribution": -1207812892.77,
+            "delta": 1207812892.77,
+            "fact_id": "wind:c5a161a4c1e38a94ae1ea38d",
+            "metric": "selling_expense",
+            "prev_fact_id": "wind:5195dadf0b240b45f8c9fbd7",
+            "prev_value": 4179140807.85,
+            "value": 5386953700.62,
+            "weight": -1
+          },
+          {
+            "contribution": -880933187.47,
+            "delta": 880933187.47,
+            "fact_id": "wind:99fa1cb6e195b98a76d05ba6",
+            "metric": "taxes_and_surcharges",
+            "prev_fact_id": "wind:cb581154ea628357f90c9062",
+            "prev_value": 4388312404.88,
+            "value": 5269245592.35,
+            "weight": -1
+          },
+          {
+            "contribution": 171250146.69,
+            "delta": -171250146.69,
+            "fact_id": "wind:dc392c3c02b201bdd6fe4155",
+            "metric": "admin_expense",
+            "prev_fact_id": "wind:6f692e34ad693916eb5242f8",
+            "prev_value": 1935673295.75,
+            "value": 1764423149.06,
+            "weight": -1
+          },
+          {
+            "contribution": -31178904.94,
+            "delta": 31178904.94,
+            "fact_id": "wind:8ead9a0fb2fd7fcabe1f58b8",
+            "metric": "rd_expense",
+            "prev_fact_id": "wind:f95d0114d1275e82c4be556b",
+            "prev_value": 253574976.39,
+            "value": 284753881.33,
+            "weight": -1
+          }
+        ],
+        "prev_year": "2022",
+        "residual": 0.0,
+        "state": "ok",
+        "sum_of_contributions": 517994535.619996,
+        "t": "2023",
+        "top_drivers": [
+          "gross_profit",
+          "selling_expense"
+        ]
+      },
+      "2024": {
+        "delta_e": -3467429542.869996,
+        "identity_note": "逐项 Δ 贡献之和 = ΔE（同一份输入、同一精度）；相等只说明算对，不证明机制成立",
+        "identity_ok": true,
+        "items": [
+          {
+            "contribution": -3800953659.189996,
+            "delta": -3800953659.189996,
+            "fact_id": "wind:fdff330c93580794f2f6e23f",
+            "metric": "gross_profit",
+            "prev_fact_id": "wind:86b1c7d900487a59fcd180ce",
+            "prev_value": 24926032296.089996,
+            "value": 21125078636.9,
+            "weight": 1
+          },
+          {
+            "contribution": 443158639.71,
+            "delta": -443158639.71,
+            "fact_id": "wind:10297c5bde023f1871fc19f4",
+            "metric": "taxes_and_surcharges",
+            "prev_fact_id": "wind:99fa1cb6e195b98a76d05ba6",
+            "prev_value": 5269245592.35,
+            "value": 4826086952.64,
+            "weight": -1
+          },
+          {
+            "contribution": 179957474.07,
+            "delta": -179957474.07,
+            "fact_id": "wind:8918fdce8781b766d76a87cc",
+            "metric": "rd_expense",
+            "prev_fact_id": "wind:8ead9a0fb2fd7fcabe1f58b8",
+            "prev_value": 284753881.33,
+            "value": 104796407.26,
+            "weight": -1
+          },
+          {
+            "contribution": -160307153.29,
+            "delta": 160307153.29,
+            "fact_id": "wind:871b6e8b3a890b9f0a79c22a",
+            "metric": "admin_expense",
+            "prev_fact_id": "wind:dc392c3c02b201bdd6fe4155",
+            "prev_value": 1764423149.06,
+            "value": 1924730302.35,
+            "weight": -1
+          },
+          {
+            "contribution": -129284844.17,
+            "delta": 129284844.17,
+            "fact_id": "wind:3217128dcfea1114850422c7",
+            "metric": "selling_expense",
+            "prev_fact_id": "wind:c5a161a4c1e38a94ae1ea38d",
+            "prev_value": 5386953700.62,
+            "value": 5516238544.79,
+            "weight": -1
+          }
+        ],
+        "prev_year": "2023",
+        "residual": 0.0,
+        "state": "ok",
+        "sum_of_contributions": -3467429542.869996,
+        "t": "2024",
+        "top_drivers": [
+          "gross_profit",
+          "taxes_and_surcharges"
+        ]
+      },
+      "2025": {
+        "delta_e": -5555619106.390001,
+        "identity_note": "逐项 Δ 贡献之和 = ΔE（同一份输入、同一精度）；相等只说明算对，不证明机制成立",
+        "identity_ok": true,
+        "items": [
+          {
+            "contribution": -7369543960.280001,
+            "delta": -7369543960.280001,
+            "fact_id": "wind:c2404cf3aca60f1b0f27e1d8",
+            "metric": "gross_profit",
+            "prev_fact_id": "wind:fdff330c93580794f2f6e23f",
+            "prev_value": 21125078636.9,
+            "value": 13755534676.619999,
+            "weight": 1
+          },
+          {
+            "contribution": 1408469569.73,
+            "delta": -1408469569.73,
+            "fact_id": "wind:1d9b2e1aea4a38d41945d1b0",
+            "metric": "taxes_and_surcharges",
+            "prev_fact_id": "wind:10297c5bde023f1871fc19f4",
+            "prev_value": 4826086952.64,
+            "value": 3417617382.91,
+            "weight": -1
+          },
+          {
+            "contribution": 310606554.63,
+            "delta": -310606554.63,
+            "fact_id": "wind:b080f467f2e5124554231c05",
+            "metric": "selling_expense",
+            "prev_fact_id": "wind:3217128dcfea1114850422c7",
+            "prev_value": 5516238544.79,
+            "value": 5205631990.16,
+            "weight": -1
+          },
+          {
+            "contribution": 135039314.59,
+            "delta": -135039314.59,
+            "fact_id": "wind:6e7bd054be3f5c2adb369f20",
+            "metric": "admin_expense",
+            "prev_fact_id": "wind:871b6e8b3a890b9f0a79c22a",
+            "prev_value": 1924730302.35,
+            "value": 1789690987.76,
+            "weight": -1
+          },
+          {
+            "contribution": -40190585.06,
+            "delta": 40190585.06,
+            "fact_id": "wind:f7e8e06b001842be98714694",
+            "metric": "rd_expense",
+            "prev_fact_id": "wind:8918fdce8781b766d76a87cc",
+            "prev_value": 104796407.26,
+            "value": 144986992.32,
+            "weight": -1
+          }
+        ],
+        "prev_year": "2024",
+        "residual": 0.0,
+        "state": "ok",
+        "sum_of_contributions": -5555619106.390001,
+        "t": "2025",
+        "top_drivers": [
+          "gross_profit",
+          "taxes_and_surcharges"
+        ]
+      }
+    },
+    "600031.SH": {
+      "2024": {
+        "delta_e": 1154525000.0,
+        "identity_note": "逐项 Δ 贡献之和 = ΔE（同一份输入、同一精度）；相等只说明算对，不证明机制成立",
+        "identity_ok": true,
+        "items": [
+          {
+            "contribution": 1385760000.0,
+            "delta": 1385760000.0,
+            "fact_id": "wind:fc76900df17965e47d9fe5f3",
+            "metric": "gross_profit",
+            "prev_fact_id": "wind:ce13a127570ff03049eb6e94",
+            "prev_value": 19170672000.0,
+            "value": 20556432000.0,
+            "weight": 1
+          },
+          {
+            "contribution": 483974000.0,
+            "delta": -483974000.0,
+            "fact_id": "wind:a9d6e571b4f1cb61ff95e839",
+            "metric": "rd_expense",
+            "prev_fact_id": "wind:945dddb43db5d5af4476431e",
+            "prev_value": 5864595000.0,
+            "value": 5380621000.0,
+            "weight": -1
+          },
+          {
+            "contribution": -362288000.0,
+            "delta": 362288000.0,
+            "fact_id": "wind:a8e58367f9c782631ef8aebd",
+            "metric": "selling_expense",
+            "prev_fact_id": "wind:4c9d3f1bfec9c6b94f628dd1",
+            "prev_value": 5101926000.0,
+            "value": 5464214000.0,
+            "weight": -1
+          },
+          {
+            "contribution": -345468000.0,
+            "delta": 345468000.0,
+            "fact_id": "wind:110fe7eae093b3fff3640c79",
+            "metric": "admin_expense",
+            "prev_fact_id": "wind:8da9603c917195647178d6eb",
+            "prev_value": 2650981000.0,
+            "value": 2996449000.0,
+            "weight": -1
+          },
+          {
+            "contribution": -7453000.0,
+            "delta": 7453000.0,
+            "fact_id": "wind:23ac4f6303fd026f00d42a25",
+            "metric": "taxes_and_surcharges",
+            "prev_fact_id": "wind:d0b1a55c5127090ed11a8887",
+            "prev_value": 423706000.0,
+            "value": 431159000.0,
+            "weight": -1
+          }
+        ],
+        "prev_year": "2023",
+        "residual": 0.0,
+        "state": "ok",
+        "sum_of_contributions": 1154525000.0,
+        "t": "2024",
+        "top_drivers": [
+          "gross_profit",
+          "rd_expense"
+        ]
+      }
+    }
+  },
+  "readings": {
+    "002304.SZ": {
+      "caliber": {
+        "currency": "CNY",
+        "period": "年度（累计；不混入 H1/YTD/单季）",
+        "scope": "合并",
+        "unit": "元"
+      },
+      "chains": [
+        {
+          "baseline_exploration_majority": {
+            "reason": "探索期在评估层固定后才可算",
+            "sign": "未知",
+            "state": "not_assessed"
+          },
+          "baseline_profit": {
+            "delta": null,
+            "reason": "缺本期或上期归母净利润",
+            "sign": "未知",
+            "state": "unavailable"
+          },
+          "e_next": 12220655972.729996,
+          "e_t": 11702661437.11,
+          "next_year": "2023",
+          "o_t": null,
+          "prev_year": "",
+          "reason": "没有可算的上一期 E（缺项或未披露）",
+          "revenue_t": 30104896186.7,
+          "sign_o": "未知",
+          "sign_y": "正",
+          "state": "o_unavailable",
+          "t": "2022",
+          "y_op": 0.017206321935394685,
+          "y_revenue": 30104896186.7,
+          "y_state": "mature"
+        },
+        {
+          "baseline_exploration_majority": {
+            "reason": "探索期在评估层固定后才可算",
+            "sign": "未知",
+            "state": "not_assessed"
+          },
+          "baseline_profit": {
+            "base_year": "2022",
+            "delta": 638064560.86,
+            "note": "归母净利润变化方向（与 E 的合并口径不同归属）",
+            "sign": "正",
+            "state": "ok"
+          },
+          "e_next": 8753226429.86,
+          "e_prev": 11702661437.11,
+          "e_t": 12220655972.729996,
+          "next_year": "2024",
+          "o_base_revenue": 30104896186.7,
+          "o_base_revenue_fact_id": "wind:0f9a1289721f4497144048ff",
+          "o_t": 0.017206321935394685,
+          "prev_year": "2022",
+          "reason": "",
+          "revenue_t": 33126277551.51,
+          "sign_o": "正",
+          "sign_y": "负",
+          "state": "ok",
+          "t": "2023",
+          "y_op": -0.10467308128654919,
+          "y_revenue": 33126277551.51,
+          "y_state": "mature"
+        },
+        {
+          "baseline_exploration_majority": {
+            "reason": "探索期在评估层固定后才可算",
+            "sign": "未知",
+            "state": "not_assessed"
+          },
+          "baseline_profit": {
+            "base_year": "2023",
+            "delta": -3342541438.15,
+            "note": "归母净利润变化方向（与 E 的合并口径不同归属）",
+            "sign": "负",
+            "state": "ok"
+          },
+          "e_next": 3197607323.469999,
+          "e_prev": 12220655972.729996,
+          "e_t": 8753226429.86,
+          "next_year": "2025",
+          "o_base_revenue": 33126277551.51,
+          "o_base_revenue_fact_id": "wind:9aea85723c110fb5a73c9d00",
+          "o_t": -0.10467308128654919,
+          "prev_year": "2023",
+          "reason": "",
+          "revenue_t": 28876296993.56,
+          "sign_o": "负",
+          "sign_y": "负",
+          "state": "ok",
+          "t": "2024",
+          "y_op": -0.19239375144358076,
+          "y_revenue": 28876296993.56,
+          "y_state": "mature"
+        },
+        {
+          "baseline_exploration_majority": {
+            "reason": "探索期在评估层固定后才可算",
+            "sign": "未知",
+            "state": "not_assessed"
+          },
+          "baseline_profit": {
+            "base_year": "2024",
+            "delta": -4467329675.44,
+            "note": "归母净利润变化方向（与 E 的合并口径不同归属）",
+            "sign": "负",
+            "state": "ok"
+          },
+          "e_prev": 8753226429.86,
+          "e_t": 3197607323.469999,
+          "next_year": "",
+          "o_base_revenue": 28876296993.56,
+          "o_base_revenue_fact_id": "wind:b731f4156bb6b625a578aada",
+          "o_t": -0.19239375144358076,
+          "prev_year": "2024",
+          "reason": "",
+          "revenue_t": 19211057613.05,
+          "sign_o": "负",
+          "sign_y": "未知",
+          "state": "ok",
+          "t": "2025",
+          "y_op": null,
+          "y_reason": "下一同口径年度尚未取得（待数据），不填零",
+          "y_state": "pending"
+        }
+      ],
+      "conflicts": [],
+      "entity": "洋河股份",
+      "entity_id": "002304.SZ",
+      "formula": {
+        "E": "毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加",
+        "O": "(E_t − E_{t−1}) / 收入_{t−1}",
+        "Y_op": "(E_{t+1} − E_t) / 收入_t",
+        "excluded_items": [
+          "finance_expense",
+          "investment_income",
+          "fair_value_change",
+          "credit_impairment",
+          "asset_impairment",
+          "other_income",
+          "asset_disposal_income",
+          "non_operating_income",
+          "non_operating_expense",
+          "income_tax_expense",
+          "minority_interest"
+        ],
+        "not_claimed": [
+          "不是法定营业利润或 EBIT",
+          "不与归母净利润拼成同一闭合关系",
+          "不是对既有文献因子的复制"
+        ],
+        "terms": [
+          {
+            "metric": "gross_profit",
+            "weight": 1
+          },
+          {
+            "metric": "selling_expense",
+            "weight": -1
+          },
+          {
+            "metric": "admin_expense",
+            "weight": -1
+          },
+          {
+            "metric": "rd_expense",
+            "weight": -1
+          },
+          {
+            "metric": "taxes_and_surcharges",
+            "weight": -1
+          }
+        ]
+      },
+      "method_version": "q1-v1",
+      "precision": "1E-10",
+      "rejected": [],
+      "rows": {
+        "2022": {
+          "accounts_payable": 1376209527.01,
+          "accounts_receivable": 45142892.78,
+          "cash_fact_id": "wind:efe6266ad37239ff6567d4ac",
+          "components": {
+            "admin_expense": {
+              "contribution": -1935673295.75,
+              "derived_from": [],
+              "fact_id": "wind:6f692e34ad693916eb5242f8",
+              "formula_version": "",
+              "period": "2022年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 1935673295.75,
+              "weight": -1
+            },
+            "gross_profit": {
+              "contribution": 22459362921.98,
+              "derived_from": [],
+              "fact_id": "wind:606ea9c004482322899c2101",
+              "formula_version": "",
+              "period": "2022年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 22459362921.98,
+              "weight": 1
+            },
+            "rd_expense": {
+              "contribution": -253574976.39,
+              "derived_from": [],
+              "fact_id": "wind:f95d0114d1275e82c4be556b",
+              "formula_version": "",
+              "period": "2022年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 253574976.39,
+              "weight": -1
+            },
+            "selling_expense": {
+              "contribution": -4179140807.85,
+              "derived_from": [],
+              "fact_id": "wind:5195dadf0b240b45f8c9fbd7",
+              "formula_version": "",
+              "period": "2022年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 4179140807.85,
+              "weight": -1
+            },
+            "taxes_and_surcharges": {
+              "contribution": -4388312404.88,
+              "derived_from": [],
+              "fact_id": "wind:cb581154ea628357f90c9062",
+              "formula_version": "",
+              "period": "2022年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 4388312404.88,
+              "weight": -1
+            }
+          },
+          "conflicting_inputs": [],
+          "e": 11702661437.11,
+          "e_state": "computed",
+          "inventory": 17729258966.54,
+          "missing_inputs": [],
+          "net_profit": 9377865479.41,
+          "net_profit_consolidated": 9389433921.86,
+          "net_profit_fact_id": "wind:b712b5e90348d3f992d3a15d",
+          "operating_cashflow": 3647623952.19,
+          "revenue": 30104896186.7,
+          "revenue_fact_id": "wind:0f9a1289721f4497144048ff",
+          "total_assets": 67972824646.81,
+          "total_liabilities": 20448281133.0,
+          "year": "2022"
+        },
+        "2023": {
+          "accounts_payable": 1425873552.42,
+          "accounts_receivable": 3528778.28,
+          "cash_fact_id": "wind:9249426f21a89ca92da6909f",
+          "components": {
+            "admin_expense": {
+              "contribution": -1764423149.06,
+              "derived_from": [],
+              "fact_id": "wind:dc392c3c02b201bdd6fe4155",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 1764423149.06,
+              "weight": -1
+            },
+            "gross_profit": {
+              "contribution": 24926032296.089996,
+              "derived_from": [],
+              "fact_id": "wind:86b1c7d900487a59fcd180ce",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 24926032296.089996,
+              "weight": 1
+            },
+            "rd_expense": {
+              "contribution": -284753881.33,
+              "derived_from": [],
+              "fact_id": "wind:8ead9a0fb2fd7fcabe1f58b8",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 284753881.33,
+              "weight": -1
+            },
+            "selling_expense": {
+              "contribution": -5386953700.62,
+              "derived_from": [],
+              "fact_id": "wind:c5a161a4c1e38a94ae1ea38d",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5386953700.62,
+              "weight": -1
+            },
+            "taxes_and_surcharges": {
+              "contribution": -5269245592.35,
+              "derived_from": [],
+              "fact_id": "wind:99fa1cb6e195b98a76d05ba6",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5269245592.35,
+              "weight": -1
+            }
+          },
+          "conflicting_inputs": [],
+          "e": 12220655972.729996,
+          "e_state": "computed",
+          "inventory": 18954235402.25,
+          "missing_inputs": [],
+          "net_profit": 10015930040.27,
+          "net_profit_consolidated": 10020768556.47,
+          "net_profit_fact_id": "wind:e7f34153a40700eeaf28e19a",
+          "operating_cashflow": 6130220867.96,
+          "revenue": 33126277551.51,
+          "revenue_fact_id": "wind:9aea85723c110fb5a73c9d00",
+          "total_assets": 69792287455.91,
+          "total_liabilities": 17742423481.05,
+          "year": "2023"
+        },
+        "2024": {
+          "accounts_payable": 1264620215.06,
+          "accounts_receivable": 8994904.73,
+          "cash_fact_id": "wind:c1d3438b74d7ffcc578edc8a",
+          "components": {
+            "admin_expense": {
+              "contribution": -1924730302.35,
+              "derived_from": [],
+              "fact_id": "wind:871b6e8b3a890b9f0a79c22a",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 1924730302.35,
+              "weight": -1
+            },
+            "gross_profit": {
+              "contribution": 21125078636.9,
+              "derived_from": [],
+              "fact_id": "wind:fdff330c93580794f2f6e23f",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 21125078636.9,
+              "weight": 1
+            },
+            "rd_expense": {
+              "contribution": -104796407.26,
+              "derived_from": [],
+              "fact_id": "wind:8918fdce8781b766d76a87cc",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 104796407.26,
+              "weight": -1
+            },
+            "selling_expense": {
+              "contribution": -5516238544.79,
+              "derived_from": [],
+              "fact_id": "wind:3217128dcfea1114850422c7",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5516238544.79,
+              "weight": -1
+            },
+            "taxes_and_surcharges": {
+              "contribution": -4826086952.64,
+              "derived_from": [],
+              "fact_id": "wind:10297c5bde023f1871fc19f4",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 4826086952.64,
+              "weight": -1
+            }
+          },
+          "conflicting_inputs": [],
+          "e": 8753226429.86,
+          "e_state": "computed",
+          "inventory": 19732881051.73,
+          "missing_inputs": [],
+          "net_profit": 6673388602.12,
+          "net_profit_consolidated": 6666455819.96,
+          "net_profit_fact_id": "wind:b04ba3b3d91ff321af2e5f6a",
+          "operating_cashflow": 4628711237.28,
+          "revenue": 28876296993.56,
+          "revenue_fact_id": "wind:b731f4156bb6b625a578aada",
+          "total_assets": 67345265219.62,
+          "total_liabilities": 15652219365.74,
+          "year": "2024"
+        },
+        "2025": {
+          "accounts_payable": 817813067.63,
+          "accounts_receivable": 8621900.1,
+          "cash_fact_id": "wind:c468f34c85dcdb06788a398f",
+          "components": {
+            "admin_expense": {
+              "contribution": -1789690987.76,
+              "derived_from": [],
+              "fact_id": "wind:6e7bd054be3f5c2adb369f20",
+              "formula_version": "",
+              "period": "2025年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 1789690987.76,
+              "weight": -1
+            },
+            "gross_profit": {
+              "contribution": 13755534676.619999,
+              "derived_from": [],
+              "fact_id": "wind:c2404cf3aca60f1b0f27e1d8",
+              "formula_version": "",
+              "period": "2025年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 13755534676.619999,
+              "weight": 1
+            },
+            "rd_expense": {
+              "contribution": -144986992.32,
+              "derived_from": [],
+              "fact_id": "wind:f7e8e06b001842be98714694",
+              "formula_version": "",
+              "period": "2025年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 144986992.32,
+              "weight": -1
+            },
+            "selling_expense": {
+              "contribution": -5205631990.16,
+              "derived_from": [],
+              "fact_id": "wind:b080f467f2e5124554231c05",
+              "formula_version": "",
+              "period": "2025年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5205631990.16,
+              "weight": -1
+            },
+            "taxes_and_surcharges": {
+              "contribution": -3417617382.91,
+              "derived_from": [],
+              "fact_id": "wind:1d9b2e1aea4a38d41945d1b0",
+              "formula_version": "",
+              "period": "2025年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 3417617382.91,
+              "weight": -1
+            }
+          },
+          "conflicting_inputs": [],
+          "e": 3197607323.469999,
+          "e_state": "computed",
+          "inventory": 20375489436.78,
+          "missing_inputs": [],
+          "net_profit": 2206058926.68,
+          "net_profit_consolidated": 2190987361.45,
+          "net_profit_fact_id": "wind:dc1d82618ec07659ce0330d5",
+          "operating_cashflow": -763040326.79,
+          "revenue": 19211057613.05,
+          "revenue_fact_id": "wind:201e1dbd299bd008d6b50da0",
+          "total_assets": 58595944446.8,
+          "total_liabilities": 11702548968.64,
+          "year": "2025"
+        }
+      },
+      "schema": "weavemind.q1_readings/1",
+      "years": [
+        "2022",
+        "2023",
+        "2024",
+        "2025"
+      ]
+    },
+    "600031.SH": {
+      "caliber": {
+        "currency": "CNY",
+        "period": "年度（累计；不混入 H1/YTD/单季）",
+        "scope": "合并",
+        "unit": "元"
+      },
+      "chains": [
+        {
+          "baseline_exploration_majority": {
+            "reason": "探索期在评估层固定后才可算",
+            "sign": "未知",
+            "state": "not_assessed"
+          },
+          "baseline_profit": {
+            "delta": null,
+            "reason": "缺本期或上期归母净利润",
+            "sign": "未知",
+            "state": "unavailable"
+          },
+          "e_next": 6283989000.0,
+          "e_t": 5129464000.0,
+          "next_year": "2024",
+          "o_t": null,
+          "prev_year": "",
+          "reason": "没有可算的上一期 E（缺项或未披露）",
+          "revenue_t": 73221725000.0,
+          "sign_o": "未知",
+          "sign_y": "正",
+          "state": "o_unavailable",
+          "t": "2023",
+          "y_op": 0.015767519817376605,
+          "y_revenue": 73221725000.0,
+          "y_state": "mature"
+        },
+        {
+          "baseline_exploration_majority": {
+            "reason": "探索期在评估层固定后才可算",
+            "sign": "未知",
+            "state": "not_assessed"
+          },
+          "baseline_profit": {
+            "base_year": "2023",
+            "delta": 1448000000.0,
+            "note": "归母净利润变化方向（与 E 的合并口径不同归属）",
+            "sign": "正",
+            "state": "ok"
+          },
+          "e_prev": 5129464000.0,
+          "e_t": 6283989000.0,
+          "next_year": "",
+          "o_base_revenue": 73221725000.0,
+          "o_base_revenue_fact_id": "wind:28f2c61289ef1c54f9bdc553",
+          "o_t": 0.015767519817376605,
+          "prev_year": "2023",
+          "reason": "",
+          "revenue_t": 77773391000.0,
+          "sign_o": "正",
+          "sign_y": "未知",
+          "state": "ok",
+          "t": "2024",
+          "y_op": null,
+          "y_reason": "下一同口径年度尚未取得（待数据），不填零",
+          "y_state": "pending"
+        }
+      ],
+      "conflicts": [],
+      "entity": "三一重工",
+      "entity_id": "600031.SH",
+      "formula": {
+        "E": "毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加",
+        "O": "(E_t − E_{t−1}) / 收入_{t−1}",
+        "Y_op": "(E_{t+1} − E_t) / 收入_t",
+        "excluded_items": [
+          "finance_expense",
+          "investment_income",
+          "fair_value_change",
+          "credit_impairment",
+          "asset_impairment",
+          "other_income",
+          "asset_disposal_income",
+          "non_operating_income",
+          "non_operating_expense",
+          "income_tax_expense",
+          "minority_interest"
+        ],
+        "not_claimed": [
+          "不是法定营业利润或 EBIT",
+          "不与归母净利润拼成同一闭合关系",
+          "不是对既有文献因子的复制"
+        ],
+        "terms": [
+          {
+            "metric": "gross_profit",
+            "weight": 1
+          },
+          {
+            "metric": "selling_expense",
+            "weight": -1
+          },
+          {
+            "metric": "admin_expense",
+            "weight": -1
+          },
+          {
+            "metric": "rd_expense",
+            "weight": -1
+          },
+          {
+            "metric": "taxes_and_surcharges",
+            "weight": -1
+          }
+        ]
+      },
+      "method_version": "q1-v1",
+      "precision": "1E-10",
+      "rejected": [],
+      "rows": {
+        "2023": {
+          "accounts_payable": 17617741000.0,
+          "accounts_receivable": 24164729000.0,
+          "cash_fact_id": "wind:004bbab7d20ecdce1e789223",
+          "components": {
+            "admin_expense": {
+              "contribution": -2650981000.0,
+              "derived_from": [],
+              "fact_id": "wind:8da9603c917195647178d6eb",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 2650981000.0,
+              "weight": -1
+            },
+            "gross_profit": {
+              "contribution": 19170672000.0,
+              "derived_from": [],
+              "fact_id": "wind:ce13a127570ff03049eb6e94",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 19170672000.0,
+              "weight": 1
+            },
+            "rd_expense": {
+              "contribution": -5864595000.0,
+              "derived_from": [],
+              "fact_id": "wind:945dddb43db5d5af4476431e",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5864595000.0,
+              "weight": -1
+            },
+            "selling_expense": {
+              "contribution": -5101926000.0,
+              "derived_from": [],
+              "fact_id": "wind:4c9d3f1bfec9c6b94f628dd1",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5101926000.0,
+              "weight": -1
+            },
+            "taxes_and_surcharges": {
+              "contribution": -423706000.0,
+              "derived_from": [],
+              "fact_id": "wind:d0b1a55c5127090ed11a8887",
+              "formula_version": "",
+              "period": "2023年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 423706000.0,
+              "weight": -1
+            }
+          },
+          "conflicting_inputs": [],
+          "e": 5129464000.0,
+          "e_state": "computed",
+          "inventory": 19767762000.0,
+          "missing_inputs": [],
+          "net_profit": 4527451000.0,
+          "net_profit_consolidated": 4606110000.0,
+          "net_profit_fact_id": "wind:d6e2929d15e11c179d99e605",
+          "operating_cashflow": 5708220000.0,
+          "revenue": 73221725000.0,
+          "revenue_fact_id": "wind:28f2c61289ef1c54f9bdc553",
+          "total_assets": 151203358000.0,
+          "total_liabilities": 82041325000.0,
+          "year": "2023"
+        },
+        "2024": {
+          "accounts_payable": 21264967000.0,
+          "accounts_receivable": 25516530000.0,
+          "cash_fact_id": "wind:8d8f96255db6be5bf2b2c695",
+          "components": {
+            "admin_expense": {
+              "contribution": -2996449000.0,
+              "derived_from": [],
+              "fact_id": "wind:110fe7eae093b3fff3640c79",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 2996449000.0,
+              "weight": -1
+            },
+            "gross_profit": {
+              "contribution": 20556432000.0,
+              "derived_from": [],
+              "fact_id": "wind:fc76900df17965e47d9fe5f3",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 20556432000.0,
+              "weight": 1
+            },
+            "rd_expense": {
+              "contribution": -5380621000.0,
+              "derived_from": [],
+              "fact_id": "wind:a9d6e571b4f1cb61ff95e839",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5380621000.0,
+              "weight": -1
+            },
+            "selling_expense": {
+              "contribution": -5464214000.0,
+              "derived_from": [],
+              "fact_id": "wind:a8e58367f9c782631ef8aebd",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 5464214000.0,
+              "weight": -1
+            },
+            "taxes_and_surcharges": {
+              "contribution": -431159000.0,
+              "derived_from": [],
+              "fact_id": "wind:23ac4f6303fd026f00d42a25",
+              "formula_version": "",
+              "period": "2024年",
+              "restatement": "",
+              "source_hash": "7efbf3926dec2d2303301efc4bb6f1bb50290f0eb2b4cf5f5f3f23b0b409cb7b",
+              "unit": "元",
+              "value": 431159000.0,
+              "weight": -1
+            }
+          },
+          "conflicting_inputs": [],
+          "e": 6283989000.0,
+          "e_state": "computed",
+          "inventory": 19947981000.0,
+          "missing_inputs": [],
+          "net_profit": 5975451000.0,
+          "net_profit_consolidated": 6092538000.0,
+          "net_profit_fact_id": "wind:b4c9cb25f16613bd96eabcac",
+          "operating_cashflow": 14814278000.0,
+          "revenue": 77773391000.0,
+          "revenue_fact_id": "wind:25c2b053a644385a171d71d0",
+          "total_assets": 152145076000.0,
+          "total_liabilities": 79143477000.0,
+          "year": "2024"
+        }
+      },
+      "schema": "weavemind.q1_readings/1",
+      "years": [
+        "2023",
+        "2024"
+      ]
+    }
+  }
+}

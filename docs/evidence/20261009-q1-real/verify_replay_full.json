@@ -1,0 +1,42 @@
+{
+  "q1_replay": {
+    "actual_hash": "d4928113ef5aa8b8d5ee52441fc162fbc36df6ffdc19bf317128cfbb05afbf6c",
+    "expected_hash": "d4928113ef5aa8b8d5ee52441fc162fbc36df6ffdc19bf317128cfbb05afbf6c",
+    "module_hashes_ok": true,
+    "ok": true,
+    "what_this_verifies": "同一冻结产物的 Q1 读数可复算（study.replay 不含本层模块）"
+  },
+  "replay": {
+    "actual_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+    "expected_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+    "ok": true,
+    "study_id": "5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e",
+    "what_this_verifies": "同冻结输入重算同实质结果"
+  },
+  "study_dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies\\5ee4814b3721b61e",
+  "study_id": "5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e",
+  "verify": {
+    "checked": [
+      "events.json",
+      "excluded.json",
+      "financial.json",
+      "inputs.json",
+      "label_readiness.json",
+      "mechanism_cards.md",
+      "mechanism_evaluation.json",
+      "mechanism_evaluation.md",
+      "mechanisms.json",
+      "previews.json",
+      "projection_ledger.json",
+      "quant/event_returns.json",
+      "quant/quant_detail.md",
+      "quant/quant_manifest.json",
+      "research.md",
+      "risk.json",
+      "summary.md"
+    ],
+    "failed": [],
+    "ok": true,
+    "what_this_verifies": "内部冻结产物字节；不等于事实正确/策略有效/人工复核"
+  }
+}

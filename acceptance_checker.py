@@ -13,6 +13,7 @@
 
 import json
 import logging
+import os
 import re
 import itertools
 from pathlib import Path
@@ -28,11 +29,13 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 # 判定规则集版本：任何规则表/阈值/正则变更时必须 bump，
-# 并同步更新 test_p0 的指纹基线（test_acceptance_rules_fingerprint_stable
+# 并同步更新 test_acceptance_adversarial 的指纹基线（test_acceptance_rules_fingerprint_stable
 # 会因指纹变化而失败，强制走"改规则→bump 版本→更新基线"流程）。
 # 2026.10.03：官方披露站点改**精确 hostname**判定；定位/派生型来源声明改为按底稿/
 # 准入记录核验（页码+科目+行文、指标+期间+口径+derived_from）。
-ACCEPTANCE_RULES_VERSION = "2026.10.03"
+# 2026.10.16：验收阈值支持**报告体裁**（`acceptance.profiles`）——内置兜底档位表
+# `_BUILTIN_ACCEPTANCE_PROFILES` 与体裁判定线索 `_REPORT_TYPE_MARKERS` 纳入指纹。
+ACCEPTANCE_RULES_VERSION = "2026.10.16"
 
 # 纳入指纹的规则表（常量名；内部按 key/元素排序后哈希，顺序无关）
 _FINGERPRINT_RULES = (
@@ -48,6 +51,9 @@ _FINGERPRINT_RULES = (
     "_PROFILE_REPORT_CHECKS", "_CODE_GOAL_HINTS", "_DATA_GOAL_HINTS",
     # 10-03：官方披露站点白名单与派生算式→指标映射也是判定规则
     "_OFFICIAL_DISCLOSURE_HOSTS", "_DERIVED_METRIC_TERMS",
+    # 10-16：验收体裁档位的内置兜底表与体裁判定线索（config 可覆盖取值，
+    # 但**兜底值与判定线索**是规则，进指纹）
+    "_BUILTIN_ACCEPTANCE_PROFILES", "_REPORT_TYPE_MARKERS",
 )
 # 纳入指纹的关键正则（取 .pattern）
 _FINGERPRINT_PATTERNS = (
@@ -128,6 +134,7 @@ def build_acceptance_event(
         "report_sha256": str(result.get("report_sha256") or ""),
         "overall": str(result.get("overall") or ""),
         "profile": str(result.get("profile") or ""),
+        "report_type": str(result.get("report_type") or ""),
         "gaps_count": len(result.get("gaps") or []),
         "gaps": [str(g)[:200] for g in (result.get("gaps") or [])][:10],
         "checks_failed": failed,
@@ -413,9 +420,14 @@ def _amount_unit_scale(unit: str) -> float:
 
     与 `_value_scale` 的区别：这里只认**纯金额单位**——`元/吨` 是单价，
     不能与 `元` 视作同一量纲（09-28 下午复核 B-2 明说）。
+
+    `亿`/`万` 是中文财务散文里的**省元写法**（"增量占用 7.91亿"、"净利润 100.16亿"），
+    与 `亿元`/`万元` 同量纲；不认它们会把全部金额读数判"非金额"逐条跳过
+    （10-10 复核实测：洋河候选稿金额溯源 0/55 即此根因）。
     """
     u = str(unit or "").strip()
     return {"元": 1.0, "万元": 1e4, "亿元": 1e8, "万美元": 1e4, "亿美元": 1e8,
+            "亿": 1e8, "万": 1e4,
             "港元": 1.0, "万港元": 1e4, "亿港元": 1e8}.get(u, 0.0)
 
 
@@ -783,19 +795,28 @@ def _group_for_diff(inputs: dict) -> dict[str, list[dict]]:
 # 不参与任何"数字出现在来源文本里"的匹配（否则 JSON 里的数字会被当文本命中，
 # 跨公司借用就又回来了）。匹配走 `_match_derived_fact` 的 (值, 单位, 主体) 三关。
 DERIVED_FACTS_KEY = "workpaper_derived_facts_json"
-_STRUCTURED_SOURCE_KEYS = (DERIVED_FACTS_KEY,)
+# 10-08 复核 §3：**结构化**事实通道（值＋单位＋主体＋指标/期间＋算式/输入）。
+# `analysis_runs.json`＝已验证运行输出与构件；`analysis/continuation.json`＝续页/半年读数。
+# 它们与底稿派生事实同一条匹配路径；附件 Markdown **不再**作为数字来源（只作定位展示）。
+RUN_FACTS_KEY = "structured_run_facts_json"
+CONTINUATION_FACTS_KEY = "continuation_facts_json"
+_STRUCTURED_SOURCE_KEYS = (DERIVED_FACTS_KEY, RUN_FACTS_KEY, CONTINUATION_FACTS_KEY)
 
 
 def _derived_facts_of(sources: dict) -> list[dict]:
-    """从来源里取出结构化派生事实（坏 JSON 按空处理，不猜）。"""
-    raw = str((sources or {}).get(DERIVED_FACTS_KEY) or "")
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except Exception:                            # noqa: BLE001
-        return []
-    return [f for f in data if isinstance(f, dict)] if isinstance(data, list) else []
+    """从来源里取出**全部结构化事实**（坏 JSON 按空处理，不猜）。"""
+    out: list[dict] = []
+    for key in _STRUCTURED_SOURCE_KEYS:
+        raw = str((sources or {}).get(key) or "")
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:                        # noqa: BLE001
+            continue
+        if isinstance(data, list):
+            out.extend(f for f in data if isinstance(f, dict))
+    return out
 
 
 def _scale_forms(value, unit: str) -> list[str]:
@@ -817,6 +838,282 @@ def _scale_forms(value, unit: str) -> list[str]:
         out += _one_scale_form(abs(v), u)
     out.append(f"{v:g}")
     return [s for s in dict.fromkeys(out) if s]
+
+
+def _task_subject(ws: Path) -> str:
+    """本任务的**主体**（`analysis/context.json` 的契约）：结构化事实必须带它。"""
+    try:
+        ctx = json.loads((ws / "analysis" / "context.json").read_text(encoding="utf-8")) or {}
+        c = ctx.get("contract") or {}
+        return str(c.get("entity") or c.get("entity_id") or "")
+    except Exception:                            # noqa: BLE001
+        return ""
+
+
+def _years_in(text: str) -> list[int]:
+    return [int(m.group(0)) for m in re.finditer(r"(?:19|20)\d{2}", str(text or ""))]
+
+
+def _registered_output_metrics() -> set[str]:
+    """**既有注册表**里声明过的运行输出 metric（身份的唯一来源之一）。
+
+    取不到注册表（导入失败）时返回空集合，调用方按"身份未知 → 不计溯源"处理，
+    不退回"标签猜年份"的旧行为。
+    """
+    try:
+        from financial_analysis import registry as _reg
+        return {str(o.metric) for s in _reg.specs() for o in (s.outputs or ()) if o.metric}
+    except Exception:                                # noqa: BLE001 - 注册表读不到=没有身份
+        return set()
+
+
+def _registered_component_ids() -> set[str]:
+    """运行**构件**的合法 id：注册模型声明的 `component_ids` ＋ 算子科目 slug。
+
+    科目 slug 从算子现役的 `LINE_ITEMS` 读（不另抄一份中文表）：`taxes_and_surcharges`
+    这类"毛利线以下科目"的身份因此与注册实现同源。
+    """
+    ids: set[str] = set()
+    try:
+        from financial_analysis import registry as _reg
+        for s in _reg.specs():
+            for group in dict(getattr(s, "component_ids", {}) or {}).values():
+                ids.update(str(x) for x in (group or ()))
+    except Exception:                                # noqa: BLE001
+        pass
+    try:
+        from financial_analysis.operators.operating_drivers import LINE_ITEMS
+        ids.update(str(slug) for slug, _label, _sign in LINE_ITEMS)
+    except Exception:                                # noqa: BLE001
+        pass
+    return ids
+
+
+def _period_label_of_run(run: dict, out: dict) -> str:
+    """运行的**输入期间**（权威身份）→ `"2023年→2024年"` 这类可读标签。
+
+    顺序：输出自己的 `input_periods` → 运行的 `diagnostics.periods` → 输出 `output_period`
+    里的年份**只作后备**。全部取不到 → 空串（调用方按"期间未知 → 不计溯源"，不再猜）。
+    """
+    labels: list[str] = []
+    for raw in (out.get("input_periods") or ()):
+        s = str(raw or "").strip()
+        if s:
+            labels.append(s if re.search(r"(年|H\d|Q\d)", s) else f"{s}年")
+    if not labels:
+        diag = out.get("diagnostics") or {}
+        for raw in (diag.get("periods") or ()):
+            s = str(raw or "").strip()
+            if s:
+                labels.append(s if re.search(r"(年|H\d|Q\d)", s) else f"{s}年")
+    if not labels:
+        # 后备：输出自己的期间标签里的年份（只是最后手段，不冒充期间已知）
+        yrs = _years_in(str(out.get("output_period") or ""))
+        labels = [f"{y}年" for y in yrs]
+    return "→".join(dict.fromkeys(labels))
+
+
+def _run_output_facts(ws: Path) -> list[dict]:
+    """`analysis_runs.json` → **结构化**事实（每条输出＋它的构件）。
+
+    准入（不是装饰）：运行 `status=validated`；数值是数字；单位非空；指标与期间**从既有
+    注册表与运行输入继承**；带 `formula` 与 `inputs`。主体取自本任务契约。
+
+    10-08 复核 §3 的两处修正（旧实现的反例：实际 ZIP 里
+    `net_profit_change_detail:income_tax_expense` 的 7.2044377088 亿元被写成 period 空，
+    于是同年的"所得税费用"与"营业收入"都能借它）：
+
+    1. **期间不再从标签猜年份**：用运行的输入期间（`input_periods`/诊断 `periods`），
+       取不到就**不计入**结构化可溯源（"未知不计溯源"）；
+    2. **指标继承注册身份**：输出 metric 必须在注册模型声明的输出清单里、构件 id 必须是
+       声明的构件/科目 slug；未知身份**不计入**。跨指标借用由 `_derived_body_semantics`
+       按指标键拒绝（"所得税费用"不再能支持"营业收入"）。
+    """
+    p = ws / "analysis_runs.json"
+    if not p.is_file():
+        p = ws / "project" / "analysis_runs.json"
+    if not p.is_file():
+        return []
+    data = json.loads(p.read_text(encoding="utf-8")) or {}
+    if isinstance(data, list):
+        runs = data
+    else:
+        runs = data.get("runs")
+        if isinstance(runs, dict):
+            runs = list(runs.values())
+        if not isinstance(runs, list):
+            # 落盘形状也可能是 `{run_id: {…}}`：只收**带 outputs 的 run 对象**
+            runs = [v for v in data.values() if isinstance(v, dict) and "outputs" in v]
+    subject = _task_subject(ws)
+    known_metrics = _registered_output_metrics()
+    known_components = _registered_component_ids()
+    out: list[dict] = []
+    for r in runs:
+        if not isinstance(r, dict) or str(r.get("status") or "") != "validated":
+            continue
+        rid = str(r.get("run_id") or r.get("model_id") or "")
+        for o in (r.get("outputs") or []):
+            if not isinstance(o, dict):
+                continue
+            value, unit = o.get("value"), str(o.get("unit") or "")
+            if not isinstance(value, (int, float)) or not unit:
+                continue
+            metric = str(o.get("metric") or "")
+            # 身份未知（未注册的输出 metric）→ 不计入结构化可溯源
+            if not metric or (known_metrics and metric not in known_metrics):
+                continue
+            period = _period_label_of_run(r, o)
+            if not period:
+                continue                     # 期间未知：不计入（旧实现留空 = 谁都能借）
+            comps = [c for c in (o.get("components") or []) if isinstance(c, dict)]
+            ids = [str(c.get("component_id") or "") for c in comps] or [rid]
+            label = str(o.get("label") or metric)
+            base = {"subject": subject, "metric": metric,
+                    "period": period, "currency": "CNY", "caliber": "合并",
+                    "formula": "，".join(f"{c.get('component_id')}={c.get('value')}"
+                                        for c in comps) or f"run:{rid}",
+                    "inputs": ids, "label": label[:80], "run_id": rid}
+            out.append(dict(base, kind="run_output", value=float(value), unit=unit))
+            for c in comps:
+                cv = c.get("value")
+                cid = str(c.get("component_id") or "")
+                if not isinstance(cv, (int, float)) or not cid:
+                    continue
+                # 构件身份同样要认识（未知构件不计溯源）
+                if known_components and cid not in known_components:
+                    continue
+                out.append(dict(base, kind="run_component",
+                                metric=f"{metric}:{cid}",
+                                value=float(cv), unit=str(c.get("unit") or unit)))
+        # **情景目标**（读者卡上的"目标归母净利"）：它由这一次运行声明（默认＝上一期归母
+        # 净利，或使用者给定），是这次计算的身份之一——不给它一条结构化事实，卡上的目标数
+        # 就只能是"没有运行背书的数字"。只收**声明过**的目标（`thresholds.target_net_profit`），
+        # 不猜、不补。
+        for o in (r.get("outputs") or []):
+            if not isinstance(o, dict):
+                continue
+            th = (o.get("diagnostics") or {}).get("thresholds") or {}
+            tgt = th.get("target_net_profit")
+            if isinstance(tgt, bool) or not isinstance(tgt, (int, float)):
+                continue
+            _u = str(o.get("unit") or "")
+            if not _u or not _rper:
+                break
+            out.append({"kind": "run_target", "subject": subject,
+                        "metric": "scenario_target_net_profit", "period": _rper,
+                        "value": float(tgt), "unit": _u, "currency": "CNY",
+                        "caliber": "合并",
+                        "formula": f"run:{rid} 声明的目标（{th.get('target_source') or '—'}）",
+                        "inputs": [rid], "label": "情景目标归母净利", "run_id": rid})
+            break
+        # **使用者设定的天数假设**也进结构化事实（10-08 §14）：韧性卡上的"Δ回款 +15 天"
+        # 必须能回溯到**它那一次运行**的参数，而不是凭空一个数。只收**天数维度**的参数
+        # （`*_days_delta` / `days_in_year`）：比率型参数（0.05 与 "+5.00%"）要换算量纲，
+        # 留在参数表里读，不在这一层做猜测。
+        _first = next((o for o in (r.get("outputs") or []) if isinstance(o, dict)), {})
+        _rper = _period_label_of_run(r, _first)
+        if _rper:
+            for k, v in sorted(dict(r.get("params") or {}).items()):
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    continue
+                if not (str(k).endswith("_days_delta") or str(k) == "days_in_year"):
+                    continue
+                out.append({"kind": "run_param", "subject": subject,
+                            "metric": f"param:{k}", "period": _rper,
+                            "value": float(v), "unit": "天", "currency": "CNY",
+                            "caliber": "合并",
+                            "formula": f"run.params[{k}]（使用者设定，非披露事实）",
+                            "inputs": [rid], "label": f"使用者设定参数：{k}",
+                            "run_id": rid})
+    return out
+
+
+def _continuation_output_facts(ws: Path) -> list[dict]:
+    """`analysis/continuation.json` → **结构化**事实（续页/半年读数，两期各一组）。
+
+    准入：读数来自**已冻结材料**的表格抽取（`snapshot`/`readings_of`），每条带来源
+    定位；这里只做"值＋单位＋主体＋指标/期间＋算式/输入"的结构化落库，不把续页
+    Markdown 当来源。
+    """
+    p = ws / "analysis" / "continuation.json"
+    if not p.is_file():
+        return []
+    page = json.loads(p.read_text(encoding="utf-8")) or {}
+    subject = _task_subject(ws)
+    out: list[dict] = []
+
+    def _add(metric: str, value, unit: str, period: str, locator: str,
+             *, formula: str = "", label: str = "") -> None:
+        if not isinstance(value, (int, float)) or not unit:
+            return
+        out.append({"kind": "continuation_reading", "subject": subject,
+                    "metric": metric, "period": str(period or ""),
+                    "value": float(value), "unit": unit, "currency": "CNY",
+                    "caliber": "合并", "formula": formula or f"来源：{locator or '—'}",
+                    "inputs": [locator] if locator else [f"continuation:{metric}"],
+                    "label": (label or metric)[:80], "locator": str(locator or "")})
+
+    for side, snap in (("later", (page.get("later") or {})),
+                       ("earlier", (page.get("earlier") or {}))):
+        r = ((page.get("readings") or {}).get(side) or {})
+        if not r:
+            continue
+        src = (snap.get("source") or {})
+        labels = [str(x) for x in (src.get("period_labels") or [])]
+        cur_p = str(r.get("cur_period") or (labels[-1] if labels else ""))
+        prev_p = str(r.get("prev_period") or (labels[0] if len(labels) > 1 else ""))
+        cur_p = cur_p or (f"{r.get('periods', ['', ''])[-1]}" if r.get("periods") else "")
+        # 期间标签可能是年份数字（2025）——统一写成"2025H1"/"2024年"这类可读标签
+        if cur_p and cur_p.isdigit():
+            cur_p = f"{cur_p}H1" if str(r.get("period_kind")) == "half" else f"{cur_p}年"
+        if prev_p and prev_p.isdigit():
+            prev_p = f"{prev_p}H1" if str(r.get("period_kind")) == "half" else f"{prev_p}年"
+        for metric, cur_k, prev_k, yoy_k, unit, loc_k in (
+                ("sales_volume", "volume_cur", "volume_prev", "volume_yoy", "吨",
+                 "volume_locator"),
+                ("production_volume", None, None, "production_yoy", "吨", "volume_locator"),
+                ("inventory_volume", "inventory_cur", "inventory_prev", "inventory_yoy",
+                 "吨", "inventory_locator"),
+                ("net_profit", "net_profit_cur", "net_profit_prev", "net_profit_yoy", "元",
+                 "profit_locator"),
+                ("income_tax_expense", "tax_cur", "tax_prev", "tax_yoy", "元", "tax_locator"),
+                ("taxes_and_surcharges", "surcharge_cur", "surcharge_prev", "surcharge_yoy",
+                 "元", "surcharge_locator")):
+            loc = str(r.get(loc_k) or "")
+            if cur_k and r.get(cur_k) is not None:
+                _add(metric, r.get(cur_k), unit, cur_p, loc)
+            if prev_k and r.get(prev_k) is not None:
+                _add(metric, r.get(prev_k), unit, prev_p, loc)
+            if r.get(yoy_k) is not None:
+                _add(f"{metric}_yoy", r.get(yoy_k), "%",
+                     f"{prev_p}→{cur_p}" if prev_p else cur_p, loc)
+        # 变化量/贡献（两条读数相减得到的同口径读数）
+        for metric, key, unit, loc_k in (
+                ("net_profit_change", "profit_change", "元", "profit_locator"),
+                ("change_in_net_profit", "cash_np", "元", ""),
+                ("change_in_working_capital", "cash_wc", "元", ""),
+                ("operating_cashflow_change", "ocf_change", "元", ""),
+                ("non_cash_adjustments_change", "cash_noncash", "元", ""),
+                ("income_tax_contribution", "tax_income_contribution", "元", "tax_locator"),
+                ("surcharge_contribution", "surcharge_contribution", "元", "surcharge_locator"),
+                ("tax_contribution", "tax_contribution", "元", "tax_locator")):
+            if r.get(key) is None:
+                continue
+            _add(metric, r.get(key), unit,
+                 f"{prev_p}→{cur_p}" if prev_p else cur_p, str(r.get(loc_k) or ""),
+                 formula=f"{cur_p} − {prev_p}" if prev_p else "")
+        for key, metric in (("payable", "operating_payable_increase"),
+                            ("receivable", "operating_receivable_decrease"),
+                            ("inventory", "inventory_decrease")):
+            row = (r.get("wc_lines") or {}).get(key) or {}
+            loc = str(row.get("locator") or "")
+            for field, period, formula in (("cur", cur_p, ""),
+                                           ("prev", prev_p, ""),
+                                           ("delta", f"{prev_p}→{cur_p}", "本期 − 上期")):
+                if row.get(field) is None:
+                    continue
+                _add(f"{metric}_{field}", row.get(field), "元", period, loc, formula=formula)
+    return out
 
 
 def _workpaper_source_texts(workspace) -> dict[str, str]:
@@ -1012,10 +1309,19 @@ _INDICATOR_KEY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("net_profit", ("归母净利润", "归母净利", "净利润", "净利")),
     ("gross_profit", ("毛利润", "毛利")),
     ("operating_cashflow", ("经营活动现金流", "经营现金流", "现金流")),
+    # 10-08 复核 §3 的**同年错指标反例**：`net_profit_change_detail:income_tax_expense`
+    # 的 7.2044 亿元曾被写成 period 空，于是"2024 年所得税费用 7.20 亿元"与
+    # "2024 年营业收入 7.20 亿元"都能借它。把税费科目接进同一张指标键表后，
+    # 写"营业收入"的子句与"所得税费用"的事实指标键不同 → 直接拒绝。
+    ("income_tax_expense", ("所得税费用", "所得税")),
+    ("taxes_and_surcharges", ("税金及附加",)),
 )
 _METRIC_KEY_BY_SLUG = {
     "revenue": "revenue", "net_profit": "net_profit", "gross_profit": "gross_profit",
     "operating_cashflow": "operating_cashflow",
+    # 与上面同一批税费科目（slug 与 `operating_drivers.LINE_ITEMS` 同源）
+    "income_tax_expense": "income_tax_expense",
+    "taxes_and_surcharges": "taxes_and_surcharges",
 }
 
 
@@ -1031,10 +1337,17 @@ def _body_indicator_key(clause: str, at: int) -> str:
 
 
 def _fact_metric_key(metric: str) -> str:
-    """派生事实的指标 slug → 结构化指标键（复合/未知指标返回空串 = 不据此否决）。"""
+    """派生事实的指标 slug → 结构化指标键（复合/未知指标返回空串 = 不据此否决）。
+
+    10-08：**复合指标取构件身份**——`net_profit_change_detail:income_tax_expense` 说的是
+    "所得税费用"这一科目，不是父输出的口径；取父串会让这条事实没有指标语义，
+    同值的"营业收入"就能借走它。
+    """
     m = str(metric or "")
     if not m:
         return ""
+    if ":" in m:
+        m = m.split(":", 1)[1]
     for suffix in ("_yoy", "_change"):
         if m.endswith(suffix):
             m = m[:-len(suffix)]
@@ -1060,6 +1373,97 @@ def _derived_body_semantics(n: dict, clause: str, at: int, f: dict) -> str:
     if year and f_years and int(year) not in f_years:
         return (f"正文写的是 {year} 年，事实期间是 {f.get('period')}：不得写到别的年份上")
     return ""
+
+
+def _comparable_scales(report_unit: str, fact_unit: str) -> tuple[float, float]:
+    """报告侧/事实侧的缩放系数；任一侧为 0 表示**量纲不可比**。
+
+    金额之间允许元/万元/亿元换算；百分比与百分比可比但**不得**与金额互认；
+    非金额非百分比的单位（吨/天/个百分点/股…）要求**单位字符串一致**——
+    否则"789 吨"会借到"789 元"的事实。
+    """
+    ru, fu = str(report_unit or "").strip(), str(fact_unit or "").strip()
+    if not ru or not fu:
+        return 0.0, 0.0
+    if _pct_unit(ru) != _pct_unit(fu):
+        return 0.0, 0.0
+    if _pct_unit(ru):
+        return 1.0, 1.0
+    ra, fa = _amount_unit_scale(ru), _amount_unit_scale(fu)
+    if ra and fa:
+        return ra, fa
+    if ra or fa:
+        return 0.0, 0.0
+    return (1.0, 1.0) if ru == fu else (0.0, 0.0)
+
+
+def _unit_family_in_clause(fact_unit: str, clause: str) -> bool:
+    """事实的单位**家族**是否出现在子句里（无单位数字的匹配用）。
+
+    原来只认"单位串字面出现"：`%` 能对上 `%`，但**百分点**的事实写 `%（pp）`，
+    正文按读者口径写 `+11.58pp` → 字面不同、被当成"没说单位"而拒绝。这里只补一个
+    百分点别名（`pp` ↔ `个百分点` ↔ `%（pp）`），不做量纲猜测。
+    """
+    fu = str(fact_unit or "").strip()
+    c = str(clause or "")
+    if not fu:
+        return False
+    if fu in c:
+        return True
+    if ("pp" in fu or "百分点" in fu) and ("pp" in c or "个百分点" in c):
+        return True
+    return False
+
+
+def _match_derived_fact_bare(n: dict, report: str, facts: list[dict],
+                             *, goal: str = "") -> str | None:
+    """**无单位**数字与结构化事实的匹配（吨/天/股这类抽取器不认的单位）。
+
+    比有单位那条更严：值一致 **且事实的单位串必须出现在该数字所在子句里**
+    （"78,192.32 吨"对得上 unit=吨 的事实；"78,192.32"凭空一个数对不上），
+    再走主体与指标/期间相容校验。
+    """
+    try:
+        v = float(n.get("value"))
+    except (TypeError, ValueError):
+        return None
+    _start = int(n.get("pos") or 0)
+    clause = _clause_of(str(report or ""), _start, _start + len(str(n.get("raw") or "")))
+    for f in facts:
+        try:
+            fv = float(f.get("value"))
+        except (TypeError, ValueError):
+            continue
+        fu = str(f.get("unit") or "").strip()
+        if not fu or _amount_unit_scale(fu) or (
+                fu.endswith("%") and "pp" not in fu and "百分点" not in fu):
+            continue                      # 金额/百分比的事实不走这条（它们有单位通道）
+        if not _unit_family_in_clause(fu, clause):
+            continue
+        if not _close(abs(v), abs(fv)):
+            continue
+        f_subject = str(f.get("subject") or "")
+        # 词法键要带 goal：裸专名（"宁德时代本期销售量…"）没有"公司/股份"后缀，
+        # 不带 goal 就抽不出主体，跨公司同值会被放行。
+        rep_subject = _promotion_subject(clause, goal=goal)
+        if rep_subject and f_subject:
+            if _subjects_conflict(rep_subject, f_subject):
+                continue
+            _agree = (rep_subject == f_subject or rep_subject in f_subject
+                      or f_subject in rep_subject
+                      or _shares_entity(rep_subject, f_subject)
+                      or (goal and _shares_entity(rep_subject, str(goal))))
+            if not _agree:
+                continue
+        if _derived_body_semantics(n, clause, 0, f):
+            continue
+        return "workpaper_derived"
+    return None
+
+
+def _pct_unit(unit) -> bool:
+    """单位是不是百分比（量纲判定用：金额与百分比不得互认）。"""
+    return str(unit or "").strip().endswith("%")
 
 
 def _match_derived_fact(n: dict, report: str, facts: list[dict],
@@ -1098,9 +1502,12 @@ def _match_derived_fact(n: dict, report: str, facts: list[dict],
             fv = float(f.get("value"))
         except (TypeError, ValueError):
             continue
-        f_scale = _amount_unit_scale(str(f.get("unit") or "")) or (
-            1.0 if str(f.get("unit") or "").endswith("%") else 0.0)
-        if not f_scale or abs(f_scale - scale) > 1e-9:
+        # **量纲一致**即可，不要求缩放系数完全相等：金额 vs 百分比不得互认（否则"营收同比
+        # −12.83%"能被某个金额事实借走），但**同一量纲内**允许元/万元/亿元换算——正文按读者
+        # 口径写"33.43亿元"、底稿按"元"记，是本项目的既定等价写法（`_num_forms` 同一约定）。
+        # 10-08：非金额非百分比（吨/天/个百分点）要求单位串一致，见 `_comparable_scales`。
+        scale, f_scale = _comparable_scales(unit, str(f.get("unit") or ""))
+        if not scale or not f_scale:
             continue
         if not _close(abs(v) * scale, abs(fv) * f_scale):
             continue
@@ -1159,6 +1566,23 @@ def _collect_sources(workspace) -> dict[str, str]:
         if sd.exists():
             src["structured_data"] = sd.read_text(encoding="utf-8")
     except Exception:
+        pass
+    # 10-08 复核 §3：**附件保存不是附件自证**。新增的 `frozen_attachment` 曾把附件 Markdown
+    # 全文当普通来源，于是"把 2024 年税费 11.64 亿写成 2025 年营业收入 11.64 亿元（合并）"
+    # 也能判可溯源（实际 ZIP 内已独立复现，见 `attachment_probe.json`）。现在：
+    # 附件继续承载完整解释/原句/定位，但**不再是数字来源**；数字回到结构化事实/派生准入
+    # （底稿派生、已验证运行输出与构件、续页/半年读数），逐条带主体/指标/期间/单位/算式。
+    try:
+        _run_facts = _run_output_facts(ws)
+        if _run_facts:
+            src[RUN_FACTS_KEY] = json.dumps(_run_facts, ensure_ascii=False)
+    except Exception:                            # noqa: BLE001 - 坏产物不进来源
+        pass
+    try:
+        _cont_facts = _continuation_output_facts(ws)
+        if _cont_facts:
+            src[CONTINUATION_FACTS_KEY] = json.dumps(_cont_facts, ensure_ascii=False)
+    except Exception:                            # noqa: BLE001
         pass
     # 结构化财务（东财/SEC/巨潮适配器的落盘产物）：这是**已抓取并留档**的权威来源，
     # 必须参与溯源。此前只认 clean_chart_data.json——而该文件要在清洗步骤跑过之后
@@ -2566,7 +2990,9 @@ def _constant_role_ok(expr: str, tok: str) -> bool:
 
 
 _INDICATOR_WORDS = ("营业收入", "归母净利润", "净利润", "毛利率", "收入", "营收",
-                    "经营现金流", "现金流", "资本支出", "每股收益", "EPS", "毛利")
+                    "经营现金流", "现金流", "资本支出", "每股收益", "EPS", "毛利",
+                    # 与 `_INDICATOR_KEY_GROUPS` 的税费科目同一批词（同一处身份表）
+                    "所得税费用", "所得税", "税金及附加")
 
 
 def _clause_span(text: str, start: int, end: int) -> tuple[int, int]:
@@ -2915,6 +3341,202 @@ def traceability_domain(goal: str) -> str:
     return "research"
 
 
+# ─────────────────────────────────────────────
+# 报告体裁档位（acceptance.profiles）
+# ─────────────────────────────────────────────
+
+# 内置兜底档位表：`config.json` 的 `acceptance` 段缺失/不可解析时使用。
+# 数值以 docs/arch_task4_acceptance_config.md 为准（**不得**在此自行调整；要改先改文档）。
+# - traceability：按**溯源域**取阈值（本表只给 financial/research 两轴；crypto/macro/news
+#   仍用 `_TRACEABILITY_THRESHOLDS` 的域阈值，不被体裁改写）；
+# - freshness_required=False（事件研究）：这类报告天然没有"数据截止"块，改判
+#   freshness_alternatives 词表，命中即通过、未命中只提示不判失败；
+# - placeholder_max：financial 域报告占位标记达到该数量才判交付物不完整（原硬编码 3）。
+_BUILTIN_ACCEPTANCE_PROFILES: dict[str, dict] = {
+    "annual_report": {
+        "traceability": {"financial": 0.7, "research": 0.5},
+        "freshness_required": True,
+        "placeholder_max": 3,
+    },
+    "semi_annual": {
+        "traceability": {"financial": 0.55, "research": 0.4},
+        "freshness_required": True,
+        "placeholder_max": 5,
+    },
+    "event_study": {
+        "traceability": {"financial": 0.5, "research": 0.3},
+        "freshness_required": False,
+        "freshness_alternatives": ["公告日", "事件日", "披露日"],
+        "placeholder_max": 5,
+    },
+}
+_BUILTIN_DEFAULT_PROFILE = "annual_report"
+
+# 报告体裁线索（目标文本层的兜底判定，顺序敏感）：
+# 事件研究 > 半年报 > 年报——"半年报并购公告"按事件研究判（时效锚点是公告日）。
+_REPORT_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("event_study", (
+        "并购", "收购", "回购", "要约", "重组", "公告", "减持", "增持", "中标",
+        "股权激励", "重大事项", "事件研究", "定增", "分红", "资产出售",
+    )),
+    ("semi_annual", ("半年报", "半年度", "中报", "中期报告", "半年", "h1")),
+    ("annual_report", ("年报", "年度报告", "annual report")),
+)
+
+# 任务元数据里可能显式声明体裁的键（顶层，或下列容器内）：声明了就优先采信，
+# 但取值必须是配置里存在的档位名，否则继续按目标文本判定。
+_REPORT_TYPE_META_KEYS = ("report_type", "acceptance_report_type", "report_genre")
+_REPORT_TYPE_META_CONTAINERS = ("run_options", "research_request", "task_meta")
+
+# 配置文件位置：`WEAVEMIND_CONFIG` 优先（与 net_policy 同口径），否则仓库根的 config.json；
+# 缺失/损坏时回退随包模板 config.example.json，再回退内置兜底表。
+_CONFIG_PATH = Path(os.environ.get("WEAVEMIND_CONFIG")
+                    or (Path(__file__).resolve().parent / "config.json"))
+_CONFIG_TEMPLATE_PATH = Path(__file__).resolve().parent / "config.example.json"
+
+
+def _read_config_file(path: Path) -> dict:
+    """读一个配置文件（失败返回空 dict：验收不能因为配置坏了而崩）。"""
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:                     # noqa: BLE001 - 配置坏了按"没配"处理
+        logger.warning("验收配置读取失败（%s）：%s", path.name, str(exc)[:120])
+    return {}
+
+
+def _merge_acceptance_profile(base: dict, override: dict) -> dict:
+    """档位合并：override 的键优先，缺失键回落内置（=文档值）；traceability 逐轴合并。"""
+    out = dict(base)
+    for key, value in override.items():
+        if key == "traceability" and isinstance(value, dict):
+            axes = dict(base.get("traceability") or {})
+            axes.update(value)
+            out["traceability"] = axes
+        else:
+            out[key] = value
+    return out
+
+
+def load_acceptance_profiles() -> tuple[dict, str]:
+    """当前生效的体裁档位表与默认档位名。
+
+    来源：`config.json` 的 `acceptance` 段 → 随包模板 `config.example.json` →
+    内置兜底表。配置是**部署状态**不是规则集：它不进 `rules_fingerprint()`
+    （指纹锚定判定规则与兜底值），所以同一份结果仍按 rules_version 对账，
+    而阈值可按部署调整。
+    """
+    cfg = _read_config_file(_CONFIG_PATH)
+    if not cfg.get("acceptance"):
+        cfg = _read_config_file(_CONFIG_TEMPLATE_PATH)
+    block = cfg.get("acceptance")
+    block = block if isinstance(block, dict) else {}
+    raw = block.get("profiles")
+    raw = raw if isinstance(raw, dict) else {}
+    # 内置档位表是地板：部署可以覆盖某个档位的部分键、追加新档位，
+    # 但没写到的档位仍按内置（文档）值解析——"键不存在回落 default_profile"
+    # 与"部署没配的档位回落文档默认"同时成立。
+    profiles: dict[str, dict] = {k: dict(v) for k, v in _BUILTIN_ACCEPTANCE_PROFILES.items()}
+    for name, prof in raw.items():
+        if not isinstance(prof, dict):
+            continue
+        base = profiles.get(str(name)) or {}
+        profiles[str(name)] = _merge_acceptance_profile(base, prof)
+    default = str(block.get("default_profile") or "").strip()
+    if default not in profiles:
+        default = (_BUILTIN_DEFAULT_PROFILE
+                   if _BUILTIN_DEFAULT_PROFILE in profiles else sorted(profiles)[0])
+    return profiles, default
+
+
+def report_type_from_meta(meta, profiles: dict | None = None) -> str:
+    """任务元数据里**显式声明**的体裁（未声明/取值不是已知档位 → 空串，不猜）。"""
+    if not isinstance(meta, dict):
+        return ""
+    valid = set(profiles or _BUILTIN_ACCEPTANCE_PROFILES)
+
+    def _pick(src) -> str:
+        if not isinstance(src, dict):
+            return ""
+        for key in _REPORT_TYPE_META_KEYS:
+            val = str(src.get(key) or "").strip()
+            if val and val in valid:
+                return val
+        return ""
+
+    hit = _pick(meta)
+    if hit:
+        return hit
+    for container in _REPORT_TYPE_META_CONTAINERS:
+        hit = _pick(meta.get(container))
+        if hit:
+            return hit
+    return ""
+
+
+def resolve_report_type(goal: str = "", meta=None,
+                        profiles: dict | None = None,
+                        default: str | None = None) -> str:
+    """判定报告体裁：任务元数据显式声明 > 目标文本线索 > 默认档位。
+
+    为什么需要元数据分支：**当前任务链路没有"报告体裁"字段**（`research_request`
+    只有公司/期间/口径，`run_options` 只有 auto_run/template_steps 这类选项，
+    `task_history` 无 report_type 列）。所以这里按"将来声明了就优先采信、没声明
+    就按目标文本判定"实现；`delivery_pipeline` 会把任务行元数据传进来。
+    """
+    if profiles is None or default is None:
+        _profiles, _default = load_acceptance_profiles()
+        profiles = profiles or _profiles
+        default = default or _default
+    hit = report_type_from_meta(meta, profiles)
+    if hit:
+        return hit
+    g = str(goal or "").lower()
+    for name, markers in _REPORT_TYPE_MARKERS:
+        if name in profiles and any(m in g for m in markers):
+            return name
+    return str(default)
+
+
+def acceptance_profile(report_type: str | None = None) -> tuple[str, dict]:
+    """取生效体裁与其档位：未知/未声明体裁回落到 `default_profile`。"""
+    profiles, default = load_acceptance_profiles()
+    name = str(report_type or "").strip() or default
+    prof = profiles.get(name)
+    if not isinstance(prof, dict):
+        name = default
+        prof = profiles.get(default) or {}
+    return name, prof
+
+
+def traceability_threshold_for(domain: str | None, profile: dict | None) -> float:
+    """按溯源域从体裁档位取阈值；档位没给的域沿用 `_TRACEABILITY_THRESHOLDS`。
+
+    只有 financial / research 两轴受体裁影响（档位表就这两个轴）；crypto/macro/news
+    的域阈值不是"报告体裁"问题，保持原值——改的是阈值**来源**，不是判定规则。
+    """
+    axes = (profile or {}).get("traceability")
+    axes = axes if isinstance(axes, dict) else {}
+    dom = str(domain or "")
+    axis = "financial" if dom == "financial" else ("research" if dom == "research" else "")
+    if axis and axes.get(axis) is not None:
+        try:
+            return float(axes[axis])
+        except (TypeError, ValueError):
+            pass
+    return float(_TRACEABILITY_THRESHOLDS.get(dom, 0.7))
+
+
+def _profile_int(profile: dict | None, key: str, default: int) -> int:
+    """档位里的整数项（缺失/非法 → default）。"""
+    try:
+        return int((profile or {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _subject_of(text: str) -> str:
     """从一段文本里取**主体**（公司/实体名）；取不到返回空串（=未知）。
 
@@ -3117,6 +3739,12 @@ def check_number_traceability(
             _hit_fact = _match_derived_fact(n, report, _derived_facts, goal=goal)
             if _hit_fact is not None:
                 hit = _hit_fact
+        if hit is None and not n.get("unit") and _derived_facts:
+            # 抽取器认不出单位的读数（"78,192.32 吨"）：走**更严**的无单位匹配
+            # （值一致 + 事实单位必须出现在子句里 + 主体/指标/期间相容）。
+            _hit_bare = _match_derived_fact_bare(n, report, _derived_facts, goal=goal)
+            if _hit_bare is not None:
+                hit = _hit_bare
         if clean_text:
             # clean_chart_data 命中**同样要过主体归属**：此前它优先接受并直接定案，
             # 绕过了后面的子句主体筛选——于是"clean 里是 B 公司的数字"也能给
@@ -4402,14 +5030,16 @@ _NUMERIC_REQUIREMENT_KEYWORDS = (
 
 def check_deliverable_completeness(
     report: str, goal: str, domain: str | None = None,
+    placeholder_max: int = 3,
 ) -> dict:
     """交付物完整性检查：从 goal 提取关键交付要求（列表/前十/排名/表格类
     与数字要求），检查报告是否被数据缺失占位标记填满、是否缺少必需表格。
 
     规则：
-    - financial 域报告含未披露/未获取/待补充/数据缺失等占位标记 ≥3 处 → FAIL；
-      非金融域（行业调研/新闻/宏观/加密货币等）豁免该惩罚——诚实披露
-      "数据缺失"本身就是交付质量，数字溯源仍由 number_traceability 把关，
+    - financial 域报告含未披露/未获取/待补充/数据缺失等占位标记 ≥`placeholder_max`
+      处 → FAIL（`placeholder_max` 来自报告体裁档位：年报 3、半年报/事件研究 5；
+      此前是硬编码 3）；非金融域（行业调研/新闻/宏观/加密货币等）豁免该惩罚——
+      诚实披露"数据缺失"本身就是交付质量，数字溯源仍由 number_traceability 把关，
       避免"调研任务必然 SUCCESS_WITH_ISSUES"的结构性双重惩罚；
     - goal 要求列表/前十/排名且报告无任何表格，或表格内容全为占位 → FAIL；
     - 正常完整报告（含真实数据表格/无列表要求）→ pass。
@@ -4417,6 +5047,10 @@ def check_deliverable_completeness(
     r = str(report or "")
     g = str(goal or "").lower()
     domain = domain or traceability_domain(goal)
+    try:
+        _ph_max = max(1, int(placeholder_max))
+    except (TypeError, ValueError):
+        _ph_max = 3
     placeholder_count = _count_placeholders(r)
     list_required = any(k in g for k in _LIST_REQUIREMENT_KEYWORDS)
     numeric_required = any(k in g for k in _NUMERIC_REQUIREMENT_KEYWORDS)
@@ -4450,11 +5084,11 @@ def check_deliverable_completeness(
                 any(m in c for m in _PLACEHOLDER_MARKERS) for c in filled
             )
 
-    if placeholder_count >= 3 and domain == "financial":
+    if placeholder_count >= _ph_max and domain == "financial":
         passed = False
         detail = (
             f"交付物不完整：报告含 {placeholder_count} 处数据缺失占位"
-            "（未披露/未获取/待补充/数据缺失）"
+            f"（未披露/未获取/待补充/数据缺失，体裁上限 {_ph_max} 处）"
         )
     elif list_required and (not has_table or table_all_placeholder):
         passed = False
@@ -4464,7 +5098,7 @@ def check_deliverable_completeness(
         )
     else:
         passed = True
-        if placeholder_count >= 3:
+        if placeholder_count >= _ph_max:
             # 非金融域豁免：诚实披露数据缺失不双重惩罚（数字溯源仍从严）
             detail = (
                 f"交付物完整性：报告含 {placeholder_count} 处数据缺失占位，"
@@ -4482,6 +5116,7 @@ def check_deliverable_completeness(
         "pass": passed,
         "details": detail,
         "placeholder_count": placeholder_count,
+        "placeholder_max": _ph_max,
         "has_table": has_table,
         "table_all_placeholder": table_all_placeholder,
         "list_required": list_required,
@@ -4636,26 +5271,66 @@ _TIME_SENSITIVE_MARKERS = (
 _FRESHNESS_DATE_RE = re.compile(r"\d{4}[-/年]\d{1,2}")
 
 
-def check_freshness_block(report: str, goal: str = "") -> dict:
+def check_freshness_block(report: str, goal: str = "",
+                          freshness_required: bool = True,
+                          freshness_alternatives=()) -> dict:
     """数据时效区块检查：报告须含'数据时效/数据截止'字样 + 具体时间/日期。
 
     无时效语义的任务（如纯代码任务，报告与目标都不含行情/财报/数据等词）
-    自动跳过，不误伤。"""
+    自动跳过，不误伤。
+
+    **报告体裁豁免**（`acceptance.profiles[<体裁>].freshness_required == false`，
+    事件研究类）：这类报告天然没有"数据截止"块——事件研究的时间锚点是**公告日/
+    事件日/披露日**。此时改判 `freshness_alternatives` 词表：命中即通过；未命中
+    也**只提示不判失败**（检查口径随体裁变化，判定规则本身不变：非豁免体裁仍是
+    "块 + 日期"两者齐备才 pass）。
+    """
     t = str(report or "")
     hay = t + "\n" + str(goal or "")
+    _alts = tuple(str(m) for m in (freshness_alternatives or ()) if str(m))
     if not any(m in hay for m in _TIME_SENSITIVE_MARKERS):
         return {
             "pass": True,
             "details": "任务无数据时效语义，跳过",
             "has_freshness_block": False,
             "has_date": False,
+            "freshness_required": bool(freshness_required),
+            "alternatives": list(_alts),
+            "has_alternative": False,
             "gaps": [],
             "enabled": False,
         }
     has_block = any(m in t for m in _FRESHNESS_BLOCK_MARKERS)
     has_date = bool(_FRESHNESS_DATE_RE.search(t))
-    passed = has_block and has_date
+    alt_hit = [m for m in _alts if m in t]
     gaps: list[str] = []
+    if not freshness_required:
+        passed = True
+        if alt_hit:
+            details = (f"数据时效区块：体裁豁免（命中替代时效词 {'/'.join(alt_hit)}），"
+                       "不要求'数据截止'块")
+        elif has_block and has_date:
+            details = ("数据时效区块：包含，具体时间/日期：包含"
+                       "（该体裁不强制要求，按通过计）")
+        else:
+            details = "数据时效区块：体裁豁免（未命中替代时效词，仅提示，不判失败）"
+            gaps.append(
+                "报告未给出事件时点/披露时点（该体裁可用替代词："
+                + "/".join(_alts or ("公告日", "事件日", "披露日")) + "）")
+            if not has_date:
+                gaps.append("报告未给具体日期（如 2026-08-30）")
+        return {
+            "pass": passed,
+            "details": details,
+            "has_freshness_block": has_block,
+            "has_date": has_date,
+            "freshness_required": False,
+            "alternatives": list(_alts),
+            "has_alternative": bool(alt_hit),
+            "gaps": gaps,
+            "enabled": True,
+        }
+    passed = has_block and has_date
     if not has_block:
         gaps.append("报告缺少'数据时效'区块（需含数据截止时间/行情快照时间）")
     elif not has_date:
@@ -4668,6 +5343,9 @@ def check_freshness_block(report: str, goal: str = "") -> dict:
         ),
         "has_freshness_block": has_block,
         "has_date": has_date,
+        "freshness_required": True,
+        "alternatives": list(_alts),
+        "has_alternative": bool(alt_hit),
         "gaps": gaps,
         "enabled": True,
     }
@@ -4752,12 +5430,19 @@ def resolve_profile(goal: str, capabilities=None) -> str:
 
 
 def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
-                   capabilities=None, profile: str | None = None) -> dict:
+                   capabilities=None, profile: str | None = None,
+                   report_type: str = "annual_report") -> dict:
     """运行验收 checklist，输出缺口报告。
 
     profile 决定"报告格式类检查"是否适用（代码/数据类任务不适用，标记 N/A 并说明
     原因，不再是"失败项"）；是否计入 overall 缺口沿用既有语义（仅 financial 域计数），
     避免本包顺带改变既有判定。
+
+    report_type 是**报告体裁**（annual_report / semi_annual / event_study），决定阈值
+    与数据时效豁免的来源（`config.json` 的 `acceptance.profiles`，未知体裁回落到
+    `default_profile`）。它与 `profile` 是两个轴：`report_type` 说"这是哪类报告"
+    （影响阈值与时效口径），`profile` 说"报告格式类检查适不适用"。判定规则本身不变，
+    变的只是阈值来源。
     """
     sources = _collect_sources(workspace)
     # V1：用户材料（任务目标/指令里给出的数字）本身就是来源通道。注入为独立来源，
@@ -4769,10 +5454,13 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         sources["user_material"] = _user_material
     domain = traceability_domain(goal)
     profile = profile or resolve_profile(goal, capabilities)
+    # 报告体裁档位：溯源阈值 / 数据时效豁免 / 占位上限的唯一来源（config 可配）
+    _report_type, _acct_profile = acceptance_profile(report_type)
     report_checks = set(_PROFILE_REPORT_CHECKS.get(profile, ()))
     checks: dict = {}
     checks["number_traceability"] = check_number_traceability(
         report_text, sources, domain=domain, goal=goal,
+        threshold=traceability_threshold_for(domain, _acct_profile),
     )
     checks["entity_attribution"] = check_entity_attribution(
         report_text, sources, goal,
@@ -4783,12 +5471,19 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
 
     checks["deliverable_completeness"] = check_deliverable_completeness(
         report_text, goal, domain=domain,
+        placeholder_max=_profile_int(_acct_profile, "placeholder_max", 3),
     )
     # V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明。
     # applicable：按 profile 判断是否适用（不适用 → N/A，计 pass 但保留原始结果）；
     # counted：是否计入 overall 缺口（financial 域计入，非金融域只展示）。
     checks["source_list_completeness"] = check_source_list_completeness(report_text)
-    checks["freshness_block"] = check_freshness_block(report_text, goal)
+    _fresh_required = bool(_acct_profile.get("freshness_required", True))
+    _fresh_alts = _acct_profile.get("freshness_alternatives") or ()
+    checks["freshness_block"] = check_freshness_block(
+        report_text, goal,
+        freshness_required=_fresh_required,
+        freshness_alternatives=_fresh_alts if isinstance(_fresh_alts, (list, tuple)) else (),
+    )
     checks["disclaimer"] = check_disclaimer(report_text)
     _V12_REPORT_CHECKS = (
         "source_list_completeness", "freshness_block", "disclaimer",
@@ -4909,6 +5604,8 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         "checks": checks,
         "overall": overall,
         "profile": profile,
+        # 报告体裁档位（与 `profile` 任务档位分开记：阈值/时效豁免按它取）
+        "report_type": _report_type,
         "gaps": gaps,
         "suggestions": suggestions,
         # 规则版本化与报告指纹：供 acceptance_report.json / 事件流对账

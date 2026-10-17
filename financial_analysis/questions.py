@@ -86,7 +86,8 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
         needs_metrics=("revenue", "gross_profit", "net_profit", "operating_cashflow"),
         needs_note=("需要同主体同口径两期的收入/毛利/归母净利与经营现金流"
                     "（利润底稿＋现金调节桥都从这两期出发）"),
-        models=("operating_drivers", "cash_reconciliation", "scenario_sensitivity"),
+        models=("operating_drivers", "cash_reconciliation", "scenario_sensitivity",
+                "cash_pressure"),
     ),
     QuestionType(
         qid="profit_attribution", label="利润变化归因",
@@ -120,7 +121,7 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
                   "若收入", "底线", "盈亏平衡"),
         needs_metrics=("revenue", "gross_profit", "net_profit"),
         needs_note="需要基期收入/毛利/归母净利润（情景从基期读数出发）",
-        models=("scenario_sensitivity",),
+        models=("scenario_sensitivity", "cash_pressure"),
         kind="scenario",
     ),
     QuestionType(

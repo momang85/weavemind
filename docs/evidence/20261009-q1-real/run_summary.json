@@ -1,0 +1,497 @@
+{
+  "full": {
+    "cards": {
+      "002304.SZ": "2879d504a2c890576afdd44715e4f4f804ef93b06e845a474dde06df39488dd6",
+      "600031.SH": "3b5e6004ed699bdc9b6331a1a8313529d6743feec1ab7c9ff33778e4615897ce"
+    },
+    "evaluation": {
+      "coverage": {
+        "cases": 6,
+        "cases_per_entity": {
+          "002304.SZ": 4,
+          "600031.SH": 2
+        },
+        "entities": 2
+      },
+      "maturity": {
+        "incomparable": 2,
+        "mature": 4,
+        "missing": 0,
+        "pending": 2,
+        "time_unknown": 0
+      },
+      "verdict": "no_evidence"
+    },
+    "q1_replay": {
+      "actual_hash": "d4928113ef5aa8b8d5ee52441fc162fbc36df6ffdc19bf317128cfbb05afbf6c",
+      "expected_hash": "d4928113ef5aa8b8d5ee52441fc162fbc36df6ffdc19bf317128cfbb05afbf6c",
+      "module_hashes_ok": true,
+      "ok": true,
+      "what_this_verifies": "同一冻结产物的 Q1 读数可复算（study.replay 不含本层模块）"
+    },
+    "replay": {
+      "actual_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+      "expected_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+      "ok": true,
+      "study_id": "5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e",
+      "what_this_verifies": "同冻结输入重算同实质结果"
+    },
+    "result_hash": "b95a80c3bb2389eb5678c1a2380c303fba33fd57db56fcb476735ac7c044fd81",
+    "rows": 6,
+    "study_dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies\\5ee4814b3721b61e",
+    "study_id": "5ee4814b3721b61ec823985fd71d7081838649ae3d9b7065648648f9f952713e",
+    "verify": {
+      "checked": [
+        "events.json",
+        "excluded.json",
+        "financial.json",
+        "inputs.json",
+        "label_readiness.json",
+        "mechanism_cards.md",
+        "mechanism_evaluation.json",
+        "mechanism_evaluation.md",
+        "mechanisms.json",
+        "previews.json",
+        "projection_ledger.json",
+        "quant/event_returns.json",
+        "quant/quant_detail.md",
+        "quant/quant_manifest.json",
+        "research.md",
+        "risk.json",
+        "summary.md"
+      ],
+      "failed": [],
+      "ok": true,
+      "what_this_verifies": "内部冻结产物字节；不等于事实正确/策略有效/人工复核"
+    }
+  },
+  "generated_at": "2026-10-08T17:02:03+00:00",
+  "inputs_dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\q1-real-inputs",
+  "out_root": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies",
+  "pit": {
+    "excluded_financial": [
+      {
+        "entity_id": "002304.SZ",
+        "metric": "revenue",
+        "reason": "信息在本次截止之后才可用",
+        "row": 31
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "operating_cost",
+        "reason": "信息在本次截止之后才可用",
+        "row": 32
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "gross_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 33
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "net_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 34
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "net_profit_consolidated",
+        "reason": "信息在本次截止之后才可用",
+        "row": 35
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "operating_cashflow",
+        "reason": "信息在本次截止之后才可用",
+        "row": 36
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "selling_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 37
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "admin_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 38
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "rd_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 39
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "taxes_and_surcharges",
+        "reason": "信息在本次截止之后才可用",
+        "row": 40
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "accounts_receivable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 41
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "inventory",
+        "reason": "信息在本次截止之后才可用",
+        "row": 42
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "accounts_payable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 43
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "total_assets",
+        "reason": "信息在本次截止之后才可用",
+        "row": 44
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "total_liabilities",
+        "reason": "信息在本次截止之后才可用",
+        "row": 45
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "revenue",
+        "reason": "信息在本次截止之后才可用",
+        "row": 46
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "operating_cost",
+        "reason": "信息在本次截止之后才可用",
+        "row": 47
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "gross_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 48
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "net_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 49
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "net_profit_consolidated",
+        "reason": "信息在本次截止之后才可用",
+        "row": 50
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "operating_cashflow",
+        "reason": "信息在本次截止之后才可用",
+        "row": 51
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "selling_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 52
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "admin_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 53
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "rd_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 54
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "taxes_and_surcharges",
+        "reason": "信息在本次截止之后才可用",
+        "row": 55
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "accounts_receivable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 56
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "inventory",
+        "reason": "信息在本次截止之后才可用",
+        "row": 57
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "accounts_payable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 58
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "total_assets",
+        "reason": "信息在本次截止之后才可用",
+        "row": 59
+      },
+      {
+        "entity_id": "002304.SZ",
+        "metric": "total_liabilities",
+        "reason": "信息在本次截止之后才可用",
+        "row": 60
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "revenue",
+        "reason": "信息在本次截止之后才可用",
+        "row": 61
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "operating_cost",
+        "reason": "信息在本次截止之后才可用",
+        "row": 62
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "gross_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 63
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "net_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 64
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "net_profit_consolidated",
+        "reason": "信息在本次截止之后才可用",
+        "row": 65
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "operating_cashflow",
+        "reason": "信息在本次截止之后才可用",
+        "row": 66
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "selling_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 67
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "admin_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 68
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "rd_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 69
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "taxes_and_surcharges",
+        "reason": "信息在本次截止之后才可用",
+        "row": 70
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "accounts_receivable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 71
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "inventory",
+        "reason": "信息在本次截止之后才可用",
+        "row": 72
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "accounts_payable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 73
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "total_assets",
+        "reason": "信息在本次截止之后才可用",
+        "row": 74
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "total_liabilities",
+        "reason": "信息在本次截止之后才可用",
+        "row": 75
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "revenue",
+        "reason": "信息在本次截止之后才可用",
+        "row": 76
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "operating_cost",
+        "reason": "信息在本次截止之后才可用",
+        "row": 77
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "gross_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 78
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "net_profit",
+        "reason": "信息在本次截止之后才可用",
+        "row": 79
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "net_profit_consolidated",
+        "reason": "信息在本次截止之后才可用",
+        "row": 80
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "operating_cashflow",
+        "reason": "信息在本次截止之后才可用",
+        "row": 81
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "selling_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 82
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "admin_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 83
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "rd_expense",
+        "reason": "信息在本次截止之后才可用",
+        "row": 84
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "taxes_and_surcharges",
+        "reason": "信息在本次截止之后才可用",
+        "row": 85
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "accounts_receivable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 86
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "inventory",
+        "reason": "信息在本次截止之后才可用",
+        "row": 87
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "accounts_payable",
+        "reason": "信息在本次截止之后才可用",
+        "row": 88
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "total_assets",
+        "reason": "信息在本次截止之后才可用",
+        "row": 89
+      },
+      {
+        "entity_id": "600031.SH",
+        "metric": "total_liabilities",
+        "reason": "信息在本次截止之后才可用",
+        "row": 90
+      }
+    ],
+    "readings": {
+      "002304.SZ": {
+        "chains": [
+          {
+            "o_t": null,
+            "sign_o": "未知",
+            "t": "2022",
+            "y_op": 0.017206321935394685,
+            "y_state": "mature"
+          },
+          {
+            "o_t": 0.017206321935394685,
+            "sign_o": "正",
+            "t": "2023",
+            "y_op": null,
+            "y_state": "pending"
+          }
+        ],
+        "years": [
+          "2022",
+          "2023"
+        ]
+      },
+      "600031.SH": {
+        "chains": [],
+        "years": []
+      }
+    },
+    "replay": {
+      "actual_hash": "d44fb61b4430fe9b9bb0b33d85d308b016649aa8b4c885ad44086f6530c3fa68",
+      "expected_hash": "d44fb61b4430fe9b9bb0b33d85d308b016649aa8b4c885ad44086f6530c3fa68",
+      "ok": true,
+      "study_id": "b2a7b0ed02b70d603887a8ac3d1e2a331d5626c303f2b5083fd1554a0f54a6b3",
+      "what_this_verifies": "同冻结输入重算同实质结果"
+    },
+    "result_hash": "d44fb61b4430fe9b9bb0b33d85d308b016649aa8b4c885ad44086f6530c3fa68",
+    "study_dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies\\b2a7b0ed02b70d60",
+    "study_id": "b2a7b0ed02b70d603887a8ac3d1e2a331d5626c303f2b5083fd1554a0f54a6b3",
+    "verify": {
+      "checked": [
+        "events.json",
+        "excluded.json",
+        "financial.json",
+        "inputs.json",
+        "label_readiness.json",
+        "mechanism_cards.md",
+        "mechanism_evaluation.json",
+        "mechanism_evaluation.md",
+        "mechanisms.json",
+        "previews.json",
+        "projection_ledger.json",
+        "quant/event_returns.json",
+        "quant/quant_detail.md",
+        "quant/quant_manifest.json",
+        "research.md",
+        "risk.json",
+        "summary.md"
+      ],
+      "failed": [],
+      "ok": true,
+      "what_this_verifies": "内部冻结产物字节；不等于事实正确/策略有效/人工复核"
+    }
+  }
+}

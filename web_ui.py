@@ -158,7 +158,14 @@ _evt_seq = 0
 _last_heartbeat_sig = None
 _rate_limiter = None
 _START_TIME = time.time()
-_METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics_summary.json")
+# /api/metrics 的数据来源。读 METRICS_SUMMARY 环境变量（与
+# metrics_collector 的写入路径同一变量、同一默认值）——此前硬编码模块
+# 目录，容器里 Dockerfile 设 METRICS_SUMMARY=/data/... 时写 /data 读
+# /app，metrics 页面永远显示旧数据。
+_METRICS_SUMMARY = os.environ.get(
+    "METRICS_SUMMARY",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "metrics_summary.json"))
 _STALE_AFTER_SECONDS = int(os.environ.get("STALE_TASK_TIMEOUT", "1800"))
 _memory_manager = None
 _memory_manager_lock = threading.Lock()
@@ -6121,6 +6128,24 @@ def _post_task_analysis_recompute(self, p, body, admin):
     })
 
 
+def _adopt_binding_text(tid: str, body: str) -> str:
+    """采纳绑定校验该读的文本：**主文 ＋ 收束移出的另附底稿**。
+
+    10-06 主文收束把带运行标识的「分析摘要选择说明／经营驱动分析正文」移进了
+    `analysis/analysis_detail.md` 的收束块。只看主文时 `run_id[:12] in body` 恒不成立
+    ⇒「采纳这版」永远 409 回滚（本机 `ui-10ea37599d` 正常入口实测复现：
+    `采纳正文里找不到所选运行 232b6c38335c`）。读它的口径与硬门槛那一处**同一实现**
+    （`delivery_pipeline._gate_analysis_text`）：被移出的内容仍是**同一份交付**的一部分。
+
+    读不到附件的收束块就按主文判（退回旧口径，不因此放宽）。
+    """
+    try:
+        from delivery_pipeline import _gate_analysis_text
+        return _gate_analysis_text(tid, body) or str(body or "")
+    except Exception:                            # noqa: BLE001 - 读不到就按主文判
+        return str(body or "")
+
+
 def _post_task_analysis_adopt(self, p, body, admin):
     """`POST /api/task/<id>/analysis/adopt`：把某条**已验证**复算运行**选定**进交付（K3/L0-b）。
 
@@ -6289,7 +6314,7 @@ def _post_task_analysis_adopt(self, p, body, admin):
                 _problems.append("采纳版本没有绑定本版验收（可能退回旧已验收稿）")
             if not _adv_body or _adv_body not in _report_body_early:
                 _problems.append("交付正文不是采纳版本的正文")
-            if run_id[:12] not in _adv_body:
+            if run_id[:12] not in _adopt_binding_text(tid, _adv_body):
                 _problems.append(f"采纳正文里找不到所选运行 {run_id[:12]}"
                                  "（选了新运行，正文却还是旧稿）")
         if _problems:
@@ -8172,10 +8197,1248 @@ def _post_scheduled_jobs(self, p, body, admin):
 
 
 # ============================================================
+# 本地研究试验（10-08 三域规划 §16 接入：把一个**离线** study 入口接进现有工作台）
+#
+# 复用面：登录/管理员鉴权（POST 自动 admin、GET 自动需登录，见 do_GET/do_POST）、
+# 现有上传契约（`{filename, data(base64)}`，与 `/api/task/<id>/material` 同形）、
+# 以及 `quant_research.study` 的 run/write/verify/replay。**不新增服务/worker/数据库/SDK**：
+# study 不建任务、不投递 Redis、不调用模型，产物落在 `tmp/research-studies/`（与 CLI 同目录），
+# 明确标研究草稿/未人工复核，**不自动采纳、不进 MD/PDF/ZIP 交付包**。
+# ============================================================
+STUDY_SAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "examples", "research_study")
+STUDY_SPEC_SCHEMA = "weavemind.study_spec/1"
+# 单文件上限与材料入口同一常量（复用既有上传纪律），另加总量与件数上限
+STUDY_MAX_FILES = 40
+STUDY_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+_STUDY_INPUT_RE = re.compile(r"^[A-Za-z0-9_-]{4,40}$")
+_STUDY_FILE_RE = re.compile(r"^[^\\/:*?\"<>|]{1,120}$")
+
+
+def _study_root() -> str:
+    """研究产物根目录：默认仓库下 `tmp/research-studies`（与 CLI 默认一致），可用环境变量覆盖。"""
+    raw = str(os.environ.get("WEAVEMIND_RESEARCH_STUDY_DIR") or "").strip()
+    if raw:
+        return os.path.abspath(raw)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "tmp", "research-studies")
+
+
+def _study_upload_root(input_id: str) -> str:
+    return os.path.join(_study_root(), "_uploads", input_id)
+
+
+def _study_input_dir(input_id: str) -> str | None:
+    """输入目录：`__sample__` = 只读的内置模拟样例；否则必须是已存在的上传目录。"""
+    if input_id == "__sample__":
+        return STUDY_SAMPLE_DIR if os.path.isdir(STUDY_SAMPLE_DIR) else None
+    if not _STUDY_INPUT_RE.match(str(input_id or "")):
+        return None
+    d = _study_upload_root(input_id)
+    return d if os.path.isdir(d) else None
+
+
+def _study_read_json(path: str, *, encoding: str = "utf-8") -> dict:
+    """读一个 JSON 文件（显式关文件；坏内容照实抛给调用方）。"""
+    with open(path, encoding=encoding) as fh:
+        return json.loads(fh.read())
+
+
+def _study_files(d: str) -> list[dict]:
+    out: list[dict] = []
+    for name in sorted(os.listdir(d)):
+        p = os.path.join(d, name)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        out.append({"name": name, "bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest()})
+    return out
+
+
+def _study_dir_of(study_id: str) -> str | None:
+    """按研究ID前缀定位产物目录（只允许产物根目录下的直系子目录）。"""
+    sid = str(study_id or "").strip()
+    if not re.match(r"^[0-9a-f]{8,64}$", sid):
+        return None
+    root = os.path.abspath(_study_root())
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return None
+    for name in names:
+        cand = os.path.join(root, name)
+        if os.path.isdir(cand) and name.startswith(sid[:16]):
+            return cand
+    return None
+
+
+def _study_artifacts(d: str) -> list[dict]:
+    out: list[dict] = []
+    for base, _dirs, files in os.walk(d):
+        for name in files:
+            p = os.path.join(base, name)
+            rel = os.path.relpath(p, d).replace("\\", "/")
+            try:
+                out.append({"path": rel, "bytes": os.path.getsize(p)})
+            except OSError:
+                continue
+    return sorted(out, key=lambda x: x["path"])
+
+
+def _study_item(d: str) -> dict:
+    """产物目录 → 列表项（读自带 manifest；读不到就如实留空，不猜）。"""
+    item = {"study_id": os.path.basename(d), "dir": d, "artifacts": _study_artifacts(d)}
+    try:
+        man = _study_read_json(os.path.join(d, "study_manifest.json"))
+        item.update({
+            "study_id": str(man.get("study_id") or item["study_id"]),
+            "feature_cutoff": str(man.get("feature_cutoff") or ""),
+            "evaluation_as_of": str(man.get("evaluation_as_of") or ""),
+            "synthetic": bool(man.get("synthetic")),
+            "research_state": str(man.get("research_state") or ""),
+            "human_review": str(man.get("human_review") or ""),
+            "external_delivery": dict(man.get("external_delivery") or {}),
+            "result_hash": str(man.get("result_hash") or ""),
+            "sources": sorted((man.get("sources") or {}).keys()),
+            "subjects": sorted({str(r.get("entity_id")) for r in
+                                ((man.get("sources") or {}).get("financial") and [] or [])}),
+            "name": str(((man.get("sources") or {}).get("_spec") or {}).get("name") or ""),
+        })
+    except Exception:                       # noqa: BLE001 - 目录里没有/坏了 manifest 也照实返回
+        item["note"] = "没有可读的 study_manifest.json"
+    return item
+
+
+def _study_spec_of(body: dict, input_dir: str) -> tuple[dict, str]:
+    """请求体 → (spec, 错误)。模板只认内置样例、**同 schema** 的内联 spec，
+    或**本次输入目录里一个显式的 spec 文件名**（不继承样例的 synthetic/元数据）。"""
+    spec = body.get("spec")
+    if spec in (None, "", "sample"):
+        p = os.path.join(STUDY_SAMPLE_DIR, "study.json")
+        if not os.path.isfile(p):
+            return {}, "内置模拟样例不存在"
+        spec = _study_read_json(p, encoding="utf-8-sig")
+    elif isinstance(spec, str):
+        # 显式指定本次输入里的一个 spec 文件（真实规格走这条，不落到样例默认）
+        name = spec.strip()
+        if not _STUDY_FILE_RE.match(name) or os.path.sep in name or "\\" in name:
+            return {}, "spec 文件名必须是不含路径分隔符的纯文件名"
+        p = os.path.join(input_dir, name)
+        if not os.path.isfile(p):
+            return {}, f"spec 文件不在本次输入里：{name}"
+        try:
+            spec = _study_read_json(p, encoding="utf-8-sig")
+        except (ValueError, OSError) as exc:
+            return {}, f"spec 文件无法解析：{exc}"
+    if not isinstance(spec, dict) or spec.get("schema") != STUDY_SPEC_SCHEMA:
+        return {}, f"study spec schema 不支持（应为 {STUDY_SPEC_SCHEMA}）"
+    for key in ("financial", "market", "events", "calendar", "credit_labels",
+                "fraud_labels"):
+        desc = spec.get(key)
+        if isinstance(desc, dict) and desc.get("file"):
+            name = str(desc["file"])
+            if not _STUDY_FILE_RE.match(name) or os.path.sep in name:
+                return {}, f"{key}.file 必须是不含路径分隔符的纯文件名"
+            if not os.path.isfile(os.path.join(input_dir, name)):
+                return {}, f"{key}.file 指向的文件不在本次输入里：{name}"
+    return spec, ""
+
+
+def _get_research_study_sample(self, p):
+    """`GET /api/research-study/sample`：内置两公司模拟样例的 spec 与文件清单（只读）。"""
+    d = STUDY_SAMPLE_DIR
+    spec_path = os.path.join(d, "study.json")
+    if not os.path.isfile(spec_path):
+        return self._json({"error": "内置模拟样例不存在"}, 404)
+    spec = _study_read_json(spec_path, encoding="utf-8-sig")
+    return self._json({
+        "sample_input_id": "__sample__", "spec": spec, "files": _study_files(d),
+        "readme": "README.md" if os.path.isfile(os.path.join(d, "README.md")) else "",
+        "note": ("样例全部为模拟数据：只验证流程，不证明收益或风险模型有效性；"
+                 "结果目录是内部研究文件，不自动采纳、不进 MD/PDF/ZIP 交付包。"),
+    })
+
+
+def _get_research_study_studies(self, p):
+    """`GET /api/research-study/studies`：已生成的研究产物（内部研究，只读列表）。"""
+    root = _study_root()
+    items: list[dict] = []
+    try:
+        for name in sorted(os.listdir(root)):
+            d = os.path.join(root, name)
+            if os.path.isdir(d) and name != "_uploads":
+                items.append(_study_item(d))
+    except OSError:
+        items = []
+    items.sort(key=lambda x: str(x.get("study_id") or ""), reverse=True)
+    return self._json({"root": root, "count": len(items), "studies": items})
+
+
+def _get_research_study_file(self, p):
+    """`GET /api/research-study/file?id=<研究ID>&name=<文件名>`：下载内部研究产物文件。
+
+    三域规划 §17.10 第 4 项：研究页上的内部研究 MD/JSON 要**可下载**，不能只列
+    文件名。与 studies 列表读同一个产物根目录；鉴权沿用 do_GET 的登录门（非公开
+    GET 一律要求会话，viewer 可读）。文件名防线：不许路径分隔符（`_STUDY_FILE_RE`
+    逐段校验）、不许 `.` 开头、不许 `..`，解析后必须仍落在该研究目录内。
+    产物是**内部研究**：attachment 直下，不进 MD/PDF/ZIP 交付包。
+    """
+    from urllib.parse import parse_qs
+    q = parse_qs(urlparse(self.path).query)
+    study_id = (q.get("id") or [""])[0].strip()
+    name = (q.get("name") or [""])[0].strip().replace("\\", "/")
+    d = _study_dir_of(study_id)
+    if not d:
+        return self._json({"error": "研究产物不存在"}, 404)
+    parts = name.split("/")
+    if (not name or name.startswith("/")
+            or any(not part or part.startswith(".")
+                   or not _STUDY_FILE_RE.match(part) for part in parts)):
+        return self._json({"error": "非法文件名"}, 400)
+    fp = os.path.join(d, *parts)
+    root = os.path.realpath(d)
+    real = os.path.realpath(fp)
+    if not real.startswith(root + os.sep) or not os.path.isfile(real):
+        return self._json({"error": "产物文件不存在"}, 404)
+    try:
+        with open(real, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        return self._json({"error": "read failed", "detail": str(exc)[:200]}, 500)
+    ext = os.path.splitext(real)[1].lower()
+    if ext == ".md":
+        ctype = "text/markdown"
+    elif ext == ".json":
+        ctype = "application/json"
+    else:
+        ctype = mimetypes.guess_type(real)[0] or "application/octet-stream"
+    session = self._auth_session() or {}
+    audit_log(session.get("user", ""), self._client_ip(), "research_study.file",
+              target=study_id[:16], result="ok", detail=f"file={name}")
+    self.send_response(200)
+    if ctype.startswith("text/") or ctype == "application/json":
+        self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+    else:
+        self.send_header("Content-Type", ctype)
+    self.send_header("Content-Disposition", f'attachment; filename="{parts[-1]}"')
+    self.send_header("Content-Length", str(len(raw)))
+    self.end_headers()
+    self.wfile.write(raw)
+
+
+def _post_research_study_upload(self, p, body, admin):
+    """`POST /api/research-study/upload`：把文件存进本次研究的输入目录（复用上传契约）。
+
+    body：`{filename, data(base64), input_id?}`；`input_id` 缺省由服务端生成。
+    只做**鉴权 + 上限体检 + 保存原件**：不解析、不投递、不建任务。
+    """
+    import material_intake as _mi
+    filename = str(body.get("filename") or "").strip()
+    if not _STUDY_FILE_RE.match(filename) or os.path.sep in filename \
+            or filename in (".", ".."):
+        return self._json({"error": "filename 必须是纯文件名"}, 400)
+    data = str(body.get("data") or "")
+    if not data:
+        return self._json({"error": "缺少 data（base64）"}, 400)
+    try:
+        raw = base64.b64decode(data, validate=False)
+    except Exception:                                 # noqa: BLE001
+        return self._json({"error": "data 不是合法 base64"}, 400)
+    if len(raw) > _mi.MAX_BYTES:
+        return self._json({"error": f"文件超过单件上限（{len(raw)} > {_mi.MAX_BYTES} 字节）"},
+                          413)
+    input_id = str(body.get("input_id") or "").strip()
+    if not input_id:
+        input_id = "up" + uuid.uuid4().hex[:16]
+    if not _STUDY_INPUT_RE.match(input_id):
+        return self._json({"error": "input_id 非法"}, 400)
+    d = _study_upload_root(input_id)
+    os.makedirs(d, exist_ok=True)
+    files = [f for f in _study_files(d) if f["name"] != filename]
+    if len(files) + 1 > STUDY_MAX_FILES:
+        return self._json({"error": f"输入文件数超过上限 {STUDY_MAX_FILES}"}, 413)
+    if sum(f["bytes"] for f in files) + len(raw) > STUDY_MAX_TOTAL_BYTES:
+        return self._json({"error": "输入总量超过上限"}, 413)
+    with open(os.path.join(d, filename), "wb") as fh:
+        fh.write(raw)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "research_study.upload", target=input_id, result="ok",
+              detail=f"{filename}:{len(raw)}")
+    return self._json({"status": "ok", "input_id": input_id, "input_dir": d,
+                       "files": _study_files(d)})
+
+
+def _preview_rows(preview: dict, limit: int = 3) -> list[dict]:
+    """预览用的一小段原始行（原字段 + 单位 + 可知时点），供"文件预览"核对。"""
+    out: list[dict] = []
+    for r in (preview.get("records") or [])[:limit]:
+        side = r.get("sidecar") if isinstance(r.get("sidecar"), dict) else {}
+        raw_fields = side.get("raw_fields") if isinstance(side.get("raw_fields"), dict) else {}
+        out.append({"entity_id": str(r.get("entity_id") or r.get("code") or ""),
+                    "metric": str(r.get("metric") or r.get("date") or ""),
+                    "value": r.get("value"), "unit": str(r.get("unit") or ""),
+                    "period": str(r.get("period") or r.get("date") or ""),
+                    "caliber": str(r.get("caliber") or ""),
+                    "disclosed_at": str(r.get("disclosed_at") or ""),
+                    "available_at": str(r.get("available_at") or ""),
+                    "eligible": bool(r.get("analysis_eligible")),
+                    "raw_fields": {str(k): str(v) for k, v in list(raw_fields.items())[:12]}})
+    return out
+
+
+def _study_preview_payload(result: dict) -> dict:
+    """预览/运行结果 → 前端要的窄载荷（经营/事件/风险/内部附件 + 身份与局限）。"""
+    man = dict(result.get("manifest") or {})
+    fin = {}
+    for code, row in (result.get("financial") or {}).items():
+        fin[code] = {
+            "synthetic": bool(row.get("synthetic")),
+            "runs": [{"model_id": r.get("model_id"), "status": r.get("status"),
+                      "reason": r.get("reason") or "",
+                      "outputs": [{"metric": o.get("metric"), "label": o.get("label"),
+                                   "value": o.get("value"), "unit": o.get("unit")}
+                                  for o in (r.get("outputs") or [])[:12]]}
+                     for r in (row.get("runs") or [])],
+            "unit_conversion": list(row.get("unit_conversion") or [])[:8],
+            "unsupported_units": list(row.get("unsupported_units") or []),
+            "joint_grid": row.get("joint_grid") or None,
+        }
+    payload = {
+        "study_id": str(result.get("study_id") or ""),
+        "result_hash": str(result.get("result_hash") or ""),
+        "synthetic": bool(man.get("synthetic")),
+        "feature_cutoff": str(man.get("feature_cutoff") or ""),
+        "evaluation_as_of": str(man.get("evaluation_as_of") or ""),
+        "research_state": str(man.get("research_state") or ""),
+        "human_review": str(man.get("human_review") or ""),
+        "external_delivery": dict(man.get("external_delivery") or {}),
+        "sources": {k: {"file": v.get("file"), "raw_sha256": str(v.get("raw_sha256") or "")[:16]}
+                    for k, v in (man.get("sources") or {}).items() if isinstance(v, dict)},
+        "subjects": sorted(fin.keys()),
+        "financial": fin,
+        "events": {"candidates": len((result.get("events") or {}).get("events") or []),
+                   "excluded": len((result.get("events") or {}).get("excluded") or [])},
+        "quant": {k: {"status": v.get("status"), "reason": v.get("reason") or ""}
+                  for k, v in (result.get("quant") or {}).items()},
+        "risk": {code: {"status": r.get("status"),
+                        "features": len(r.get("features") or []),
+                        "gaps": len(r.get("gaps") or []),
+                        "anomaly_clues": [c.get("name") for c in (r.get("anomaly_clues") or [])]}
+                 for code, r in (result.get("risk") or {}).items()},
+        "label_readiness": {k: {"status": v.get("status")}
+                            for k, v in (result.get("label_readiness") or {}).items()},
+        "previews": {k: {"kind": v.get("kind"), "status": v.get("status"),
+                         "rows": len(v.get("records") or []),
+                         "raw_columns": sorted({str(c) for rec in
+                                                (v.get("records") or [])[:5]
+                                                for c in
+                                                (((rec.get("sidecar") or {})
+                                                  .get("raw_fields") or {}).keys())}),
+                         "declared": dict((v.get("metadata") or {}).get("declared") or {}),
+                         "unknown_columns": list((v.get("metadata") or {})
+                                                 .get("unknown_columns") or [])[:20],
+                         "eligible_records": (v.get("metadata") or {}).get("eligible_records"),
+                         "instruments": list((v.get("metadata") or {}).get("instruments") or []),
+                         "raw_file": (v.get("metadata") or {}).get("raw_file"),
+                         "raw_bytes": (v.get("metadata") or {}).get("raw_bytes"),
+                         "usage_scope": (v.get("metadata") or {}).get("usage_scope"),
+                         "license_status": (v.get("metadata") or {}).get("license_status"),
+                         "export_allowed": (v.get("metadata") or {}).get("export_allowed"),
+                         "historical_version": (v.get("metadata") or {})
+                         .get("historical_version"),
+                         "sample_rows": _preview_rows(v),
+                         "issues": [{"code": i.get("code"), "field": i.get("field") or "",
+                                     "row": i.get("row") or 0,
+                                     "severity": i.get("severity") or "",
+                                     "message": str(i.get("message") or "")[:160]}
+                                    for i in (v.get("issues") or [])[:25]],
+                         "issue_count": len(v.get("issues") or [])}
+                     for k, v in (result.get("previews") or {}).items()},
+        "excluded": {k: len(v) for k, v in (result.get("excluded") or {}).items()
+                     if isinstance(v, list)},
+        "limits": list(result.get("limits") or []),
+        "summary_markdown": str(result.get("summary_markdown") or ""),
+        "q1": _study_q1_payload(result),
+    }
+    return payload
+
+
+def _study_q1_payload(result: dict) -> dict:
+    """q1 研究层 → 前端窄载荷（卡主因句/后续页状态/评价方向结论；不搬 100KB 全量卡）。
+
+    数据全部来自既有字段：q1.cards/followups/evaluation + financial[code].joint_grid。
+    「最值得补证的条件」不在这里硬编码公司名：载荷给出逐格 profit_state，翻转维度由前端
+    从本格九点里算（哪条轴上出现 达到/未达到 两侧），业务措辞仍标「待核」。
+    """
+    q1 = result.get("q1") or {}
+    if not isinstance(q1, dict) or not q1:
+        return {}
+    ev = q1.get("evaluation") or {}
+    inc = ev.get("increment") or {} if isinstance(ev, dict) else {}
+    fin = result.get("financial") or {}
+    grids = {}
+    for code, row in fin.items():
+        g = (row or {}).get("joint_grid")
+        if not isinstance(g, dict) or not g.get("cells"):
+            continue
+        grids[code] = g
+    followups = {}
+    for code, f in (q1.get("followups") or {}).items():
+        f = f or {}
+        followups[code] = {
+            "status": str(f.get("status") or ""),
+            "mechanism_verdict": str(f.get("mechanism_verdict") or ""),
+            "verify_by": str(f.get("verify_by") or ""),
+            "next_check": [str(x) for x in (f.get("next_check") or [])],
+            "pending_reason": str(f.get("pending_reason") or ""),
+            "base_fingerprint": str(f.get("base_fingerprint") or ""),
+            "actual": f.get("actual") if isinstance(f.get("actual"), dict) else None,
+            "target_followup": (f.get("target_followup")
+                                 if isinstance(f.get("target_followup"), dict) else None),
+        }
+    cards = {}
+    for code, card in (q1.get("cards") or {}).items():
+        card = card or {}
+        jud = card.get("judgement") or {}
+        ident = card.get("identity") or {}
+        cards[code] = {
+            "entity": str(card.get("entity") or ""),
+            "provenance_kind": str(card.get("provenance_kind") or ""),
+            "base_fingerprint": str(ident.get("base_fingerprint") or ""),
+            "primary_cause": str(jud.get("company_primary_cause") or ""),
+            "expected_direction": str(jud.get("expected_direction") or ""),
+        }
+    return {
+        "method_version": str(q1.get("method_version") or ""),
+        "eval_version": str(q1.get("eval_version") or ""),
+        "provenance_kind": str(q1.get("provenance_kind") or ""),
+        "provenance_note": str(q1.get("provenance_note") or ""),
+        "target_year": str(q1.get("target_year") or ""),
+        "split_at": str(q1.get("split_at") or ""),
+        "feature_cutoff": str(q1.get("feature_cutoff") or ""),
+        "evaluation_as_of": str(q1.get("evaluation_as_of") or ""),
+        "eval_direction": str(inc.get("direction") or ""),
+        "eval_verdict": str(inc.get("verdict") or ""),
+        "eval_reason": str(inc.get("reason") or ""),
+        "holdout_common_n": inc.get("holdout_common"),
+        "cards": cards,
+        "followups": followups,
+        "joint_grids": grids,
+    }
+
+
+def _post_research_study_preview(self, p, body, admin):
+    """`POST /api/research-study/preview`：**只读**预览（文件解析、缺口、主体与截止）。
+
+    body：`{spec?|"sample", input_id}`。不写任何文件；不做 run 的前置条件。
+    """
+    import quant_research.study as _study
+    input_id = str(body.get("input_id") or "__sample__")
+    input_dir = _study_input_dir(input_id)
+    if not input_dir:
+        return self._json({"error": "输入目录不存在：先上传文件，或用内置模拟样例"},
+                          400)
+    spec, why = _study_spec_of(body, input_dir)
+    if why:
+        return self._json({"error": why}, 400)
+    try:
+        result = _study.run_study(spec, input_dir=input_dir)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        return self._json({"error": f"无法预览研究：{exc}"}, 400)
+    payload = _study_preview_payload(result)
+    payload.update({"input_id": input_id, "input_dir": input_dir,
+                    "files": _study_files(input_dir), "spec": spec,
+                    "preview_only": True,
+                    "next_step": ("确认以上主体与两个截止后，再点『运行并保存』"
+                                  "（服务端会核对确认清单，未确认不给运行）")})
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "research_study.preview", target=input_id, result="ok")
+    return self._json(payload)
+
+
+def _post_research_study_run(self, p, body, admin):
+    """`POST /api/research-study/run`：预览确认后**才**运行，并保存内部研究产物。
+
+    body：`{spec?|"sample", input_id, confirmed: true, confirmed_subjects: [...],
+            feature_cutoff?, evaluation_as_of?}`；带 `study_id` 时不重新生成，
+    改走 `_study_run_by_identity`（§18.12 查看原版 / §18.13 改参分叉）。
+    纪律：① 未带确认清单 → 400（"文件预览 → 明确截止/公司 → run_study"的顺序是硬门槛）；
+    ② 确认的主体必须与文件里实际读到的主体一致（不拿请求里的公司名替换材料身份）；
+    ③ 已生成同一研究ID → 不覆盖（旧目录原样保留，如实告知）。
+    """
+    import quant_research.study as _study
+    if body.get("confirmed") is not True:
+        return self._json({"error": "需要先预览并确认主体与截止（confirmed=true）",
+                           "code": "preview_required"}, 400)
+    sid = str(body.get("study_id") or "").strip()
+    if sid:
+        return _study_run_by_identity(self, sid, body, admin)
+    input_id = str(body.get("input_id") or "__sample__")
+    input_dir = _study_input_dir(input_id)
+    if not input_dir:
+        return self._json({"error": "输入目录不存在：先上传文件，或用内置模拟样例"}, 400)
+    spec, why = _study_spec_of(body, input_dir)
+    if why:
+        return self._json({"error": why}, 400)
+    # ① 请求体截止与所选 spec 自带的截止**冲突即拒绝**（400），不再静默覆盖真实规格；
+    # ② spec 本身缺截止时才允许由请求体补（显式给出，仍是可审计的确认动作）。
+    for field in ("feature_cutoff", "evaluation_as_of"):
+        val = str(body.get(field) or "").strip()
+        in_spec = str(spec.get(field) or "").strip()
+        if val and in_spec and val != in_spec:
+            return self._json({
+                "error": (f"请求体的 {field}（{val}）与所选 spec 的 {field}（{in_spec}）冲突："
+                          "真实规格的截止不静默覆盖，改 spec 文件或去掉请求体里的截止"),
+                "code": "spec_cutoff_conflict",
+                "field": field, "spec_value": in_spec, "request_value": val}, 400)
+        if val and not in_spec:
+            spec[field] = val
+    try:
+        result = _study.run_study(spec, input_dir=input_dir)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        return self._json({"error": f"无法运行研究：{exc}"}, 400)
+    subjects = sorted({str(r.get("entity_id")) for r in
+                       ((result.get("previews") or {}).get("financial") or {}).get("records", [])
+                       if r.get("entity_id")})
+    confirmed = [str(x) for x in (body.get("confirmed_subjects") or []) if str(x).strip()]
+    if sorted(confirmed) != subjects:
+        return self._json({
+            "error": "确认的主体与文件里读到的公司不一致：不按请求里的公司名替换材料身份",
+            "code": "subjects_unconfirmed",
+            "subjects_in_files": subjects, "confirmed_subjects": sorted(confirmed)}, 409)
+    try:
+        folder = _study.write_study(result, output_dir=_study_root())
+    except FileExistsError:
+        existing = _study_dir_of(str(result.get("study_id") or ""))
+        payload = _study_preview_payload(result)
+        payload.update({
+            "status": "exists", "dir": existing or "", "adopted": False,
+            "spec": spec,
+            "artifacts": _study_artifacts(existing) if existing else [],
+            "note": "同一研究已生成过：旧目录原样保留，未覆盖（改参数或输入会得到新的研究ID）",
+        })
+        return self._json(payload)
+    except (ValueError, OSError, TypeError) as exc:
+        return self._json({"error": f"产物落盘失败：{exc}"}, 500)
+    payload = _study_preview_payload(result)
+    payload.update({"status": "ok", "dir": str(folder), "input_id": input_id,
+                    "input_dir": input_dir, "confirmed_subjects": subjects,
+                    "spec": spec,
+                    "artifacts": _study_artifacts(str(folder)),
+                    "adopted": False,
+                    "note": ("内部研究产物已保存；**未采纳、未进交付包、未人工复核**；"
+                             "下一步可 verify/replay")})
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "research_study.run", target=str(result.get("study_id") or "")[:16],
+              result="ok", detail=f"subjects={','.join(subjects)}")
+    return self._json(payload)
+
+
+def _study_frozen_spec_of(d: str) -> dict:
+    """冻结目录 → `inputs.json` 里的冻结 spec（读不到就返回空 dict，不猜、不回填）。"""
+    try:
+        frozen = _study_read_json(os.path.join(d, "inputs.json"))
+    except (OSError, ValueError):
+        return {}
+    spec = frozen.get("spec") if isinstance(frozen, dict) else None
+    return dict(spec) if isinstance(spec, dict) else {}
+
+
+def _study_run_by_identity(self, sid: str, body: dict, admin):
+    """带 `study_id` 的 run 请求（接缝②，2026-10-11 §18.12／§18.13）。
+
+    - 只带 `study_id`（＋可选 `result_hash`）＝「查看原版」→ `restore_study`：按身份复用
+      冻结 inputs 走同一 `_compute_study`；实现已改变时**不重算**，直接读冻结产物并如实标注；
+      冻结文件 hash 不符 → 409 `restore_refused`（不给被改过的记录背书）。
+    - `study_id` ＋ `spec` ＝改参分叉 → `reparam_frozen_study`：冻结输入＋新 spec 出**新候选**，
+      旧目录只读不动；spec 逐字段相同 → 400（那是「查看原版」）；截止是冻结选择 → 409 `cutoff_frozen`。
+    两条分支共用同一身份硬门槛：身份必须命中已生成产物、可选 `result_hash` 必须与冻结记录一致、
+    确认主体必须与冻结记录里实际读到的一致（不按请求里的公司名替换材料身份）。
+    """
+    import quant_research.study as _study
+    d = _study_dir_of(sid)
+    if not d:
+        return self._json({
+            "error": (f"找不到研究 {sid[:16]} 的冻结产物目录：恢复只认已生成过的研究身份"
+                      "（要新研究就带 spec ＋ input_id 走生成）"),
+            "code": "study_not_found", "study_id": sid}, 404)
+    frozen_spec = _study_frozen_spec_of(d)
+    want_hash = str(body.get("result_hash") or "").strip()
+    if want_hash:
+        try:
+            man = _study_read_json(os.path.join(d, "study_manifest.json"))
+        except (OSError, ValueError):
+            return self._json({"error": "冻结 manifest 读不出来：不恢复（须重新上传或重跑）",
+                               "code": "restore_refused"}, 409)
+        frozen_hash = str(man.get("result_hash") or "")
+        if frozen_hash != want_hash:
+            return self._json({
+                "error": (f"result_hash 与冻结记录不符（冻结 {frozen_hash[:16]}… ≠ "
+                          f"请求 {want_hash[:16]}…）：不按请求指定的身份复用别的冻结记录"),
+                "code": "result_hash_mismatch",
+                "frozen_result_hash": frozen_hash, "request_result_hash": want_hash}, 409)
+    spec_arg = body.get("spec") if isinstance(body.get("spec"), dict) else None
+    if spec_arg:
+        # 截止是**冻结选择**：换截止＝换输入（不是改假设），要改就另开研究
+        for field in ("feature_cutoff", "evaluation_as_of"):
+            frozen_val = str(frozen_spec.get(field) or "").strip()
+            want_val = str(spec_arg.get(field) or "").strip()
+            if frozen_val and want_val != frozen_val:
+                return self._json({
+                    "error": (f"{field} 是冻结选择（冻结 {frozen_val}）：改截止＝换输入，"
+                              "不是改假设；要换截止请另开研究"),
+                    "code": "cutoff_frozen", "field": field,
+                    "frozen_value": frozen_val, "request_value": want_val}, 409)
+        try:
+            result = _study.reparam_frozen_study(d, spec_arg)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            return self._json({"error": f"改参失败：{exc}"}, 400)
+        if not result.get("ok", True):
+            code = str(result.get("code") or "restore_refused")
+            return self._json({"error": str(result.get("reason") or "改参被拒绝"),
+                               "code": code,
+                               "integrity": result.get("integrity")},
+                              400 if code == "spec_unchanged" else 409)
+    else:
+        try:
+            result = _study.restore_study(d)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            return self._json({"error": f"恢复失败：{exc}"}, 400)
+        if result.get("implementation_changed"):
+            # 不重算、不造新数字：直接把冻结产物原样装回来，如实标「读冻结产物」
+            result = dict(result.get("frozen") or {})
+        elif not result.get("ok", True):
+            return self._json({"error": str(result.get("reason") or "恢复被拒绝"),
+                               "code": "restore_refused",
+                               "integrity": result.get("integrity")}, 409)
+        elif not result.get("spec") and frozen_spec:
+            result["spec"] = json.loads(json.dumps(frozen_spec, ensure_ascii=False))
+    subjects = sorted({str(r.get("entity_id")) for r in
+                       ((result.get("previews") or {}).get("financial") or {}).get("records", [])
+                       if r.get("entity_id")})
+    confirmed = [str(x) for x in (body.get("confirmed_subjects") or []) if str(x).strip()]
+    if sorted(confirmed) != subjects:
+        return self._json({
+            "error": "确认的主体与冻结记录里读到的公司不一致：不按请求里的公司名替换材料身份",
+            "code": "subjects_unconfirmed",
+            "subjects_in_files": subjects, "confirmed_subjects": sorted(confirmed)}, 409)
+    input_id = f"frozen:{sid[:16]}"
+    user = str((admin or {}).get("user") or "")
+    if spec_arg:
+        try:
+            folder = _study.write_study(result, output_dir=_study_root())
+        except FileExistsError:
+            existing = _study_dir_of(str(result.get("study_id") or ""))
+            payload = _study_preview_payload(result)
+            payload.update({"status": "exists", "dir": existing or "", "adopted": False,
+                            "input_id": input_id, "spec": dict(result.get("spec") or {}),
+                            "artifacts": _study_artifacts(existing) if existing else [],
+                            "note": "同一改参候选已生成过：旧目录原样保留，未覆盖"})
+            return self._json(payload)
+        except (ValueError, OSError, TypeError) as exc:
+            return self._json({"error": f"产物落盘失败：{exc}"}, 500)
+        payload = _study_preview_payload(result)
+        payload.update({"status": "ok", "dir": str(folder), "input_id": input_id,
+                        "confirmed_subjects": subjects, "adopted": False,
+                        "spec": dict(result.get("spec") or {}),
+                        "artifacts": _study_artifacts(str(folder)),
+                        "note": ("改参候选已保存（冻结输入＋新参数、当前实现、内容寻址新身份）；"
+                                 "**未采纳、未覆盖旧目录、未人工复核**")})
+        for key in ("reparam_from", "reparam_spec_diff", "reparam_basis"):
+            if key in result:
+                payload[key] = result[key]
+        audit_log(user, self._client_ip(), "research_study.reparam",
+                  target=str(result.get("study_id") or "")[:16], result="ok",
+                  detail=f"from={sid[:16]} diff={len(result.get('reparam_spec_diff') or [])}")
+        return self._json(payload)
+    status = "restored_frozen" if result.get("recomputed") is False else "restored"
+    payload = _study_preview_payload(result)
+    payload.update({"status": status, "dir": d, "input_id": input_id,
+                    "confirmed_subjects": subjects, "adopted": False,
+                    "restored_from": str(result.get("restored_from") or d),
+                    "restore_basis": str(result.get("restore_basis") or ""),
+                    "result_hash_matches": bool(result.get("result_hash_matches")),
+                    "spec": dict(result.get("spec") or frozen_spec)})
+    if "recomputed" in result:
+        # 实现已改变 → 直接读冻结产物：recomputed=False 必须如实透传（不冒充重算）
+        payload["recomputed"] = bool(result.get("recomputed"))
+    audit_log(user, self._client_ip(), "research_study.restore",
+              target=str(result.get("study_id") or sid)[:16], result="ok",
+              detail=f"status={status}")
+    return self._json(payload)
+
+
+def _post_research_study_verify(self, p, body, admin):
+    """`POST /api/research-study/verify`：核对冻结产物的字节 hash（复用 verify_study）。"""
+    import quant_research.study as _study
+    d = _study_dir_of(str(body.get("study_id") or body.get("dir") or ""))
+    if not d:
+        return self._json({"error": "找不到该研究产物目录"}, 404)
+    try:
+        check = _study.verify_study(d)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return self._json({"error": f"核对失败：{exc}"}, 400)
+    check["dir"] = d
+    return self._json(check)
+
+
+def _post_research_study_replay(self, p, body, admin):
+    """`POST /api/research-study/replay`：用**冻结输入**重算（不要求原始文件仍在）。"""
+    import quant_research.study as _study
+    d = _study_dir_of(str(body.get("study_id") or body.get("dir") or ""))
+    if not d:
+        return self._json({"error": "找不到该研究产物目录"}, 404)
+    try:
+        check = _study.replay_study(d)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return self._json({"error": f"重放失败：{exc}"}, 400)
+    check["dir"] = d
+    return self._json(check)
+
+
+def _hypothesis_mechanism(direction: str, coverage, clues: list[dict]) -> tuple[str, str]:
+    """一句话机制 + 预期方向（只由**已有读数**拼出，不做 Q1 计算，不编因果）。
+
+    §17.2 的 Q1 方向规则（`sign(O_t)→sign(Y_op)`）在 B 批才计算；本卡只写"固定了哪个指标与
+    方向规则"（`method` 字段），以及当前读数支持的机制描述与预期方向。
+    """
+    bits: list[str] = [direction]
+    if coverage and isinstance(coverage.get("value"), (int, float)):
+        bits.append(f"经营现金/合并净利 {float(coverage['value']):.2f}%")
+    _names = {"receivables_outpace_revenue": "应收增长快于收入",
+              "inventory_outpaces_cost": "库存增长快于成本"}
+    hit = [_names.get(str(c.get("name")), str(c.get("name"))) for c in clues]
+    if hit:
+        bits.append("周转线索：" + "、".join(hit))
+    else:
+        bits.append("周转线索：未出现增长快于分母的分项")
+    mechanism = "；".join(bits)
+    adverse = any(str(c.get("name")) in ("receivables_outpace_revenue",
+                                         "inventory_outpaces_cost") for c in clues)
+    _cov = coverage.get("value") if isinstance(coverage, dict) else None
+    if isinstance(_cov, (int, float)) and float(_cov) >= 100 and not adverse:
+        expected = "偏改善：现金兑现充分、周转未见恶化线索（下一同口径年度需继续成立）"
+    elif adverse or (isinstance(_cov, (int, float)) and float(_cov) < 100):
+        expected = "偏承压：现金兑现未完全跟上、且/或周转占用上升（下一同口径年度看是否反转）"
+    else:
+        expected = "未定：读数不足，不下方向"
+    return mechanism, expected
+
+
+def _freeze_hypothesis_card(d: str) -> dict:
+    """由**冻结产物**生成"待人工确认的假说卡"（§17.5 的五组字段；本批只产卡，不做 Q1 计算）。
+
+    卡只写产物里**已有**的读数与来源，并按 §17.5 的五组分列：
+
+    1. **身份与时点**：hypothesis_id、方法/公式版本（§17.2 的冻结定义，本批**不计算**）、
+       公司与口径、判断生成/冻结时间、特征截止、输入/run/hash、来源公开与更正时点；
+    2. **研究判断**：可反证的一句机制、预期方向、观察指标/目标期、替代解释、反证条件、下一材料；
+    3. **试验约定**：公司池/主终点/窗口/对照/留出/候选变体账/是否人工确认；
+    4. **后续结果**：验证截止与成熟/待成熟/缺失/不可比**状态位**（本批为模拟流程样例 ⇒ 待数据，
+       不写实际读数、不假造成熟）；
+    5. **使用状态**：synthetic、**历史重建/流程样例/前瞻**三类身份、内部研究、研究草稿、
+       机器检查（verify 的字节核对结果）、人工复核。
+
+    **明确标注**：10 天压力是设定情景、不是历史信号；未人工确认 ⇒ **不是事前假说**；
+    不含综合信用分与 alpha。
+    """
+    man = _study_read_json(os.path.join(d, "study_manifest.json"))
+    fin = _study_read_json(os.path.join(d, "financial.json"))
+    risk = _study_read_json(os.path.join(d, "risk.json"))
+    inp = _study_read_json(os.path.join(d, "inputs.json"))
+    records = ((inp.get("previews") or {}).get("financial") or {}).get("records", [])
+    available = sorted({str(r.get("available_at") or "") for r in records
+                        if r.get("available_at")})
+    disclosed = sorted({str(r.get("disclosed_at") or "") for r in records
+                        if r.get("disclosed_at")})
+    versions = sorted({str(r.get("version_available_at") or "") for r in records
+                       if r.get("version_available_at")})
+    _synthetic = bool(man.get("synthetic"))
+    _verify: dict = {}
+    try:
+        import quant_research.study as _study_mod
+        _verify = _study_mod.verify_study(d)
+    except Exception as exc:                      # noqa: BLE001 - 核对不了就如实留空
+        _verify = {"ok": None, "error": str(exc)[:120]}
+    companies: list[dict] = []
+    for code, row in sorted(fin.items()):
+        runs = {str(r.get("model_id")): r for r in (row.get("runs") or [])}
+
+        def _out(model: str, metric: str):
+            for o in ((runs.get(model) or {}).get("outputs") or []):
+                if o.get("metric") == metric:
+                    return o
+            return None
+
+        coverage = _out("cash_quality", "cashflow_coverage")
+        np_change = _out("cash_quality", "cfo_minus_profit")
+        occupation = _out("cash_pressure", "incremental_capital_occupation")
+        target_gap = _out("scenario_sensitivity", "margin_gap_to_threshold_pp")
+        direction = "未取得"
+        if coverage and isinstance(coverage.get("value"), (int, float)):
+            direction = ("现金转化≥100%（现金支撑强）" if float(coverage["value"]) >= 100
+                         else "现金转化<100%（利润未完全转成现金）")
+        rr = risk.get(code) or {}
+        features = {f.get("name"): f.get("value") for f in (rr.get("features") or [])}
+        clues = [{"name": c.get("name"), "value": c.get("value"), "unit": c.get("unit"),
+                  "period": c.get("period"), "formula": c.get("formula"),
+                  # 风险层的正常替代解释写在 `limitations` 里（`alternatives` 只是兼容位）
+                  "alternatives": (list(c.get("alternatives") or ())
+                                   or list(c.get("limitations") or ()))[:2],
+                  "limitations": list(c.get("limitations") or ())[:2]}
+                 for c in (rr.get("anomaly_clues") or [])]
+        mechanism, expected = _hypothesis_mechanism(direction, coverage, clues)
+        companies.append({
+            "entity_id": code,
+            "direction": direction,
+            # ── 研究判断（§17.5 第 2 组）──────────────────────────────
+            "mechanism": mechanism,
+            "expected_direction": expected,
+            "observation_metric": ("下一同口径**年度**经营方向：`Y_op = (E_next − E_t)/收入_t` 的符号"
+                                   "（E＝自定义经营余额；本批只固定指标与规则，不计算）"),
+            "target_period": ("下一同口径年度（固定年度链 t−1→t→t+1；不混入 H1、YTD 累计或单季度；"
+                              "分母收入须为正）"),
+            "profit_cash_turnover": {
+                "cashflow_coverage_pct": (coverage or {}).get("value"),
+                "cfo_minus_profit": (np_change or {}).get("value"),
+                "receivables_to_revenue": features.get("receivables_to_revenue"),
+                "inventory_to_cost": features.get("inventory_to_cost"),
+                "liabilities_to_assets": features.get("liabilities_to_assets"),
+                "margin_gap_to_threshold_pp": (target_gap or {}).get("value"),
+            },
+            "scenario_only": {
+                "incremental_capital_occupation": (occupation or {}).get("value"),
+                "unit": (occupation or {}).get("unit"),
+                "note": "10 天回款/库存压力是**设定情景**（使用者假设），不是历史信号或预测",
+            },
+            "anomaly_clues": clues,
+            "next_same_caliber_disclosure": [
+                "下一期同口径定期报告（同主体/同合并范围/同科目口径）",
+                "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
+                "若为真实材料：下一期行情（用于事后反应观察，不作为特征）",
+            ],
+            "alternatives": [
+                "结算日期、信用期变化、客户结构或合并范围变化（周转线索的正常替代解释）",
+                "季节备货、产能投放、交付延后或成本价格变化（库存线索的正常替代解释）",
+                "并表范围、口径重述或税率/投资收益等毛利线以下项造成的净利变化",
+            ],
+            "refutation_conditions": [
+                "方向反转：下一同口径年度 `sign(Y_op)` 与 `sign(O_t)` 相反且分母收入为正",
+                "周转恶化证据：应收增长继续快于收入增长、或库存增长继续快于成本增长",
+                "来源/时点问题：可用时间晚于决策时点，或披露被更正（版本可用时间晚于决策）",
+            ],
+            "source_files": {k: {"file": (v or {}).get("file"),
+                                 "raw_sha256": str((v or {}).get("raw_sha256") or "")[:16]}
+                             for k, v in (man.get("sources") or {}).items()
+                             if isinstance(v, dict)},
+            "known_as_of": {"feature_cutoff": man.get("feature_cutoff"),
+                            "evaluation_as_of": man.get("evaluation_as_of"),
+                            "available_at_latest": available[-1] if available else "",
+                            "disclosed_at_latest": disclosed[-1] if disclosed else "",
+                            "version_available_at_latest": versions[-1] if versions else ""},
+            # ── 后续结果（§17.5 第 4 组）：只有状态位，不写实际读数 ──────────
+            "follow_up": {
+                "verify_by": man.get("evaluation_as_of"),
+                "status": "待数据",
+                "maturity": {"mature": 0, "pending": 0, "missing": 0,
+                             "incomparable": "未评", "note": "本批为模拟流程样例，没有后续期"},
+                "actual_reading": None, "difference": None,
+                "mechanism_verdict": "未决",
+                "market_reaction": {"status": "待数据",
+                                    "primary_window": "20 个交易日（预先定；1/5 日仅描述）",
+                                    "note": "价格反应观察，不是可成交收益、不是 alpha"},
+                "supersedes_card": "",
+            },
+        })
+    _pool = sorted(fin.keys())
+    _identity = {
+        "method_version": "q1-v1（§17.2 冻结定义；本卡不计算）",
+        "indicator": ("自定义经营余额 E = 毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加"
+                      "（融资与所得税前；不含财务费用/投资收益/公允价值/减值/所得税/少数股东项）"),
+        "direction_rule": ("sign(O_t) → sign(Y_op)；O_t = (E_t − E_{t−1})/收入_{t−1}，"
+                           "Y_op = (E_{t+1} − E_t)/收入_t；零预测弃权、零实际另列"),
+        "baselines": ["归母净利润变化方向延续", "探索期多数方向（仅由探索期固定）"],
+        "company_pool": _pool,
+        "cutoffs": {"feature_cutoff": man.get("feature_cutoff"),
+                    "evaluation_as_of": man.get("evaluation_as_of")},
+        "sources": {k: {"file": (v or {}).get("file"),
+                        "raw_sha256": str((v or {}).get("raw_sha256") or "")}
+                    for k, v in (man.get("sources") or {}).items() if isinstance(v, dict)},
+        "study_id": man.get("study_id"), "result_hash": man.get("result_hash"),
+        "mechanisms": {c["entity_id"]: {"mechanism": c["mechanism"],
+                                        "expected_direction": c["expected_direction"]}
+                       for c in companies},
+    }
+    card = {
+        "schema": "weavemind.hypothesis_card/1",
+        "card_version": "hypothesis_card/1.1.0",
+        # 1) 身份与时点
+        "hypothesis_id": hashlib.sha256(
+            json.dumps(_identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+        "study_id": man.get("study_id"),
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "frozen": True,
+        "synthetic": _synthetic,
+        "caliber": {"scope": "合并报表同口径（由输入文件声明）",
+                    "currency": "CNY（由输入文件声明）",
+                    "period_chain": "固定年度 t−1→t→t+1"},
+        "method": {"version": _identity["method_version"], "indicator": _identity["indicator"],
+                   "direction_rule": _identity["direction_rule"],
+                   "baselines": _identity["baselines"],
+                   "status": "fixed_not_computed",
+                   "status_note": "指标与方向规则已冻结；本批只产卡，B 批才计算读数与对照",
+                   "not_claimed": ["不是法定营业利润或 EBIT", "不是对既有文献因子的复制",
+                                   "不用随机拆分/小样显著性宣布有效"]},
+        # 2) 研究判断（逐公司，在 companies 里）
+        "companies": companies,
+        # 3) 试验约定
+        "trial_conventions": {
+            "company_pool": {"source": "本次输入文件里读到的主体（不按请求里的公司名替换）",
+                             "entities": _pool},
+            "primary_endpoint": "下一同口径年度经营方向（`sign(Y_op)`）",
+            "secondary_endpoint": "事件公开时点后的 20 交易日基准调整收益（价格反应观察）",
+            "window": "1/5/20 交易日；主窗口预先定为 20 日",
+            "comparison": _identity["baselines"],
+            "holdout": "未做（本批为模拟流程样例，无真实时间/主体留出）",
+            "variants": {"count": 1,
+                         "note": "本批只有一份 spec；所有候选与负结果都要写进同一试验账，"
+                                 "不从多个天数/阈值里挑最好结果"},
+            "human_confirmed": False,
+            "pit": "模拟流程样例：不涉及 PIT 历史版本；真实材料到达后再按公开时点建队列",
+        },
+        # 4) 后续结果（状态位；逐公司在 companies[].follow_up）
+        "follow_up_summary": {"verify_by": man.get("evaluation_as_of"), "status": "待数据",
+                              "note": "没有后续期：不写实际读数、不假造成熟"},
+        # 5) 使用状态
+        "usage_state": {
+            "synthetic": _synthetic,
+            "provenance_kind": "流程样例（模拟）" if _synthetic else "历史重建",
+            "provenance_note": ("模拟数据流程样例：不是前瞻判断（未来结果出现前未冻结），"
+                                "也不是对历史公司的回顾解释" if _synthetic else
+                                "用已有材料事后生成：标**历史重建/回顾解释**，"
+                                "不因人工确认就变成事前预测；须检查生成时是否已看到后续结果"),
+            "internal_only": True,
+            "research_state": str(man.get("research_state") or "research_draft"),
+            "machine_checks": {"verify_study": {"ok": _verify.get("ok"),
+                                                "checked": len(_verify.get("checked") or []),
+                                                "failed": _verify.get("failed") or []},
+                               "note": "字节核对只证明产物一致，不证明事实正确/人工复核"},
+            "human_review": str(man.get("human_review") or "unreviewed"),
+            "external_delivery": dict(man.get("external_delivery") or {}),
+        },
+        "state": "draft_not_human_confirmed",
+        "state_note": ("研究草稿；**未经人工确认**，因此不叫「事前假说」，也不构成投资建议；"
+                       "含模拟数据" if _synthetic else
+                       "研究草稿；**未经人工确认**，因此不叫「事前假说」，也不构成投资建议"),
+        "no_credit_score": True, "no_alpha_claim": True,
+        "scenario_not_signal": "10 天压力是设定情景，不当历史信号",
+        "sources": man.get("sources"), "companies_identity": _identity,
+        "how_to_confirm": ("人工逐条确认机制/方向/来源/可知时点/替代解释与反证条件后，"
+                           "才可把本卡称为「事前假说」；确认动作与时间另行记录，本入口不代签"),
+    }
+    _for_hash = {k: v for k, v in card.items() if k != "generated_at"}
+    card["card_hash"] = hashlib.sha256(json.dumps(_for_hash, ensure_ascii=False,
+                                                  sort_keys=True).encode("utf-8")).hexdigest()
+    return card
+
+
+def _fmt_card_reading(name: str, value) -> str:
+    """卡里的读数格式化：比率类按百分比、金额类保留原值（单位由运行声明），不四舍五入事实。"""
+    if not isinstance(value, (int, float)):
+        return f"{name}={value}"
+    if name in ("receivables_to_revenue", "inventory_to_cost", "liabilities_to_assets",
+                "cashflow_coverage_pct"):
+        return f"{name}={float(value) * (1 if name == 'cashflow_coverage_pct' else 100):.2f}%"
+    return f"{name}={value:,.2f}"
+
+
+def _post_research_study_experiment(self, p, body, admin):
+    """`POST /api/research-study/experiment`：研究实验台**唯一窄入口**（C4，§18.18）。
+
+    body：`{action: "options"|"evaluate"|"save"|"open", study_id, result_hash, entity_id,
+            run_id?, view?, metric?, old_material_id?, new_material_id?, experiment_id?}`。
+
+    纪律：浏览器只传**标识与枚举**（研究/主体/run/视角/候选项/材料/已存实验 id）——
+    数字、阈值、路径与公式一律由服务端从冻结结果与登记材料解析（不传任意路径，
+    不按第一条 cash 取数）；装配走 `financial_analysis.research_experiment`（数值在
+    `reversion_ladder`、更新在 `continuation`，本接口只装配）；保存只写研究目录的
+    `experiments/`（独立内容身份，不回写 study manifest、不改 result_hash）；
+    三态原样透传，本接口不代签。
+    """
+    import financial_analysis.research_experiment as _rx
+    from pathlib import Path
+    from workspace import task_workspace
+
+    sid = str(body.get("study_id") or "").strip()
+    rh = str(body.get("result_hash") or "").strip()
+    d = _study_dir_of(sid)
+    if not d:
+        return self._json({"error": "找不到该研究产物目录"}, 404)
+    study_dir = Path(d)
+    action = str(body.get("action") or "options").strip().lower()
+    if action == "open":
+        try:
+            doc = _rx.load_experiment(study_dir=study_dir,
+                                      experiment_id=str(body.get("experiment_id") or ""))
+        except ValueError as exc:
+            return self._json({"error": f"experiment_id 形态不合法：{exc}"}, 404)
+        if not doc:
+            return self._json({"error": "没有这个已保存实验（experiment_id 为 24 位十六进制）"}, 404)
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/open",
+                  result="ok",
+                  detail=f"experiment={str((doc.get('identity') or {}).get('experiment_id'))[:12]}")
+        return self._json(doc)
+    if not rh:
+        return self._json({"error": "需要显式 result_hash（与已选研究一起传，不做隐式取最近）",
+                           "code": "selection_required"}, 400)
+    man = _rx._load_json(study_dir / "study_manifest.json")
+    if man.get("result_hash") and str(man.get("result_hash")) != rh:
+        return self._json({"error": "result_hash 与该研究的冻结登记不一致", "code": "hash_mismatch"}, 409)
+    if action not in ("options", "evaluate", "save"):
+        return self._json({"error": "action 只支持 options/evaluate/save/open"}, 400)
+    eid = str(body.get("entity_id") or "").strip()
+    if not eid:
+        # C5 入口契约（架构师 2026-10-12，§18.19）：**无主体的 `options` 只回登记主体与元数据**
+        # ——不默认取第一个主体、不扫材料、不求值、不建候选工作区；其余动作仍要显式主体。
+        # 循环的根因是「先要 entity、后给主体清单」；这里只把清单交回去，判断仍由人做。
+        if action != "options":
+            return self._json({"error": "需要 entity_id（从已选研究的主体里选）",
+                               "code": "entity_required"}, 400)
+        fin0 = _rx._load_json(study_dir / "financial.json") or {}
+        ents = sorted(str(k) for k, v in fin0.items() if isinstance(v, dict))
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/entities", result="ok",
+                  detail=f"entities={len(ents)}（无主体：只返主体与元数据）")
+        return self._json({
+            "schema": "weavemind.c3_experiment_options/1",
+            "study_id": str(man.get("study_id") or sid),
+            "result_hash": rh,
+            "entities": ents,
+            "entity_required": True,
+            "study": {
+                "schema": str(man.get("schema") or ""),
+                "feature_cutoff": str(man.get("feature_cutoff") or ""),
+                "evaluation_as_of": str(man.get("evaluation_as_of") or ""),
+                "research_state": _rx._state_of(man),
+                "human_review": man.get("human_review"),
+                "external_delivery": bool((man.get("external_delivery") or {}).get("allowed")),
+                "registered_materials": len(
+                    (((man.get("sources") or {}).get("financial") or {}).get("metadata") or {}
+                     ).get("materials") or []),
+            },
+            "next": "显式选一个主体后再取候选 run／登记材料／求值",
+        })
+    fin = _rx._load_json(study_dir / "financial.json")
+    if eid not in fin:
+        return self._json({"error": f"研究 {sid[:16]} 里没有主体 {eid}"}, 400)
+    sid16 = str(man.get("study_id") or sid)[:16]
+    # 候选工作区名＝`study-report-<sid16>-<entity_id>`（与 research_report_adapter
+    # 同一推导，带交易所后缀；不存在就不创建，候选里如实只有研究冻结 run）。
+    ws = task_workspace(f"study-report-{sid16}-{eid}", project="default")
+    if action == "options":
+        try:
+            opts = _rx.experiment_options(study_dir=study_dir, entity_id=eid,
+                                          run_id=str(body.get("run_id") or "") or None,
+                                          view=str(body.get("view") or "current"),
+                                          workspace_dir=ws)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            return self._json({"error": f"候选解析失败：{exc}", "code": "options_failed"}, 400)
+        return self._json(opts)
+    if action not in ("evaluate", "save"):
+        return self._json({"error": "action 只支持 options/evaluate/save/open"}, 400)
+    run_id = str(body.get("run_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", run_id):
+        return self._json({"error": "需要显式 run_id（从候选 run 里选；不按第一条 cash 取数）",
+                           "code": "run_required"}, 400)
+    view = str(body.get("view") or "current").strip()
+    if view not in ("current", "yoy"):
+        return self._json({"error": "view 只支持 current（本期额）或 yoy（同比贡献）"}, 400)
+    metric = str(body.get("metric") or "").strip() or None
+    if metric and not re.fullmatch(r"[a-z_]{2,48}", metric):
+        return self._json({"error": "metric 形态不合法（从候选项里选，不自由填写）"}, 400)
+    old_mid = str(body.get("old_material_id") or "").strip() or None
+    new_mid = str(body.get("new_material_id") or "").strip() or None
+    for mid, what in ((old_mid, "old_material_id"), (new_mid, "new_material_id")):
+        if mid and not re.fullmatch(r"[0-9a-f]{16}", mid):
+            return self._json({"error": f"{what} 形态不合法（登记材料 id 为 16 位十六进制）"}, 400)
+    # C5-3：显式原版实验（沿冻结读数/判据更新）。要给就只给 id，读数与判据由服务端从
+    # 冻结 JSON 读（不从材料现场重建，不用"现在的重建"冒充原假说）。
+    base_eid = str(body.get("baseline_experiment_id") or "").strip()
+    if base_eid and not re.fullmatch(r"[0-9a-f]{24}", base_eid):
+        return self._json({"error": "baseline_experiment_id 形态不合法（24 位十六进制，"
+                                    "从该研究已保存实验里选）"}, 400)
+    # C5-2：可选市场对照段。五件都从枚举/id 里选：披露事件＝登记材料 id、
+    # 行情集/日历＝已登记清单 id、评价时点＝YYYY-MM-DD；缺件在装配层如实 pending。
+    mk_in = body.get("market") if isinstance(body.get("market"), dict) else None
+    market = None
+    if mk_in:
+        market = {
+            "material_id": str(mk_in.get("material_id") or "").strip(),
+            "price_dataset_id": str(mk_in.get("price_dataset_id") or "").strip(),
+            "calendar_id": str(mk_in.get("calendar_id") or "").strip(),
+            "evaluation_as_of": str(mk_in.get("evaluation_as_of") or "").strip(),
+            "benchmark": str(mk_in.get("benchmark") or "").strip(),
+        }
+        if market["material_id"] and not re.fullmatch(r"[0-9a-f]{16}", market["material_id"]):
+            return self._json({"error": "market.material_id 形态不合法（登记材料 id 为 16 位十六进制）"}, 400)
+        for k in ("price_dataset_id", "calendar_id"):
+            if market[k] and not re.fullmatch(r"[0-9a-f]{64}", market[k]):
+                return self._json({"error": f"market.{k} 形态不合法（从已登记清单里选的 64 位十六进制）"}, 400)
+        if market["evaluation_as_of"] and not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
+                                                          market["evaluation_as_of"]):
+            return self._json({"error": "market.evaluation_as_of 需要 YYYY-MM-DD（用户显式选）"}, 400)
+        if market["benchmark"] and not re.fullmatch(r"[0-9]{6}", market["benchmark"]):
+            return self._json({"error": "market.benchmark 形态不合法（六位代码，可留空让服务端取唯一解）"}, 400)
+    try:
+        art = _rx.prepare_company_research_experiment(
+            study_dir=study_dir, study_id=str(man.get("study_id") or sid),
+            result_hash=rh, entity_id=eid, run_id=run_id, view=view, metric=metric,
+            old_material_id=old_mid, new_material_id=new_mid, workspace_dir=ws,
+            version_workspace=ws, version_task_id=f"study-report-{sid16}-{eid}",
+            baseline_experiment_id=base_eid or None, market=market)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/{eid}",
+                  result="reject", detail=str(exc)[:160])
+        return self._json({"error": f"装配未完成：{exc}", "code": "experiment_failed"}, 400)
+    if action == "save":
+        saved = _rx.save_experiment(art, study_dir=study_dir)
+        art["saved"] = saved
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/{eid}",
+                  result="ok",
+                  detail=f"experiment={saved['experiment_id'][:12]} run={run_id[:12]} "
+                         f"view={view} metric={metric or 'default'}"
+                         + (f" baseline={base_eid[:12]}" if base_eid else "")
+                         + (" market=on" if market else ""))
+    else:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "research_study.experiment", target=f"{sid[:16]}/{eid}",
+                  result="ok",
+                  detail=f"evaluate run={run_id[:12]} view={view} metric={metric or 'default'}"
+                         + (f" baseline={base_eid[:12]}" if base_eid else "")
+                         + (" market=on" if market else ""))
+    return self._json(art)
+
+
+def _post_research_study_hypothesis_card(self, p, body, admin):
+    """`POST /api/research-study/hypothesis-card`：把冻结产物里的读数写成**待人工确认**的假说卡。
+
+    只写 `hypothesis_card.json` / `hypothesis_card.md`（已存在则不覆盖，另生成带 hash 的新文件）；
+    不改冻结产物、不改任务、不采纳。人工确认后才叫事前假说。
+    """
+    d = _study_dir_of(str(body.get("study_id") or body.get("dir") or ""))
+    if not d:
+        return self._json({"error": "找不到该研究产物目录"}, 404)
+    try:
+        card = _freeze_hypothesis_card(d)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return self._json({"error": f"无法生成假说卡：{exc}"}, 400)
+    tag = str(card["card_hash"])[:12]
+    json_path = os.path.join(d, "hypothesis_card.json")
+    md_path = os.path.join(d, "hypothesis_card.md")
+    if os.path.exists(json_path):
+        json_path = os.path.join(d, f"hypothesis_card_{tag}.json")
+        md_path = os.path.join(d, f"hypothesis_card_{tag}.md")
+    lines = ["# 待人工确认的假说卡（研究草稿）", "",
+             f"- 状态：**{card['state']}**（未经人工确认 ⇒ 不是事前假说）",
+             f"- 假说ID：`{card['hypothesis_id'][:16]}…`；研究ID：`{card['study_id']}`；"
+             f"模拟数据：{'是' if card['synthetic'] else '否'}",
+             f"- 身份：{card['usage_state']['provenance_kind']}——"
+             f"{card['usage_state']['provenance_note']}",
+             f"- 口径：{card['caliber']['scope']}；{card['caliber']['currency']}；"
+             f"{card['caliber']['period_chain']}",
+             f"- 方法（已冻结，本批**不计算**）：{card['method']['indicator']}；"
+             f"方向规则 {card['method']['direction_rule']}",
+             f"- 边界：{card['scenario_not_signal']}；不含综合信用分、不含 alpha 声明；"
+             f"不是法定营业利润/EBIT，也不是对既有文献因子的复制",
+             f"- 机器检查：verify_study ok={card['usage_state']['machine_checks']['verify_study']['ok']}"
+             f"（核对 {card['usage_state']['machine_checks']['verify_study']['checked']} 项；"
+             f"字节一致 ≠ 事实正确/人工复核）；人工复核="
+             f"{card['usage_state']['human_review']}",
+             ""]
+    _tc = card["trial_conventions"]
+    lines += ["## 试验约定", "",
+              f"- 公司池：{'、'.join(_tc['company_pool']['entities'])}"
+              f"（{_tc['company_pool']['source']}）",
+              f"- 主终点：{_tc['primary_endpoint']}；次终点：{_tc['secondary_endpoint']}",
+              f"- 窗口：{_tc['window']}；对照：{'、'.join(_tc['comparison'])}",
+              f"- 留出：{_tc['holdout']}；候选/变体账：{_tc['variants']['count']} 份"
+              f"（{_tc['variants']['note']}）",
+              f"- 人工确认：{'是' if _tc['human_confirmed'] else '否'}；PIT：{_tc['pit']}", ""]
+    for c in card["companies"]:
+        fu = c["follow_up"]
+        lines += [f"## {c['entity_id']}", "",
+                  f"- 机制（可反证的一句）：{c['mechanism']}",
+                  f"- 经营改善方向：{c['direction']}",
+                  f"- 预期方向：{c['expected_direction']}",
+                  f"- 观察指标：{c['observation_metric']}",
+                  f"- 目标期：{c['target_period']}",
+                  f"- 利润/现金/周转解释：" + "；".join(
+                      _fmt_card_reading(k, v)
+                      for k, v in c["profit_cash_turnover"].items() if v is not None),
+                  f"- 设定情景（非历史信号）：额外占用 "
+                  f"{c['scenario_only']['incremental_capital_occupation']} "
+                  f"{c['scenario_only']['unit']}",
+                  f"- 原始来源：" + "；".join(
+                      f"{k}={v['file']}（sha256 {v['raw_sha256']}…）"
+                      for k, v in (c["source_files"] or {}).items()) or "—",
+                  f"- 可知时点：特征截止 {c['known_as_of']['feature_cutoff']}；"
+                  f"结果评价截止 {c['known_as_of']['evaluation_as_of']}；"
+                  f"材料最晚可用时间 {c['known_as_of']['available_at_latest'] or '未标注'}；"
+                  f"披露 {c['known_as_of']['disclosed_at_latest'] or '未标注'}；"
+                  f"版本可用 {c['known_as_of']['version_available_at_latest'] or '未提供'}",
+                  "- 替代解释：" + "；".join(c["alternatives"]),
+                  "- 下一同口径披露：" + "；".join(c["next_same_caliber_disclosure"]),
+                  "- 反证条件：" + "；".join(c["refutation_conditions"]),
+                  f"- 后续结果：验证截止 {fu['verify_by']}；状态 **{fu['status']}**"
+                  f"（成熟 {fu['maturity']['mature']}／待成熟 {fu['maturity']['pending']}／"
+                  f"缺失 {fu['maturity']['missing']}／不可比 {fu['maturity']['incomparable']}）"
+                  f"；实际读数 {fu['actual_reading']}；机制判定 {fu['mechanism_verdict']}；"
+                  f"价格反应 {fu['market_reaction']['status']}"
+                  f"（主窗口 {fu['market_reaction']['primary_window']}）"]
+        for clue in c["anomaly_clues"]:
+            _alt = ("；".join(clue["alternatives"])
+                    if clue.get("alternatives") else "（未登记替代解释）")
+            _val = clue.get("value")
+            if clue.get("unit") == "growth_rate_difference" and isinstance(_val, (int, float)):
+                _shown = f"{float(_val) * 100:+.2f} 个百分点"
+            else:
+                _shown = f"{_val} {clue.get('unit') or ''}".strip()
+            lines.append(f"- 核查线索 {clue['name']}（{_shown}，{clue.get('period') or '—'}）："
+                         f"{_alt}")
+        lines.append("")
+    lines += [f"- 人工确认方式：{card['how_to_confirm']}",
+              f"- 卡hash：`{card['card_hash']}`（`generated_at` 不参与 hash；"
+              f"生成时间 {card['generated_at']}）", ""]
+    with open(json_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(card, ensure_ascii=False, indent=1))
+    with open(md_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "research_study.hypothesis_card", target=str(card["study_id"])[:16],
+              result="ok", detail=os.path.basename(md_path))
+    return self._json({"status": "ok", "dir": d, "card": card,
+                       "json": os.path.basename(json_path),
+                       "markdown": os.path.basename(md_path),
+                       "markdown_text": "\n".join(lines),
+                       "note": "待人工确认；本入口不代签，也不采纳为交付"})
+
+
+# ============================================================
 # 路由表（E 重构：do_GET/do_POST 业务分支表化，保持原 if 顺序）
 # ============================================================
 _GET_ROUTES = [
     (lambda self, p: p == "/api/health", _get_health),
+    (lambda self, p: p == "/api/research-study/sample", _get_research_study_sample),
+    (lambda self, p: p == "/api/research-study/studies", _get_research_study_studies),
+    (lambda self, p: p == "/api/research-study/file", _get_research_study_file),
     (lambda self, p: p == "/api/auth/bootstrap", _get_bootstrap),
     (lambda self, p: p == "/api/demo/brief", _get_demo_brief),
     (lambda self, p: p == "/api/audit", _get_audit),
@@ -8229,6 +9492,13 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/share" or self.path.startswith("/api/share/"), _post_share),
     (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
     (lambda self, p: self.path == "/task", _post_task),
+    (lambda self, p: self.path == "/api/research-study/upload", _post_research_study_upload),
+    (lambda self, p: self.path == "/api/research-study/preview", _post_research_study_preview),
+    (lambda self, p: self.path == "/api/research-study/run", _post_research_study_run),
+    (lambda self, p: self.path == "/api/research-study/verify", _post_research_study_verify),
+    (lambda self, p: self.path == "/api/research-study/replay", _post_research_study_replay),
+    (lambda self, p: self.path == "/api/research-study/hypothesis-card", _post_research_study_hypothesis_card),
+    (lambda self, p: self.path == "/api/research-study/experiment", _post_research_study_experiment),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/recompute"), _post_task_analysis_recompute),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/adopt"), _post_task_analysis_adopt),

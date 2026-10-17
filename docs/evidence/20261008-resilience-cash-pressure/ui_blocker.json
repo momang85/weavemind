@@ -1,0 +1,42 @@
+{
+ "batch": "10-08 经营韧性与现金压力",
+ "checked_at": "2026-10-08T12:34+08:00",
+ "app": {
+  "http_status": 200,
+  "bytes": 568,
+  "note": "工作台可访问（launcher 启动校验：16/16 服务存活）",
+  "launcher_tail": [
+   "[--] 代码执行：容器隔离不可用（docker 不可用（CLI 缺失或守护进程未响应））——涉及代码执行的步骤会被拒绝；检索/结构化数据/图表/报告/交付不受影响。",
+   "[OK] 工作台：HTTP 200 @ 8080",
+   "[OK] 研究能力：就绪（Redis 8、编排器与 5 项必需 Worker 心跳新鲜）",
+   "[--] 代码执行：容器隔离不可用（docker 不可用（CLI 缺失或守护进程未响应））——涉及代码执行的步骤会被拒绝；检索/结构化数据/图表/报告/交付不受影响。",
+   "[OK] 可研究：工作台可访问、研究能力就绪",
+   "URL: http://localhost:8080"
+  ]
+ },
+ "login": {
+  "page_title": "WeaveMind",
+  "requires_login": true,
+  "form_observed": [
+   "用户名（已填 admin）",
+   "密码（空）",
+   "登录",
+   "尚未初始化？切换到创建管理员"
+  ],
+  "password_field_filled": false,
+  "readme_line": "2. 按首次引导创建管理员，配置兼容 API 的地址、模型名称和密钥。没有固定默认管理员密码。",
+  "why_not_proceed": "管理员口令是**用户凭据/密钥类信息**（README 明确没有固定默认密码）：代理侧不读 `config.json`/`.env`、不改用户、不绕过登录。"
+ },
+ "actions_blocked": [
+  "打开任务 ui-10ea37599d 的分析工作台（GET /api/task/<id>/analysis）",
+  "页面改假设 → POST /api/task/<id>/analysis/recompute（确定性新 run）",
+  "页面「采纳这版」→ POST /api/task/<id>/analysis/adopt（同版正文/附件）",
+  "页面导出（MD/PDF/ZIP）与下载字节核对"
+ ],
+ "recovery": [
+  "用户在本机浏览器登录一次工作台（或提供已登录会话）；同一标签组内即可继续点击。",
+  "登录后按顺序执行：任务页 → 分析工作台 → 改 `collection_days_delta`（或利润目标）→ 复算 → 采纳这版 → 导出；预期新 run_id、正文含『## 经营韧性卡』、同版包内`analysis/resilience_card.md` 随包。",
+  "代理侧已完成**同一批生产函数**的等价链路（离线、0 API 费用），见本目录 report.md / yanghe_run_log.txt；该链路**不称**为界面点击。"
+ ],
+ "honest_note": "本轮不把脚本或 HTTP 调用说成「页面点击」；界面证据只到「应用可用 + 需要用户登录」这一步。"
+}

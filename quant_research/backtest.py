@@ -21,6 +21,11 @@ Qlib 只作为**适配目标**放在 `qlib_adapter.py`（不在主环境安装�
    所以留出集不是防过拟合，而是防"写完规则才挑时间段"——留出区间在规则里固定并写入结果。
 7. **无效结果也要记**：没有数据/没有成交/样本过短 ⇒ `status="invalid"|"unavailable"` + 原因，
    **不产 0 收益**。
+8. **输入顺序不改经济结果**：同一次再平衡**先冻结目标、再统一卖出、最后按规范顺序统一买入**。
+   原实现把买卖混在同一个逐标的循环里，先遇到买单而现金不足时直接拒绝，后面卖出释放的现金
+   再也用不上 ⇒ 同一策略、同一目标权重，仅把 `universe` 从 `[A,B]` 换成 `[B,A]` 总收益就从
+   25% 变 49%（反例见 `docs/evidence/20261006-report-review/quant_counterexamples.md`）。
+   账本守恒**不证明**等权分配正确，所以顺序不变性要单独验（`test_backtest.py`）。
 """
 from __future__ import annotations
 
@@ -30,7 +35,7 @@ from decimal import Decimal
 
 OPERATOR = "backtest_v1"
 SCHEMA = "weavemind.backtest/0"
-IMPL_VERSION = "backtest/1.0.0"
+IMPL_VERSION = "backtest/1.1.0"   # 1.1.0：再平衡改为「冻结目标 → 统一卖出 → 规范顺序统一买入」
 
 # 印花税生效日表（越靠前越新）：卖出单边
 STAMP_DUTY_SCHEDULE: tuple[tuple[str, float], ...] = (("2023-08-28", 5.0), ("1900-01-01", 10.0))
@@ -66,6 +71,9 @@ LIMITS = (
     "**样本极小**（两家公司、约 3.7 年、月频）：这是**账本与规则可复核**的证明，"
     "**不是策略有效性结论**，不宣称 alpha；无历史成分股 ⇒ 不代表全 A 股成绩",
     "免费源/个人非商业许可数据仅内部试验，不得进对外下载包",
+    "**资金分配规则**：同一再平衡日先冻结目标差额、统一卖出，再按**代码序（规范顺序）**"
+    "统一买入；因此总收益与调用方给的 `universe` 顺序无关。买入是**规范顺序下的贪心分配**"
+    "（现金不足时先满足代码序靠前的标的），不是按目标权重等比分配 ⇒ 仍是内部原型",
 )
 
 
@@ -175,7 +183,9 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
                  "license": str(license or payload.get("license") or ""),
                  "adj_basis": str(payload.get("adj_basis") or ""),
                  "limits": list(LIMITS), "orders": [], "rejections": [], "nav": [],
-                 "positions": {}, "dividend_events": [], "invalid": []}
+                 "positions": {}, "dividend_events": [], "invalid": [],
+                 "execution_rule": ("冻结目标差额 → 统一卖出 → 按代码序（规范顺序）贪心买入；"
+                                    "经济结果与 universe 输入顺序无关")}
 
     if payload.get("source") == "unavailable" or not payload.get("data"):
         out["status"] = "unavailable"
@@ -224,6 +234,8 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
                                  "该次再平衡会被静默跳过 —— 需要独立交易日历才能修正")
     idx_of = {c: {r["date"]: i for i, r in enumerate(ser[c])} for c in universe}
     row_of = {c: {r["date"]: r for r in ser[c]} for c in universe}
+    # **规范顺序**：成交与资金分配一律按它推进（与调用方给的 `universe` 顺序解耦）。
+    order_c = sorted(universe)
     initial = float(sp.get("initial_cash") or 0.0)
     lot = max(1, int(sp.get("lot_size") or 1))
     reb = set(rebalance_dates(dates, sp))
@@ -270,11 +282,14 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
                                                    "qty": pos[c]["qty"],
                                                    "cash_in": round(cash_in, 2)})
         # ② 再平衡：目标权重用**规则**（不看价格）；成交在**本日开盘**
+        #    **顺序不变性**（见模块纪律 8）：① 先冻结每个标的的目标差额；② 统一卖出；
+        #    ③ 再按**规范顺序**统一买入。这样"谁排在前"既不决定谁能拿到现金，也不决定
+        #    卖出释放的现金对谁可见 —— 经济结果只由目标权重与规范顺序（代码序）决定。
         if d in reb:
             equity = cash + sum(pos[c]["qty"] * (last_close.get(c) or 0.0) for c in universe)
             tw = target_weights(sp, universe, date=d)
-            for c in universe:
-                want_value = equity * tw.get(c, 0.0)
+            plan: dict[str, tuple[float, float]] = {}
+            for c in order_c:
                 px = row_of[c].get(d, {}).get("open")
                 if px is None:
                     out["rejections"].append({
@@ -283,81 +298,92 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
                                    "不用收盘价替代）" if cal_ok else
                                    "当日该标的没有行情行（停牌/缺行）⇒ 不成交，不用收盘价替代")})
                     continue
-                cur_value = pos[c]["qty"] * px
-                delta = want_value - cur_value
-                if delta < 0:                                    # 先卖
-                    sellable = pos[c]["qty"] - pos[c]["locked"]
-                    qty = int(min(abs(delta) // px, sellable) // lot) * lot
+                plan[c] = (equity * tw.get(c, 0.0) - pos[c]["qty"] * px, px)
+            # ②a 统一卖出：释放的现金对**所有**买单可见（不再取决于谁排在前面）
+            for c in order_c:
+                item = plan.get(c)
+                if item is None or item[0] >= 0:
+                    continue
+                delta, px = item
+                sellable = pos[c]["qty"] - pos[c]["locked"]
+                qty = int(min(abs(delta) // px, sellable) // lot) * lot
+                if qty <= 0:
+                    why = ("可卖为 0（T+1 未解禁）" if sellable <= 0
+                           else "不足一手或无需卖出")
+                    out["rejections"].append({"date": d, "code": c, "side": "sell",
+                                              "reason": why})
+                    continue
+                ex = _exec_price(c, d, "sell")
+                if ex is None:
+                    out["rejections"].append({"date": d, "code": c, "side": "sell",
+                                              "reason": "当日无开盘价 ⇒ 不成交"})
+                    continue
+                gross = qty * ex
+                fee = _commission(gross)
+                stamp = gross * stamp_duty_bps(d, cs) / 10000.0
+                transfer = gross * float(cs["transfer_fee_bps"]) / 10000.0
+                ledger["sell_gross"] += gross
+                ledger["fees"] += fee + stamp + transfer
+                ledger["slippage"] += qty * abs(ex - px)
+                cash += gross - fee - stamp - transfer
+                nocost_cash += qty * px                          # 对照线：不扣费、不滑点
+                pos[c]["qty"] -= qty
+                out["orders"].append({"date": d, "code": c, "side": "sell", "qty": qty,
+                                      "price": round(ex, 4), "gross": round(gross, 2),
+                                      "commission": round(fee, 2), "stamp_duty": round(stamp, 2),
+                                      "transfer_fee": round(transfer, 2),
+                                      "slippage_cost": round(qty * abs(ex - px), 2),
+                                      "cash_after": round(cash, 2),
+                                      "reason": "rebalance_to_target"})
+            # ②b 统一买入：同一确定的资金分配规则 —— 规范顺序（代码序）贪心，先到先得，
+            #     与调用方传入的 universe 顺序无关；成交后 cash 只会减少，故后续标的只可能
+            #     买得更少，不会出现"因为排在前面而多买"的名单序依赖。
+            for c in order_c:
+                item = plan.get(c)
+                if item is None or item[0] <= 0 or tw.get(c, 0.0) <= 0:
+                    continue
+                delta, px = item
+                ex = _exec_price(c, d, "buy")
+                if ex is None:
+                    out["rejections"].append({"date": d, "code": c, "side": "buy",
+                                              "reason": "当日无开盘价 ⇒ 不成交"})
+                    continue
+                afford = int(cash // (ex * lot)) * lot
+                want_qty = int(delta // ex // lot) * lot
+                qty = min(afford, want_qty)
+                if qty <= 0:
+                    out["rejections"].append(
+                        {"date": d, "code": c, "side": "buy",
+                         "reason": f"现金不足一手（现金 {cash:.2f}，价 {ex:.4f}，一手 {lot} 股）"})
+                    continue
+                gross = qty * ex
+                fee = _commission(gross)
+                transfer = gross * float(cs["transfer_fee_bps"]) / 10000.0
+                total = gross + fee + transfer
+                if total > cash:                 # 极端情况下按可负担重新定一手
+                    qty = max(0, int((cash - float(cs["commission_min"])) // (ex * lot)) * lot)
                     if qty <= 0:
-                        why = ("可卖为 0（T+1 未解禁）" if sellable <= 0
-                               else "不足一手或无需卖出")
-                        out["rejections"].append({"date": d, "code": c, "side": "sell",
-                                                  "reason": why})
-                        continue
-                    ex = _exec_price(c, d, "sell")
-                    if ex is None:
-                        out["rejections"].append({"date": d, "code": c, "side": "sell",
-                                                  "reason": "当日无开盘价 ⇒ 不成交"})
-                        continue
-                    gross = qty * ex
-                    fee = _commission(gross)
-                    stamp = gross * stamp_duty_bps(d, cs) / 10000.0
-                    transfer = gross * float(cs["transfer_fee_bps"]) / 10000.0
-                    ledger["sell_gross"] += gross
-                    ledger["fees"] += fee + stamp + transfer
-                    ledger["slippage"] += qty * abs(ex - px)
-                    cash += gross - fee - stamp - transfer
-                    nocost_cash += qty * px                          # 对照线：不扣费、不滑点
-                    pos[c]["qty"] -= qty
-                    out["orders"].append({"date": d, "code": c, "side": "sell", "qty": qty,
-                                          "price": round(ex, 4), "gross": round(gross, 2),
-                                          "commission": round(fee, 2), "stamp_duty": round(stamp, 2),
-                                          "transfer_fee": round(transfer, 2),
-                                          "slippage_cost": round(qty * abs(ex - px), 2),
-                                          "cash_after": round(cash, 2),
-                                          "reason": "rebalance_to_target"})
-                elif delta > 0 and tw.get(c, 0.0) > 0:                    # 再买
-                    ex = _exec_price(c, d, "buy")
-                    if ex is None:
                         out["rejections"].append({"date": d, "code": c, "side": "buy",
-                                                  "reason": "当日无开盘价 ⇒ 不成交"})
-                        continue
-                    afford = int(cash // (ex * lot)) * lot
-                    want_qty = int(delta // ex // lot) * lot
-                    qty = min(afford, want_qty)
-                    if qty <= 0:
-                        out["rejections"].append(
-                            {"date": d, "code": c, "side": "buy",
-                             "reason": f"现金不足一手（现金 {cash:.2f}，价 {ex:.4f}，一手 {lot} 股）"})
+                                                  "reason": "含费后现金不足一手 ⇒ 不成交"})
                         continue
                     gross = qty * ex
                     fee = _commission(gross)
                     transfer = gross * float(cs["transfer_fee_bps"]) / 10000.0
                     total = gross + fee + transfer
-                    if total > cash:                 # 极端情况下按可负担重新定一手
-                        qty = max(0, int((cash - float(cs["commission_min"])) // (ex * lot)) * lot)
-                        if qty <= 0:
-                            out["rejections"].append({"date": d, "code": c, "side": "buy",
-                                                      "reason": "含费后现金不足一手 ⇒ 不成交"})
-                            continue
-                        gross = qty * ex
-                        fee = _commission(gross)
-                        transfer = gross * float(cs["transfer_fee_bps"]) / 10000.0
-                        total = gross + fee + transfer
-                    ledger["buy_gross"] += gross
-                    ledger["fees"] += fee + transfer
-                    ledger["slippage"] += qty * abs(ex - px)
-                    cash -= total
-                    nocost_cash -= qty * px
-                    pos[c]["qty"] += qty
-                    pos[c]["locked"] += qty          # T+1：当日买入当日不可卖
-                    out["orders"].append({"date": d, "code": c, "side": "buy", "qty": qty,
-                                          "price": round(ex, 4), "gross": round(gross, 2),
-                                          "commission": round(fee, 2), "stamp_duty": 0.0,
-                                          "transfer_fee": round(transfer, 2),
-                                          "slippage_cost": round(qty * abs(ex - px), 2),
-                                          "cash_after": round(cash, 2),
-                                          "reason": "rebalance_to_target"})
+                ledger["buy_gross"] += gross
+                ledger["fees"] += fee + transfer
+                ledger["slippage"] += qty * abs(ex - px)
+                cash -= total
+                nocost_cash -= qty * px
+                pos[c]["qty"] += qty
+                pos[c]["locked"] += qty          # T+1：当日买入当日不可卖
+                out["orders"].append({"date": d, "code": c, "side": "buy", "qty": qty,
+                                      "price": round(ex, 4), "gross": round(gross, 2),
+                                      "commission": round(fee, 2), "stamp_duty": 0.0,
+                                      "transfer_fee": round(transfer, 2),
+                                      "slippage_cost": round(qty * abs(ex - px), 2),
+                                      "cash_after": round(cash, 2),
+                                      "reason": "rebalance_to_target"})
         # ③ 收盘估值
         for c in universe:
             r = row_of[c].get(d)

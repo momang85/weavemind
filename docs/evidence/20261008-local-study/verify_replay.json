@@ -1,0 +1,30 @@
+{
+ "verify": {
+  "ok": true,
+  "checked": [
+   "events.json",
+   "excluded.json",
+   "financial.json",
+   "inputs.json",
+   "label_readiness.json",
+   "previews.json",
+   "quant/backtest.json",
+   "quant/event_returns.json",
+   "quant/quant_detail.md",
+   "quant/quant_manifest.json",
+   "risk.json",
+   "summary.md"
+  ],
+  "failed": [],
+  "what_this_verifies": "内部冻结产物字节；不等于事实正确/策略有效/人工复核",
+  "dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies-1008\\f6469defdb1eac21"
+ },
+ "replay": {
+  "ok": true,
+  "expected_hash": "6d11576ac5e8ecd9a9505bea1f2885f668167719d8a7988bde5dfd680a250744",
+  "actual_hash": "6d11576ac5e8ecd9a9505bea1f2885f668167719d8a7988bde5dfd680a250744",
+  "study_id": "f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828",
+  "what_this_verifies": "同冻结输入重算同实质结果",
+  "dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\tmp\\research-studies-1008\\f6469defdb1eac21"
+ }
+}

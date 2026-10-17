@@ -774,6 +774,128 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
     return payload
 
 
+# ---------------------------------------------------------------- §3D 外发投影
+# 10-06 复核：内部快照留下无权外发的量化附件**可以成立**，但交付包是**对外交付面**——
+# 没有外发许可的 `quant/*` 不得随包出门，同时**财报正文仍可交付**。判据一律复用既有
+# 许可门（`quant_research.publish.external_delivery_gate`），不另写一套许可解释，
+# 也不因为"我们内部看过了"就放行；衍生结论同样按用途许可判（不天然放行）。
+EXTERNAL_NOTE_ARC = "quant/EXTERNAL_DELIVERY_RESTRICTION.md"
+
+
+def _quant_arcs(members) -> list[str]:
+    """包内的量化成员（不含限制说明本身）。"""
+    return sorted(str(a) for a in (members or {})
+                  if str(a).startswith("quant/") and str(a) != EXTERNAL_NOTE_ARC)
+
+
+def _readings_from_members(members: dict) -> dict:
+    """按**包内字节**还原读数（不重读磁盘：打包后磁盘变了不算，与整包同版口径一致）。"""
+    from pathlib import PurePosixPath
+    out: dict = {}
+    for arc in _quant_arcs(members):
+        if not arc.endswith(".json") or arc.endswith("/quant_manifest.json"):
+            continue
+        try:
+            blob = json.loads(bytes(members[arc]).decode("utf-8"))
+        except Exception:                        # noqa: BLE001 - 坏文件按"读不到"处理
+            out.setdefault("_unreadable", []).append(arc)
+            continue
+        if isinstance(blob, dict):
+            out[PurePosixPath(arc).stem] = blob
+    return out
+
+
+def _external_note(gate: dict, withheld: dict) -> str:
+    lines = [
+        "# 外发限制说明：受限读数附件已按许可门移出本包",
+        "",
+        "本交付包**不包含**受限读数附件（`quant/*`，以及带市场对照读数的 `analysis/*` 实验成员）。",
+        "判据是既有的许可门 `quant_research.publish.external_delivery_gate()`（按每条读数自带的 "
+        "`delivery_eligible`），市场对照读数按其 `market_comparison.delivery_eligible`（同一家族："
+        "`event_returns` 按数据源许可算），不是代理侧自行放行。",
+        "",
+        f"- 结论：**不允许对外**。{gate.get('reason') or ''}",
+        "- 被移出的成员（sha256 供内部核对，**字节不随包**）：",
+    ]
+    for arc, h in sorted((withheld or {}).items()):
+        lines.append(f"  - `{arc}` `{h}`")
+    lines += [
+        "- **内部保存不受影响**：原件仍在工作区 `quant/` 与内部导出快照里，逐字节可核对。",
+        "- **可交付部分不受影响**：财报正文 `reports/report.md`（及 PDF／底稿／图表）仍在本包内。",
+        "- 对外交付量化结论须取得机构授权，或只交付取得授权的衍生结论；"
+        "原始行情／事件／日历数据不得随包外发。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _market_delivery_blocked(members: dict) -> list[str]:
+    """带**市场对照读数**的 `analysis/` 实验成员（C5-4）：按内容判，无 market 段零影响。
+
+    判据＝每块 `market_comparison` 自带的 `delivery_eligible`（与 quant 许可门同一家族：
+    `event_returns` 按数据源许可算），不是代理侧自行放行；这一位判不出/缺失 ⇒ 受限
+    （fail closed）——受限数不得从 `analysis/`、实验 JSON 绕许可门外发，也不改许可口径。
+    """
+    blocked: list[str] = []
+    for arc in sorted(str(a) for a in (members or {})):
+        if not (str(arc).startswith("analysis/") and str(arc).endswith(".json")):
+            continue
+        try:
+            blob = json.loads(bytes(members[arc]).decode("utf-8"))
+        except Exception:                        # noqa: BLE001 - 坏文件按"没有市场段"处理
+            continue
+        if not (isinstance(blob, dict) and isinstance(blob.get("market_comparison"), dict)):
+            continue
+        if (blob.get("market_comparison") or {}).get("delivery_eligible") is not True:
+            blocked.append(arc)
+    return blocked
+
+
+def external_delivery_projection(members: dict) -> tuple[dict, dict | None]:
+    """**外发投影**：按现有许可判据决定量化附件能不能随交付包出门（复核 §3D）。
+
+    - 没有量化附件、也没有带市场对照读数的 analysis 成员 ⇒ 原样返回、**不产任何结论**
+      （`None`）：没有受限读数的工作区，包内成员一字不变（零存量影响契约不变）；
+    - 判据复用 `quant_research.publish.external_delivery_gate()`（不另写一套许可解释）；
+      C5-4：带 `market_comparison` 的 analysis/experiment 成员按每块自带的
+      `delivery_eligible` 判（同一家族），`False`/判不出 ⇒ 同样移出本包；
+    - **不允许对外**（含"判不出来"）⇒ 受限成员移出本包，换成一份限制说明
+      （列出被移出成员与 sha256），其余成员原样保留；
+    - 允许对外 ⇒ 原样保留，只在清单里记一条结论。
+    """
+    q = _quant_arcs(members)
+    ma = _market_delivery_blocked(members)
+    if not q and not ma:
+        return dict(members or {}), None
+    if q:
+        try:
+            from quant_research import publish as _qpub
+            gate = _qpub.external_delivery_gate(_readings_from_members(members))
+        except Exception as exc:                 # noqa: BLE001 - 判不出就 fail closed
+            gate = {"allowed": False, "blocked_by": q,
+                    "reason": f"许可门不可用（{str(exc)[:80]}）⇒ 不默认放行，量化附件不随包外发"}
+    else:
+        gate = {"allowed": False, "blocked_by": ma,
+                "reason": ("带市场对照读数的 analysis 成员 `delivery_eligible=False`"
+                           "（数据源许可仅内部试验）⇒ 不随包外发")}
+    info: dict = {"schema": "weavemind.external_delivery/1", "applied": True,
+                  "allowed": bool(gate.get("allowed")), "checked": q or ma,
+                  "basis": ("quant_research.publish.external_delivery_gate" if q else
+                            "market_comparison.delivery_eligible（event_returns 按数据源许可算）"),
+                  "reason": str(gate.get("reason") or "")}
+    out = dict(members or {})
+    if gate.get("allowed") and not ma:
+        return out, info
+    withheld = {arc: hashlib.sha256(bytes(out[arc])).hexdigest()
+                for arc in list(q) + list(ma) if arc in out}
+    for arc in list(q) + list(ma):
+        out.pop(arc, None)
+    out[EXTERNAL_NOTE_ARC] = _external_note(gate, withheld).encode("utf-8")
+    info["withheld"] = withheld
+    info["note"] = EXTERNAL_NOTE_ARC
+    return out, info
+
+
 def analysis_payload_bytes(ws) -> bytes | None:
     """工作区里的分析运行记录（`financial_analysis.store`）→ 进包的字节。
 
@@ -1121,6 +1243,17 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
             # 正文只留三条摘要；底稿是"可展开"的那一层，缺了它就只剩摘要无处可查。
             for p in sorted((ws / "analysis").glob("*.md")):
                 files.append((p, f"analysis/{p.name}"))
+            # 冻结研究输入（B4 研究直连）：research_inputs.json 原名随包。
+            # 按名存在才进包：旧任务没有这个文件名，行为零变化；manifest 同步收录。
+            _fi = ws / "analysis" / "research_inputs.json"
+            if _fi.exists():
+                files.append((_fi, "analysis/research_inputs.json"))
+            # C4 研究实验（现金回撤/机制卡/披露更新）：**完整实验 JSON 同版随包**——
+            # `company_view.realization.c3_experiment.exact_values_in` 指向的就是它，
+            # 此前只进了渲染后的 .md、JSON 成员缺失（C4-3 接缝修）。
+            # 按名存在才进包：旧任务没有这个文件名，行为零变化。
+            for _c3 in sorted((ws / "analysis").glob("c3_experiment_*.json")):
+                files.append((_c3, f"analysis/{_c3.name}"))
         except Exception as exc:                 # noqa: BLE001 - 输入读不到就不进包
             logger.warning("打包：分析输入读取失败：%s", str(exc)[:100])
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
@@ -1137,6 +1270,15 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 members.append((arc, _P(abs_path).read_bytes()))
             except Exception as exc:             # noqa: BLE001 - 读不到编不出，如实抛
                 raise RuntimeError(f"打包读取失败：{arc}：{str(exc)[:80]}") from exc
+    # §3D（10-06 复核）**外发投影**：交付包是对外交付面 —— 按**现有许可判据**把无权外发的
+    # 量化附件移出本包（换成一份限制说明），财报正文与其他成员原样保留；内部快照与工作区
+    # `quant/` 原件不动（内部保存成立），被移出成员的 sha256 记进包内清单。两路（快照/直读）
+    # 都过同一判据，不新增第二条交付链。
+    _projected, _ext = external_delivery_projection(dict(members))
+    if _ext is not None:
+        members = list(_projected.items())
+        manifest["files"] = {arc: hashlib.sha256(blob).hexdigest() for arc, blob in members}
+        manifest["external_delivery"] = _ext
     # 发布前最后复核：身份没变才发布（变了说明期间发生修订 → 不静默混版）
     if str(store.adopted().identity_id()) != str(manifest.get("report_version_id") or ""):
         raise RuntimeError("version changed")
@@ -1667,6 +1809,100 @@ def _rb_gate_structure(task_id: str, body: str, *, ws_dir=None) -> dict | None:
     return {"analysis_gate_ok": _has_analysis_section(_gate_analysis_text(task_id, body))}
 
 
+def _snippet_reports_success(snippet: str) -> bool:
+    """失败记录里的**原始结果**自己说成功 ⇒ 这是"纠正步骤没达成目标"，不是"没产出正文"。
+
+    实机 `ui-10ea37599d` 的 `i1-acc-redo` 记录就是这种形状：`error_snippet` 里带着
+    `{"status": "success", "report_path": …reports/report.md, "chars": 10588}`，任务终态 SUCCESS、
+    交付已 verified。把它当"报告步骤失败"会把已交付的好稿子**误判成草稿**——那条记录要说的是
+    "这次纠正重做没让验收过关"，交付状态该由验收决定，不该被它一票否决。
+    """
+    s = str(snippet or "").strip()
+    if not s.startswith("{"):
+        return False
+    try:
+        import json as _json
+        d = _json.loads(s)
+    except Exception:                                # noqa: BLE001 - 不是结构化结果
+        return False
+    if not isinstance(d, dict):
+        return False
+    return str(d.get("status") or "").strip().lower() in ("success", "succeeded", "ok")
+
+
+def _replacement_recovered(d) -> tuple[bool, str]:
+    """替代步骤是否**真的成功**接管了这次失败 → `(已恢复, 说明)`。
+
+    10-07 复核 §随样品最小收口-3：此前**只看 `replacement_step_id` 是否存在**，
+    于是 `replacement_step_id=<某步> + replacement_outcome=FAILED` 也被当成"有恢复路径"
+    （反例：只有替代 ID 就解除失败门）。**有 ID 不等于恢复成功**：
+    只有替代结果明确成功才解除；失败/未执行/未知一律**不能**证明恢复（fail-closed）。
+    """
+    rid = str(getattr(d, "replacement_step_id", "") or "").strip()
+    if not rid:
+        return False, ""
+    outcome = str(getattr(d, "replacement_outcome", "") or "").strip()
+    if outcome.lower() in ("success", "succeeded", "ok", "passed", "completed"):
+        return True, f"{rid}（outcome={outcome}）"
+    return False, f"{rid}（outcome={outcome or '未记录'}）"
+
+
+def _report_step_failure(task_id: str, *, ws_dir=None) -> str:
+    """本任务是否有**未恢复、且确实没产出正文的报告步骤失败**（交付硬门槛用）→ 原因或 `""`。
+
+    为什么门槛必须读这个**事实记录**：报告步骤失败时，交给装配的是失败文本
+    （没有 `## 分析`，也没有可交付的正文），而内容判据看不见"这一步失败了"——
+    `_analysis_gate_verdict` 对"正文没有 `## 分析`"走免伤分支返回 True，
+    `_has_deliverable_analysis` 又接受"有确定性读者判断就算有分析"，于是失败稿也判 `verified`
+    （10-06 复核离线用例 `off-res-1` 实测，基线 `92c359f` 起就成立）。
+    步骤失败是**记录在案的事实**（`step_failure.json`，capability=`report_generator`），
+    不能靠正文标题去猜。
+
+    三个判据缺一不可：① capability 是 `report_generator`；② 没有**成功接管**的替代步骤
+    （`replacement_step_id` 有值但 `replacement_outcome` 是 FAILED/未执行/未知 ⇒ 不算恢复）；
+    ③ 记录里的原始结果**不是**成功载荷（见 `_snippet_reports_success`）。
+
+    读不到记录（文件不存在）＝没有信号；文件存在但读不出来＝**不静默放行**，仍报原因。
+    """
+    try:
+        p = _ws(task_id, ws_dir) / "step_failure.json"
+        if not p.is_file():
+            return ""
+    except Exception as exc:                         # noqa: BLE001 - 路径都算不出＝没有信号
+        logger.warning("步骤失败记录定位失败（task=%s）：%s", task_id, str(exc)[:120])
+        return ""
+    try:
+        import json as _json
+        from step_diagnosis import StepDiagnosis
+        # 自己读+解析（不用 `read_step_failures`）：后者把"文件坏掉"吞成 `[]`，
+        # 于是"有失败记录却读不出来"会被当成"没有失败"——那正是**静默放行**。
+        raw = p.read_text(encoding="utf-8")
+        data = _json.loads(raw)
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            raise ValueError("step_failure.json 不是列表")
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            d = StepDiagnosis.from_dict(item)
+            if str(getattr(d, "capability", "") or "") != "report_generator":
+                continue
+            _rec, _rec_why = _replacement_recovered(d)
+            if _rec:
+                continue                             # 替代步骤**确实成功** ⇒ 有恢复路径
+            snippet = str(getattr(d, "error_snippet", "") or "")
+            if _snippet_reports_success(snippet):
+                continue                             # 原始结果说成功了 → 不是"没产出正文"
+            return ("报告步骤失败（report_generator，未恢复且未产出正文）"
+                    + (f"，替代步骤未成功：{_rec_why}" if _rec_why else "")
+                    + (f"：{snippet[:80]}" if snippet else ""))
+        return ""
+    except Exception as exc:                         # noqa: BLE001 - 有失败记录却读不出来
+        logger.warning("步骤失败记录读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        return f"步骤失败记录读取失败（按证据未知处理）：{str(exc)[:100]}"
+
+
 def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                              report_body: str = "", *, ws_dir=None,
                              structure: dict | None = None) -> tuple[str, str]:
@@ -1701,6 +1937,11 @@ def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
         return "", ""
 
     reasons: list[str] = []
+    # 报告步骤失败是**事实记录**（不是内容判据）：失败稿不得判 verified。
+    # 10-06 复核 §5-1 的明确保证——"迁移标题哨兵到结构判据时保持'报告步骤失败不得 verified'"。
+    _step_fail = _report_step_failure(task_id, ws_dir=ws_dir)
+    if _step_fail:
+        reasons.append(_step_fail + "：本次交付不得判为已验证（内容判据看不见步骤失败）")
     try:
         if wp is None or wp.get("skipped"):
             reasons.append("研究任务未取得结构化事实：底稿缺失，本次不得判为已验证")
@@ -1793,6 +2034,35 @@ def research_candidate_body(task_id: str, goal: str, body: str, *,
         return None
 
 
+def accept_task_meta(task_id: str) -> dict:
+    """验收体裁（report_type）要读的**任务元数据**：任务行 + 解析后的 run_options。
+
+    实测：当前链路没有任何"报告体裁"字段——`research_request` 只有公司/期间/口径
+    （`facts.parse_research_request`），`run_options` 只有 auto_run/template_steps，
+    `task_history` 也没有 report_type 列。所以这里如实把"可能声明体裁的地方"整包交给
+    `acceptance_checker.resolve_report_type`：将来任一字段声明了体裁就优先采信，
+    没声明则按目标文本判定。读不到元数据时返回空 dict，验收照常进行。
+    """
+    try:
+        import task_state as _ts
+        row = _ts.read_task(task_id) or {}
+    except Exception as exc:                     # noqa: BLE001 - 元数据读不到不影响验收
+        logger.debug("读取任务元数据失败（task=%s）：%s", task_id, str(exc)[:120])
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    meta = dict(row)
+    _raw = row.get("run_options_json")
+    if isinstance(_raw, str) and _raw.strip():
+        try:
+            _parsed = json.loads(_raw)
+            if isinstance(_parsed, dict):
+                meta["run_options"] = _parsed
+        except Exception:                        # noqa: BLE001 - 坏 JSON 当没配
+            pass
+    return meta
+
+
 def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     trigger: str = "报告步骤", prefer_body: bool = True,
                     hooks: dict | None = None, ws_dir=None,
@@ -1811,6 +2081,9 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
     - `on_summary(summary)`：把缺口摘要推给前端；
     - `iteration`：写进审计事件的轮次；
     - `on_failure(result, report)`：验收 fail 后的沉淀钩子（评测集生长）。
+
+    验收体裁（`report_type`）由 `accept_task_meta(task_id)` + goal 判定后**透传**给
+    `run_acceptance`：同一份正文按不同体裁取不同阈值，结论里回写生效体裁，便于对账。
     """
     hooks = hooks or {}
     try:
@@ -1819,7 +2092,7 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
             return None
         _t0 = time.time()
         _repaired = False
-        from acceptance_checker import run_acceptance
+        from acceptance_checker import resolve_report_type, run_acceptance
         from workspace import task_reports_dir
         rpath = task_reports_dir(task_id) / "report.md"
         if prefer_body and str(body or "").strip():
@@ -1841,7 +2114,11 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                 logger.info("验收对象改为代码装配的候选稿（task=%s，%d→%d 字符）",
                             task_id, len(report), len(candidate))
                 report = candidate
-        result = run_acceptance(task_id, goal, report, _ws(task_id, ws_dir))
+        # 报告体裁（report_type）：任务元数据显式声明 > 目标文本判定 > default_profile；
+        # 验收阈值/时效豁免按体裁档位取（acceptance.profiles），判定规则不变。
+        _report_type = resolve_report_type(goal, accept_task_meta(task_id))
+        result = run_acceptance(task_id, goal, report, _ws(task_id, ws_dir),
+                                report_type=_report_type)
         # 虚假标注确定性修复：把"把叙述片段当来源"的句子降级为诚实披露后复检
         try:
             sl = (result.get("checks") or {}).get("source_labeling") or {}
@@ -1853,7 +2130,9 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     rpath.write_text(repaired, encoding="utf-8")
                     report = repaired
                     _repaired = True
-                    result = run_acceptance(task_id, goal, repaired, _ws(task_id, ws_dir))
+                    result = run_acceptance(task_id, goal, repaired,
+                                            _ws(task_id, ws_dir),
+                                            report_type=_report_type)
         except Exception as exc:
             logger.warning("来源标注自动修复失败（task=%s）：%s", task_id, str(exc)[:120])
         # 来源清单 URL 存活校验（仅提示，不改 overall）

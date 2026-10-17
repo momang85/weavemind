@@ -1,0 +1,87 @@
+{
+  "baseline": "38fcd9c",
+  "source": "Independent Codex read-only judgment reviewer executed runpy production functions; root records already-observed results without rerunning",
+  "functions": [
+    "plan_target_of",
+    "_target_judgment"
+  ],
+  "target_counterexamples": [
+    {
+      "name": "another_plan_is_not_actual",
+      "records": [
+        {
+          "snippet": "公司计划2024年营业收入同比增长5%。",
+          "locator": "A计划",
+          "subject": "A",
+          "published_at": "2024-03-01",
+          "document_period": "2023"
+        },
+        {
+          "snippet": "2024年计划实现营业收入同比增长8%。",
+          "locator": "A未来计划",
+          "subject": "A",
+          "published_at": "2024-03-01",
+          "document_period": "2023",
+          "section": "2024年经营计划"
+        }
+      ],
+      "actual_observed": {
+        "yoy": 8.0,
+        "year": 2024,
+        "locator": "A未来计划"
+      },
+      "title_observed": "经营计划（2024 年，营业收入同比 +5%）**兑现（达到或超过计划上限）**：全年 +8.00%｜披露时点 2024-03-01",
+      "expected": "actual remains unknown; another future plan is not realized evidence"
+    },
+    {
+      "name": "half_year_is_not_full_year",
+      "records": [
+        {
+          "snippet": "公司计划2024年营业收入同比增长5%。",
+          "locator": "A计划",
+          "subject": "A",
+          "published_at": "2024-03-01",
+          "document_period": "2023"
+        },
+        {
+          "snippet": "2024年1-6月实现营业收入100亿元，同比增长8%。",
+          "locator": "A半年报",
+          "subject": "A",
+          "published_at": "2024-08-01",
+          "document_period": "2024H1"
+        }
+      ],
+      "actual_observed": {
+        "yoy": 8.0,
+        "year": 2024,
+        "locator": "A半年报"
+      },
+      "title_observed": "经营计划（2024 年，营业收入同比 +5%）**兑现（达到或超过计划上限）**：全年 +8.00%｜计划披露 2024-03-01、实际披露 2024-08-01",
+      "expected": "full-year actual remains unknown; half-year result must not satisfy full-year target"
+    }
+  ],
+  "accepted_boundary_checks": {
+    "source": "Independent Codex boundary reviewer using -B and pure-memory mocks",
+    "existing_tests_passed": 22,
+    "report_failure_mock_checks": 14,
+    "projection_classes": 3,
+    "missing_available_at": "future price points pending, return empty; matured windows still observed",
+    "mixed_invalid_quant": "denies quant external projection, preserves report bytes and original input members",
+    "replacement_failed_unknown": "blocked unless replacement ID and explicitly successful outcome",
+    "limits": [
+      "no disk integration tests",
+      "no full suite",
+      "no real task mutation or service access"
+    ]
+  },
+  "sany_state_evidence": {
+    "source": "docs/evidence/20261007-sany-direction/export_manifest.json",
+    "machine_status": "verified",
+    "acceptance_overall": "pass",
+    "research_state": "research_draft",
+    "research_stale": true,
+    "reader_review": "评审未完成",
+    "claim_in_dsh_docs": "draft/fail",
+    "decision": "correct written status; do not forbid coexistence of machine pass and research draft"
+  }
+}

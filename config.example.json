@@ -1,4 +1,35 @@
 {
+  "acceptance": {
+    "_comment": "机器验收的**报告体裁**档位（acceptance_checker.run_acceptance 的 report_type 轴，与任务档位 profile 无关）。这里只改阈值来源，不改判定规则；未知/缺失档位名回落到 default_profile。traceability 只提供 financial/research 两轴，crypto/macro/news 仍用代码内域阈值。freshness_required=false 的体裁（事件研究）改判 freshness_alternatives：命中即通过，未命中只提示不判失败。placeholder_max = financial 域报告判「交付物不完整」的占位标记数上限（原硬编码 3）。数值以 docs/arch_task4_acceptance_config.md 为准。",
+    "default_profile": "annual_report",
+    "profiles": {
+      "annual_report": {
+        "traceability": {
+          "financial": 0.7,
+          "research": 0.5
+        },
+        "freshness_required": true,
+        "placeholder_max": 3
+      },
+      "semi_annual": {
+        "traceability": {
+          "financial": 0.55,
+          "research": 0.4
+        },
+        "freshness_required": true,
+        "placeholder_max": 5
+      },
+      "event_study": {
+        "traceability": {
+          "financial": 0.5,
+          "research": 0.3
+        },
+        "freshness_required": false,
+        "freshness_alternatives": ["公告日", "事件日", "披露日"],
+        "placeholder_max": 5
+      }
+    }
+  },
   "llm": {
     "api_key": "YOUR_API_KEY",
     "base_url": "https://api.siliconflow.cn/v1",

@@ -126,6 +126,28 @@ class LicenseGateTest(unittest.TestCase):
         self.assertFalse(a["allowed"])
         self.assertFalse(b["allowed"])
 
+    def test_unreadable_member_blocks_even_when_others_are_eligible(self):
+        """10-07 复核 §随样品最小收口-2 反例：**授权读数 + 坏文件**曾被判 allowed=True。
+
+        坏的/未登记的量化成员**判不出许可** ⇒ 不默认放行（fail-closed）：
+        内部快照保留原件、财报正文照常交付，只阻止量化附件外发。
+        """
+        g = pub.external_delivery_gate(
+            {"event_returns": _er(lic="机构授权", eligible=True),
+             "_unreadable": ["quant/backtest.json"]})
+        self.assertFalse(g["allowed"], "一个坏成员不得被'其它读数都合格'掩盖")
+        self.assertIn("quant/backtest.json", g["blocked_by"])
+        self.assertIn("判不出许可", g["reason"])
+        self.assertIn("内部快照保留原件", g["reason"])
+
+    def test_unknown_member_key_blocks(self):
+        """未登记的成员键（不是已知读数）同样 fail-closed。"""
+        g = pub.external_delivery_gate(
+            {"event_returns": _er(lic="机构授权", eligible=True),
+             "_mystery": {"whatever": 1}})
+        self.assertFalse(g["allowed"])
+        self.assertIn("_mystery", g["blocked_by"])
+
 
 class DetailMarkdownTest(unittest.TestCase):
     def test_detail_carries_numbers_and_binding(self):
@@ -185,6 +207,106 @@ class DeliveryChainWiringTest(unittest.TestCase):
             man = json.loads(got["quant/quant_manifest.json"].decode("utf-8"))
             self.assertFalse(man["external_delivery"]["allowed"],
                              "免费源读数不得被判为可对外")
+
+
+class ExternalDeliveryProjectionTest(unittest.TestCase):
+    """复核 §3D：**外发许可拒绝时，无权外发的量化附件不进入交付包，财报正文仍可交付**。
+
+    内部快照/工作区 `quant/` 原件保留（内部保存成立）；交付包（对外交付面）里只留一份
+    限制说明 + 被移出成员的 sha256。判据复用既有许可门，不新写一套许可解释。
+    """
+
+    MD = b"# \xe4\xba\xa4\xe4\xbb\x98\xe6\xad\xa3\xe6\x96\x87\n"
+
+    def _members(self, ws):
+        import delivery_pipeline as dp
+        pub.store_reading(ws, "event_returns", _er())
+        pub.store_reading(ws, "backtest", _bt())
+        return dp, dp._freeze_payload("t-ext", ws, md_bytes=self.MD)      # noqa: SLF001
+
+    def test_restricted_quant_is_removed_but_report_stays(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            (ws / "analysis").mkdir()
+            dp, members = self._members(ws)
+            self.assertIn("quant/backtest.json", members)   # 内部快照仍带附件
+            proj, info = dp.external_delivery_projection(members)
+            self.assertFalse(info["allowed"])
+            self.assertEqual(info["schema"], "weavemind.external_delivery/1")
+            self.assertNotIn("quant/backtest.json", proj)
+            self.assertNotIn("quant/event_returns.json", proj)
+            self.assertNotIn("quant/quant_detail.md", proj, "衍生底稿同样按用途许可判，不天然放行")
+            self.assertNotIn("quant/quant_manifest.json", proj)
+            self.assertEqual(proj["reports/report.md"], self.MD, "财报正文必须仍可交付")
+            self.assertEqual(sorted(info["withheld"]),
+                             ["quant/backtest.json", "quant/event_returns.json",
+                              "quant/quant_detail.md", "quant/quant_manifest.json"])
+            self.assertTrue(all(len(h) == 64 for h in info["withheld"].values()))
+            note = proj[dp.EXTERNAL_NOTE_ARC].decode("utf-8")
+            self.assertIn("不允许对外", note)
+            self.assertIn("内部保存不受影响", note)
+            self.assertIn("可交付部分不受影响", note)
+            # 幂等：再投一次不再变化（重复打包不会越删越多）
+            again, info2 = dp.external_delivery_projection(proj)
+            self.assertEqual(again, proj)
+            self.assertIsNone(info2)
+
+    def test_without_quant_nothing_changes(self):
+        import tempfile
+        import delivery_pipeline as dp
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            (ws / "analysis").mkdir()
+            members = dp._freeze_payload("t-ext-none", ws, md_bytes=self.MD)  # noqa: SLF001
+            proj, info = dp.external_delivery_projection(members)
+            self.assertIsNone(info, "没有量化附件就不产对外许可结论")
+            self.assertEqual(proj, members)
+
+    def test_institutional_license_keeps_quant_in_package(self):
+        import tempfile
+        import delivery_pipeline as dp
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            (ws / "analysis").mkdir()
+            pub.store_reading(ws, "event_returns", _er(lic="机构授权", eligible=True))
+            pub.store_reading(ws, "backtest", _bt(lic="机构授权", eligible=True))
+            members = dp._freeze_payload("t-ext-ok", ws, md_bytes=self.MD)    # noqa: SLF001
+            proj, info = dp.external_delivery_projection(members)
+            self.assertTrue(info["allowed"])
+            self.assertEqual(proj, members, "允许对外时包内成员一字不变")
+
+    def test_unreadable_readings_fail_closed(self):
+        """读数读不出来 ⇒ 按**不可对外**处理（不默认放行）。"""
+        import delivery_pipeline as dp
+        members = {"reports/report.md": self.MD, "quant/backtest.json": b"{not json"}
+        proj, info = dp.external_delivery_projection(members)
+        self.assertFalse(info["allowed"])
+        self.assertNotIn("quant/backtest.json", proj)
+        self.assertIn(dp.EXTERNAL_NOTE_ARC, proj)
+        self.assertIn("reports/report.md", proj)
+
+    def test_authorized_reading_plus_broken_member_still_fails_closed(self):
+        """10-07 复核原反例：**授权 event_returns ＋ 坏 backtest.json** 曾被判 allowed=true。
+
+        修后：坏成员一起被移出、只留限制说明，财报正文照常交付。
+        """
+        import delivery_pipeline as dp
+        members = {
+            "reports/report.md": self.MD,
+            "quant/event_returns.json": json.dumps(
+                _er(lic="机构授权", eligible=True)).encode("utf-8"),
+            "quant/backtest.json": b"{broken",
+        }
+        proj, info = dp.external_delivery_projection(members)
+        self.assertFalse(info["allowed"], "坏成员不得被授权读数掩盖")
+        self.assertNotIn("quant/backtest.json", proj)
+        self.assertNotIn("quant/event_returns.json", proj,
+                         "量化外发是整体的：有成员判不出许可就不放行任何量化附件")
+        self.assertEqual(proj["reports/report.md"], self.MD, "财报正文仍可交付")
+        note = proj[dp.EXTERNAL_NOTE_ARC].decode("utf-8")
+        self.assertIn("不允许对外", note)
+        self.assertIn("内部保存不受影响", note)
 
 
 if __name__ == "__main__":

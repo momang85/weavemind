@@ -1,0 +1,25 @@
+{
+  "reviewed_at": "2026-10-12T11:01:48.443154+08:00",
+  "url": "http://127.0.0.1:8091/research-study",
+  "temporary_project_webui_pid": 30452,
+  "authentication": "Previously authorized local account login succeeded; credentials not recorded",
+  "study_id": "4dba42a6bdde92276c4dabe428e9e4e77c1a31d39f3959b8631e0f6061ae8548",
+  "normal_entry": [
+    "selected existing real study",
+    "clicked section8 first load-subject button"
+  ],
+  "observed_error": "需要 entity_id（从已选研究的主体里选）",
+  "restoration_check": "Existing read-only study restore did not populate experiment subject control",
+  "decision": "C4 backend/identity component accepted; complete normal UI path blocked by options bootstrap contract",
+  "not_reached": [
+    "native experiment evaluation",
+    "native disclosure update",
+    "save/reopen/download",
+    "actual C4 ZIP delivery"
+  ],
+  "proof": [
+    "c4-first-entry-dom.txt",
+    "c4-first-entry-blocked.png"
+  ],
+  "runtime_note": "One temporary authenticated loopback WebUI only; no implementation edits, no LLM/research-worker task submitted, no unrelated 8080 process touched"
+}

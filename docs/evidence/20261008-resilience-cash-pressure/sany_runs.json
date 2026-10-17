@@ -1,0 +1,162 @@
+[
+ {
+  "model_id": "operating_drivers",
+  "run_id": "0c07cb07515efb54bfd0dd398fe0d21ded6dc495f7ee3f75f7569e444f3f711f",
+  "status": "validated",
+  "params": {},
+  "outputs": [
+   {
+    "metric": "net_profit_change",
+    "value": 1448000000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "gross_profit_change",
+    "value": 1385760000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "revenue_scale_effect",
+    "value": 1197380857.82,
+    "unit": "元"
+   },
+   {
+    "metric": "gross_margin_effect",
+    "value": 188379142.18,
+    "unit": "元"
+   },
+   {
+    "metric": "below_gross_line_change",
+    "value": 62240000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "net_profit_change_detail",
+    "value": 62240000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "gross_profit_change_by_segment",
+    "value": 1385760000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "gross_profit_change_by_segment",
+    "value": 1385760000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "gross_profit_change_by_segment",
+    "value": 1385760000.0,
+    "unit": "元"
+   }
+  ]
+ },
+ {
+  "model_id": "cash_reconciliation",
+  "run_id": "7a82dc3630074b520b6a30f52fa5bac7e10a7b1bd5ea2fe79566285158e98e64",
+  "status": "validated",
+  "params": {},
+  "outputs": [
+   {
+    "metric": "operating_cashflow_reconciliation_cur",
+    "value": 14814278000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "operating_cashflow_reconciliation_prev",
+    "value": 5708220000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "operating_cashflow_change",
+    "value": 9106058000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "cash_gap_change",
+    "value": 7619630000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "largest_support",
+    "value": 5592854000.0,
+    "unit": "元"
+   },
+   {
+    "metric": "largest_drag",
+    "value": -643371000.0,
+    "unit": "元"
+   }
+  ]
+ },
+ {
+  "model_id": "scenario_sensitivity",
+  "run_id": "c932edfd2b69c99e5b1dc1bd77de89cf7e624f75af6e2ad7568cd579705bea0b",
+  "status": "validated",
+  "params": {},
+  "outputs": [
+   {
+    "metric": "scenario_net_profit",
+    "value": 7819893205.5,
+    "unit": "元"
+   },
+   {
+    "metric": "scenario_sensitivity",
+    "value": 777733910.0,
+    "unit": "元"
+   },
+   {
+    "metric": "collection_days_capital_per_day",
+    "value": 223731672.74,
+    "unit": "元"
+   },
+   {
+    "metric": "collection_days_sensitivity_10d",
+    "value": 2237316727.4,
+    "unit": "元"
+   },
+   {
+    "metric": "margin_threshold_to_hold_base_profit",
+    "value": 24.5694,
+    "unit": "%"
+   },
+   {
+    "metric": "margin_gap_to_threshold_pp",
+    "value": -1.8618,
+    "unit": "%（pp）"
+   },
+   {
+    "metric": "revenue_growth_to_hold_target",
+    "value": -7.044,
+    "unit": "%"
+   }
+  ]
+ },
+ {
+  "model_id": "cash_pressure",
+  "run_id": "879967b5b1e71441c67fd0df5f201ea4ca64dedca7c16672a6c50de31f9ef279",
+  "status": "validated",
+  "params": {
+   "collection_days_delta": 10,
+   "inventory_days_delta": 10
+  },
+  "outputs": [
+   {
+    "metric": "incremental_capital_occupation",
+    "value": 3698365753.42,
+    "unit": "元"
+   },
+   {
+    "metric": "collection_days_capital_per_day",
+    "value": 213077783.56,
+    "unit": "元"
+   },
+   {
+    "metric": "inventory_days_capital_per_day",
+    "value": 156758791.78,
+    "unit": "元"
+   }
+  ]
+ }
+]
