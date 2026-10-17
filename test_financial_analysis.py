@@ -5505,9 +5505,11 @@ class TestHalfYearCalibers(unittest.TestCase):
         rows = {h["judgment_id"]: h for h in page["hypotheses"]}
         self.assertIn("cash_from_working_capital", rows)
         self.assertIn(cont.J_CASH_BUFFER, rows, "缓冲结构必须是独立子判断")
-        # ④ 方向延续：本期半年仍是利润项主导 → 加强（不被缓冲结构的变化带成削弱）
+        # ④ 方向延续：本期半年主导项仍是**利润项** → 加强（不被缓冲结构的变化带成削弱）
+        #    文案在 10-11 C4 改为「主导项仍是**{旧快照读数给出的那一项}**」（不假定利润项、
+        #    也不拿别家公司的身份），所以这里断言的是同一意图：主导项身份＝利润项。
         self.assertEqual(rows["cash_from_working_capital"]["status"], cont.STATUS_STRONGER)
-        self.assertIn("利润项主导", rows["cash_from_working_capital"]["status_reason"])
+        self.assertIn("主导项仍是**利润项**", rows["cash_from_working_capital"]["status_reason"])
         # 缓冲结构：应收本期**释放** 6.86 亿 → 削弱，且明确区分本期额与同期变化
         buf = rows[cont.J_CASH_BUFFER]
         self.assertEqual(buf["status"], cont.STATUS_WEAKER)
