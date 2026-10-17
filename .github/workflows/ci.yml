@@ -60,6 +60,10 @@ jobs:
         run: python test_sandbox_isolation.py
       - name: Metrics scope tests
         run: python test_metrics_scope.py
+      - name: "Metrics by_capability caliber split (dispatched/gate/cascade/genuine)"
+        run: python test_task13_metrics_split.py
+      - name: "Capability-worker routing gate & URL normalization (P1)"
+        run: python test_task14_dispatch_routing.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)
