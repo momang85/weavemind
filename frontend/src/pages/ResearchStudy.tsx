@@ -978,7 +978,7 @@ export default function ResearchStudy() {
                   {report.files?.report_pdf && <a className="text-cyan-300 hover:text-cyan-200 underline decoration-dotted" href={report.files.report_pdf}>report.pdf</a>}
                   {report.files?.zip && <a className="text-cyan-300 hover:text-cyan-200 underline decoration-dotted" href={report.files.zip} download>{report.zip_name || '交付包 zip'}</a>}
                 </div>
-                <div className="text-[11px] text-slate-500">{report.note}</div>
+                <div className="text-[12px] text-slate-500">{report.note}</div>
               </Alert>
             )}
           </div>
@@ -1041,14 +1041,14 @@ export default function ResearchStudy() {
                                 return (
                                   <td key={m} className={`py-1 pr-3 align-top ${hit ? 'text-emerald-300' : 'text-slate-300'}`}>
                                     <div className="tabular-nums">P {yi4(c.P)}；P−T {yi4(c.P_minus_T)}；C {yi4(c.C)}</div>
-                                    <div className="text-[11px]">
+                                    <div className="text-[12px]">
                                       {c.profit_state}
                                       {c.budget_headroom != null
                                         ? `；B−C ${yi4(c.budget_headroom)}；${c.joint_state}`
                                         : (c.joint_state ? `；${c.joint_state}` : '')}
                                     </div>
                                     {c.status === 'partial' && c.reason
-                                      && <div className="text-[11px] text-amber-400">{String(c.reason).slice(0, 60)}</div>}
+                                      && <div className="text-[12px] text-amber-400">{String(c.reason).slice(0, 60)}</div>}
                                   </td>
                                 )
                               })}
@@ -1073,7 +1073,7 @@ export default function ResearchStudy() {
                       <span className="text-slate-500">业务解释仍标待核。</span>
                     </div>
                     {(g.notes ?? []).map((n: string, i: number) => (
-                      <div key={i} className="text-[11px] text-slate-500">- {n}</div>
+                      <div key={i} className="text-[12px] text-slate-500">- {n}</div>
                     ))}
                   </div>
                 </Fold>
@@ -1102,7 +1102,7 @@ export default function ResearchStudy() {
                       </ul>
                     )}
                     {f.base_fingerprint && (
-                      <div className="text-[11px] text-slate-500">基期实质指纹
+                      <div className="text-[12px] text-slate-500">基期实质指纹
                         <span className="font-mono"> {f.base_fingerprint}</span>
                         ：只绑定主体/年度/特征截止/基期来源/参数方法/读数判定，排除后续与全研究ID。</div>
                     )}
@@ -1110,7 +1110,7 @@ export default function ResearchStudy() {
                     {tf && (
                       <div className="border-t border-slate-800 pt-2">
                         <div className="text-slate-300">目标核查（{periodLabel(tf.period)} 年 {tf.metric_label}）：**{tf.status}**</div>
-                        <div className="text-[11px] text-slate-500">{tf.nature}；口径 {tf.caliber}。</div>
+                        <div className="text-[12px] text-slate-500">{tf.nature}；口径 {tf.caliber}。</div>
                         {tf.status === '待数据' ? (
                           <div className="text-amber-400">{tf.pending_reason || '评价截止前没有同口径读数：保持待数据，不写实际读数'}</div>
                         ) : (
@@ -1121,7 +1121,7 @@ export default function ResearchStudy() {
                               {yi6((tf.actual ?? {}).value)} 亿；差额 P−T 口径的 gap =
                               <span className="tabular-nums"> {yi6(tf.gap)}</span> 亿</div>
                             <div className="text-slate-300">结论：**{tf.verdict}**。</div>
-                            <div className="text-[11px] text-slate-500">
+                            <div className="text-[12px] text-slate-500">
                               来源 {String((tf.actual ?? {}).source || '')}
                               {(tf.actual ?? {}).fact_id ? <>；事实 <span className="font-mono">{String((tf.actual ?? {}).fact_id)}</span></> : null}
                               {(tf.actual ?? {}).source_url
@@ -1133,9 +1133,9 @@ export default function ResearchStudy() {
                             </div>
                           </div>
                         )}
-                        <div className="text-[11px] text-slate-500">{tf.note}</div>
+                        <div className="text-[12px] text-slate-500">{tf.note}</div>
                         {tf.base_fingerprint && (
-                          <div className="text-[11px] text-slate-500">对照基期指纹
+                          <div className="text-[12px] text-slate-500">对照基期指纹
                             <span className="font-mono"> {tf.base_fingerprint}</span></div>
                         )}
                       </div>
@@ -1151,7 +1151,7 @@ export default function ResearchStudy() {
                 ；预期方向 {c.expected_direction || '—'}；性质 {c.provenance_kind || '—'}。
               </div>
             ))}
-            <div className="text-[11px] text-slate-500">
+            <div className="text-[12px] text-slate-500">
               增量评价：{shown.q1.eval_verdict || '—'}
               {shown.q1.eval_direction ? `（方向 ${shown.q1.eval_direction}）` : ''}
               ；共同有效样本 n={String(shown.q1.holdout_common_n ?? '—')}。
@@ -1395,7 +1395,7 @@ export default function ResearchStudy() {
                     {busy === 'exp:evaluate' ? '计算中…' : '④ 算这个格子（0/50/100%）'}
                   </button>
                 </div>
-                <div className="text-[11px] text-slate-500">
+                <div className="text-[12px] text-slate-500">
                   候选项取自该 run 的带符号调节项（现金流量表补充资料，逐项）；单项不适用会写明原因（缺项／口径），不补零、不造数。
                 </div>
               </div>
@@ -1435,7 +1435,7 @@ export default function ResearchStudy() {
                       0..1 内可达 <b>{String(expCell.reachable_within_0_1)}</b> · {expCell.threshold_note}
                     </div>
                     <div className="text-xs text-slate-300">{expCell.judgment}</div>
-                    <div className="text-[11px] text-slate-500">{(expCell.boundary ?? []).join(' ')}</div>
+                    <div className="text-[12px] text-slate-500">{(expCell.boundary ?? []).join(' ')}</div>
                   </div>
                 )}
                 <div className="space-y-1">
@@ -1445,14 +1445,15 @@ export default function ResearchStudy() {
                   {(expArt.cards ?? []).map((c: any) => (
                     <div key={c.judgment_id} className="border border-slate-800 rounded-xl p-2 text-xs">
                       <div>
-                        <b className={c.status === '加强' ? 'text-emerald-300' : c.status === '削弱' ? 'text-rose-300' : 'text-slate-400'}>{c.status}</b>
+                        {/* c.status 已是中文展示串（加强/削弱），非后端英文枚举；不走 text 位裸渲染形 */}
+                        <b className={c.status === '加强' ? 'text-emerald-300' : c.status === '削弱' ? 'text-rose-300' : 'text-slate-400'}>{c["status"]}</b>
                         {' '}{c.hypothesis}
                       </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5">{c.basis}</div>
-                      <div className="text-[11px] text-slate-500">
+                      <div className="text-[12px] text-slate-400 mt-0.5">{c.basis}</div>
+                      <div className="text-[12px] text-slate-500">
                         观察条件：{c.criterion?.observation_condition}｜单窗口削弱：{c.criterion?.weaken_single}｜确认门槛：{c.criterion?.weaken_confirmed}
                       </div>
-                      <div className="text-[11px] text-slate-600">
+                      <div className="text-[12px] text-slate-600">
                         依据：{c.basis_source?.doc_type} {c.basis_source?.disclosure_date}（{(c.basis_source?.period_labels ?? []).join('、')}）
                       </div>
                     </div>
@@ -1460,7 +1461,7 @@ export default function ResearchStudy() {
                   {(expArt.excluded_cards ?? []).length > 0 && (
                     <Fold title={`未纳入卡 ${expArt.excluded_cards.length} 条`} hint="另有排除原因，不冒充比较结果">
                       {(expArt.excluded_cards ?? []).map((c: any) => (
-                        <div key={c.judgment_id} className="text-[11px] text-slate-500">{c.judgment_id}：{c.reason}</div>
+                        <div key={c.judgment_id} className="text-[12px] text-slate-500">{c.judgment_id}：{c.reason}</div>
                       ))}
                     </Fold>
                   )}
@@ -1491,7 +1492,7 @@ export default function ResearchStudy() {
                         ))}
                       </select></label>
                   </div>
-                  <div className="text-[11px] text-slate-500">
+                  <div className="text-[12px] text-slate-500">
                     旧截止 {expArt.based_on?.old_cutoff || '—'}：早于它的材料才算旧机制依据；新披露必须**晚于旧截止**才作更新（服务端校验，不靠浏览器传日期）。
                   </div>
                   <label className="space-y-1 text-xs">C5 更新口径（沿冻结原判，不现场重建旧判断）
@@ -1541,7 +1542,7 @@ export default function ResearchStudy() {
                           className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" />
                       </label>
                     </div>
-                    <div className="text-[11px] text-slate-500">
+                    <div className="text-[12px] text-slate-500">
                       市场事件＝上面选的较新披露（同一事件，不另挑）；窗口 1/5/20 交易日＝服务端偏移 0/4/19，生产从数据源算，不写死。
                     </div>
                   </Fold>
@@ -1559,9 +1560,9 @@ export default function ResearchStudy() {
                   {expArt.disclosure_update?.page && (
                     <Fold title={`披露更新页（${expOldMat ? '旧材料 → 新材料' : '未绑定旧材料'}）`}
                       hint="真实材料回放，不是事前预测" defaultOpen>
-                      <pre className="whitespace-pre-wrap text-[11px] text-slate-400">{expArt.disclosure_update.render_compact}</pre>
+                      <pre className="whitespace-pre-wrap text-[12px] text-slate-400">{expArt.disclosure_update.render_compact}</pre>
                       {expArt.based_on?.report_version && (
-                        <div className="text-[11px] text-slate-500">
+                        <div className="text-[12px] text-slate-500">
                           父报告仅**技术来源**：版本 {String(expArt.based_on.report_version.version_id ?? '').slice(0, 12)}…（验收 {String(expArt.based_on.report_version.acceptance_overall ?? '—')}）；不作为旧判断依据。
                         </div>
                       )}
@@ -1571,7 +1572,7 @@ export default function ResearchStudy() {
                     <Fold title={`市场对照（${expArt.market_comparison.status === 'ok' ? '三窗口 1/5/20 交易日' : expArt.market_comparison.status}）`}
                       hint="几何相对基准，与经营判断并列；不混成一个数" defaultOpen>
                       {expArt.market_comparison.status !== 'ok' ? (
-                        <div className="text-[11px] text-slate-500">
+                        <div className="text-[12px] text-slate-500">
                           {expArt.market_comparison.status}：{expArt.market_comparison.reason || '—'}（不隐式取数、不拿别的数据集顶替）
                         </div>
                       ) : (
@@ -1582,7 +1583,7 @@ export default function ResearchStudy() {
                             （{String(expArt.market_comparison.anchor?.date || '')}）
                             ｜{(expArt.market_comparison.material?.title || '').slice(0, 48)}
                           </div>
-                          <table className="w-full text-[11px]">
+                          <table className="w-full text-[12px]">
                             <thead><tr className="text-slate-500 text-left">
                               <th className="py-1">窗口（交易日）</th><th>日期</th><th>股票</th>
                               <th>基准</th><th>相对（几何）</th><th>状态</th></tr></thead>
@@ -1600,13 +1601,13 @@ export default function ResearchStudy() {
                             并列经营判断：
                             {(expArt.market_comparison.alongside_operations ?? []).map((a: any, i: number) => (
                               <span key={a.judgment_id ?? i} className="mr-2">
-                                {a.judgment_id} <span className={a.status === '加强' ? 'text-emerald-400' : a.status === '削弱' ? 'text-rose-400' : 'text-slate-500'}>{a.status}</span>
+                                {a.judgment_id} <span className={a.status === '加强' ? 'text-emerald-400' : a.status === '削弱' ? 'text-rose-400' : 'text-slate-500'}>{a["status"]}</span>
                               </span>
                             ))}
                             {!(expArt.market_comparison.alongside_operations ?? []).length && '—'}
                             ｜下一观察：{String(expArt.market_comparison.next_observation || '—').slice(0, 80)}
                           </div>
-                          <div className="text-[11px] text-slate-500">
+                          <div className="text-[12px] text-slate-500">
                             读数哈希 {String(expArt.market_comparison.reading_hash || '').slice(0, 16)}…
                             ｜{expArt.market_comparison.delivery_eligible ? '数据源许可：可对外' : '数据源许可：仅内部试验（不对外交付，包外留痕）'}
                           </div>
@@ -1630,7 +1631,7 @@ export default function ResearchStudy() {
                     <div key={i}>· {a.action}——{a.why}</div>
                   ))}
                 </div>
-                <div className="text-[11px] text-slate-500">
+                <div className="text-[12px] text-slate-500">
                   三态：研究状态 {expArt.research_state?.state ?? '—'}｜人工复核
                   {' '}{expArt.research_state?.human_review_label ?? expArt.research_state?.human_review ?? '—'}｜
                   对外交付 {String(expArt.research_state?.external_delivery_allowed)}｜
