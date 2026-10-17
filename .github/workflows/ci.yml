@@ -64,6 +64,8 @@ jobs:
         run: python test_task13_metrics_split.py
       - name: "Capability-worker routing gate & URL normalization (P1)"
         run: python test_task14_dispatch_routing.py
+      - name: "Dead-url cache on net_policy reject (per-task, no retry on deterministic reject)"
+        run: python test_task15_dead_url_cache.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)

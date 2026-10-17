@@ -246,9 +246,18 @@ _FETCH_ROLE_BY_STEP = {"2": "annual_report", "2b": "notes"}
 # 同一 URL 再抓一次只会再花 6-8s DNS 解析得到同一拒绝）。与 net_policy.py
 # validate_public_url 的拒绝文案一一对应（测试 test_task14_dispatch_routing
 # 用真实 net_policy 校验逐条核对标记覆盖面）。
+#
+# 任务15（P1 补漏）：补 `require_egress_ok` 的出口方式拒绝。它同样是**确定性**的
+# 策略拒绝（`proxy_required` 模式下本版本明确不支持经代理抓取，见 net_policy.py
+# 的 PROXY_EGRESS_SUPPORTED=False）：不记账的话，该模式下每个抓取步的每个地址
+# 都要被重发 `_max_retry` 次、每次先等一遍 DNS 才拿到同一句拒绝。
+# **不覆盖** `DNS 解析失败`/`DNS 未返回可用地址`：那是网络/离线类失败，换个时刻
+# 或换个出口就可能成功，一刀切记死链会丢掉本来能取到的材料（见 _execute_steps
+# 内 X0 的原始判断）。
 _FETCH_POLICY_REJECT_MARKS = (
     "URL 无法解析", "协议不允许", "不得携带用户凭据", "缺少主机名",
     "目标是本机/元数据服务", "解析到非公网地址",
+    "内容抓取要求经代理出口",
 )
 
 
@@ -2985,7 +2994,116 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     out.append(u)
         return tuple(out)
 
+    # ── 死链缓存（X0 / 任务14 / 任务15）──────────────────────────────
+    # 语义：**同一任务内**已判定"抓了也没用"的 URL（策略拒绝 / HTTP 非 2xx）不再派发。
+    # 任务15 补两处，见 `_note_fetch_dead_url` 与 `_dispatch_step_safe` 的注释。
 
+    def _dead_urls_of(self, task_id: str) -> set:
+        """本任务的死链集合（**按任务隔离**，惰性建、按 task_id 各存一条）。
+
+        此前是实例级单个 set：一个编排器进程连续/并发跑多个任务时，A 任务里失败过的
+        URL 会把 B 任务的同名 URL 一起判死（跨任务污染），且随进程一直长。改为
+        `_task_goals`/`_budget_exhausted` 同款"按任务存一条"，本任务这一条在
+        `run()` 起始清掉（`_forget_dead_urls`），不动别的任务。
+        """
+        if not hasattr(self, "_dead_fetch_urls"):
+            self._dead_fetch_urls = {}
+        return self._dead_fetch_urls.setdefault(str(task_id or ""), set())
+
+    def _forget_dead_urls(self, task_id: str) -> None:
+        """任务起始清空**本任务**的死链缓存：下一次运行（重跑/续跑）重新有机会抓。"""
+        store = getattr(self, "_dead_fetch_urls", None)
+        if isinstance(store, dict):
+            store.pop(str(task_id or ""), None)
+
+    def _is_dead_fetch_url(self, task_id: str, url: str) -> bool:
+        return bool(url) and url in self._dead_urls_of(task_id)
+
+    def _mark_dead_fetch_url(self, task_id: str, url: str, reason: str = "") -> bool:
+        """把 URL 记入本任务死链；返回是否**首次**记账（调用方据此决定是否重复记日志）。"""
+        if not url:
+            return False
+        urls = self._dead_urls_of(task_id)
+        if url in urls:
+            return False
+        urls.add(url)
+        logger.info("抓取死链记账 task=%s url=%s 原因=%s",
+                    task_id, str(url)[:120], str(reason or "")[:120])
+        return True
+
+    @staticmethod
+    def _step_fetch_url(step: dict) -> str:
+        """本步**实际会被抓取**的那个 URL（与 `web_fetch_worker._explicit_url` 同序：
+        `[URL: …]` 显式选定的优先，其次指令里第一个 URL）；没有则空串。
+
+        记账与门禁必须用同一个值：worker 优先抓 `[URL: …]` 选定的页（`_with_selected_url`
+        把它放在指令最前并清掉其余标记），编排器若按"指令里第一个 URL"记账，就会把
+        **另一个**（很可能是好候选）记成死链、后续步骤被误跳过。
+        """
+        instr = str((step or {}).get("instruction") or "")
+        m = re.search(r"\[URL:\s*([^\]]+)\]", instr, re.I)
+        if m:
+            cand = _clean_fetch_url(m.group(1))
+            if cand.startswith("http"):
+                return cand
+        urls = re.findall(r"https?://[^\s<>\"'）)】\]]+", instr)
+        return _clean_fetch_url(urls[0]) if urls else ""
+
+    @staticmethod
+    def _fetch_http_status(result: dict) -> int | None:
+        """抓取结果里的 `http_status`（worker 只在非 2xx 时带；无/非 JSON 结果返回 None）。"""
+        txt = str((result or {}).get("result") or "")
+        if not txt.strip().startswith("{"):
+            return None
+        try:
+            blob = json.loads(txt)
+        except Exception:                           # noqa: BLE001 - 非 JSON 结果按文本判定
+            return None
+        http = blob.get("http_status") if isinstance(blob, dict) else None
+        return http if isinstance(http, int) else None
+
+    @staticmethod
+    def _fetch_result_reject_mark(result: dict) -> str:
+        """结果文本里命中的**确定性策略拒绝**文案（无则空串）。
+
+        用于"重试没有意义"的判定：策略拒绝是纯函数级确定性结果，重试只会再花
+        6-8s 拿到同一句拒绝。HTTP 5xx 之类的**瞬时**失败不在此列（值得重试）。
+        """
+        txt = str((result or {}).get("result") or "")
+        return next((mk for mk in _FETCH_POLICY_REJECT_MARKS if mk in txt), "")
+
+    def _fetch_result_dead_reason(self, result: dict) -> str:
+        """结果判定为**死链**时的原因（策略拒绝 / HTTP 非 2xx）；不是死链返回空串。"""
+        http = self._fetch_http_status(result)
+        if http is not None and not (200 <= http < 300):
+            return f"HTTP {http}"
+        mark = self._fetch_result_reject_mark(result)
+        if mark:
+            return mark
+        txt = str((result or {}).get("result") or "")
+        if "HTTP 4" in txt or "HTTP 5" in txt:
+            return "HTTP 错误"
+        return ""
+
+    def _note_fetch_dead_url(self, step: dict, result: dict, task_id: str) -> str:
+        """抓取步结果里的**确定性**死链（策略拒绝 / HTTP 非 2xx）记入本任务；返回该 URL。
+
+        只在 `web_fetch` 步生效。调用点有**两处**：
+        - `_execute_steps`：步骤返回点（任务14 的原始记账点，跨步骤避重）；
+        - `_dispatch_step_safe`：**每次尝试的返回点**——重试循环在它内部，只记在步骤
+          返回点的话，同一坏 URL 仍会在这一步里被重发 `_max_retry` 次（每次先花
+          6-8s DNS 才拿到同一句拒绝；实机 `ui-*` 里同一坏地址抓了 3 次）。
+        """
+        if str((step or {}).get("capability") or "") != "web_fetch":
+            return ""
+        url = self._step_fetch_url(step)
+        if not url:
+            return ""
+        reason = self._fetch_result_dead_reason(result)
+        if not reason:
+            return ""
+        self._mark_dead_fetch_url(task_id, url, reason)
+        return url
 
     def _structured_financial_preload(
         self, task_id: str, goal: str,
@@ -6619,6 +6737,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not hasattr(self, "_budget_exhausted"):
             self._budget_exhausted = {}
         self._budget_exhausted.pop(task_id, None)
+        # 任务15：死链缓存**按任务隔离**，任务起始清本任务这一条（不动别的任务）；
+        # 重跑/续跑该任务时重新有机会抓（换候选或环境修好后不该被上一轮记死）。
+        self._forget_dead_urls(task_id)
         if not hasattr(self, "_task_admission"):
             self._task_admission = {}
         self._task_admission.pop(task_id, None)
@@ -8138,8 +8259,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 # X0（10-02 实测）：**同一个"死链"不重复抓**。旧行为两次抓取都取到同一条坏直链
                 # （连 404 都各抓一次）。只把**返回 HTTP 错误（非 2xx）**的 URL 记为死链，
                 # 下次不再派发；网络/离线类失败不在此列（换一步再试可能就有材料，不能一刀切）。
-                _try_url = _clean_fetch_url(_urls_in_instr[0])
-                if _try_url and _try_url in getattr(self, "_dead_fetch_urls", set()):
+                _try_url = self._step_fetch_url(step)
+                if self._is_dead_fetch_url(task_id, _try_url):
                     push_progress(self._messaging, task_id, "log",
                                   {"type": "replan", "agent": "orchestrator",
                                    "message": (f"Step {step['step_id']}: 该 URL 上次已失败"
@@ -8157,25 +8278,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             "elapsed_sec": round(time.time() - step_start, 1)}
             result = self._dispatch_step_safe(goal, step, task_id, state)
             # X0：把**返回 HTTP 错误**的抓取 URL 记成死链（下一步不再重复抓同一地址）
-            if step.get("capability") == "web_fetch":
-                try:
-                    _res_txt = str(result.get("result") or "")
-                    _blob = json.loads(_res_txt) if _res_txt.strip().startswith("{") else {}
-                except Exception:               # noqa: BLE001
-                    _blob = {}
-                _http = _blob.get("http_status") if isinstance(_blob, dict) else None
-                # 任务14（P1）：**策略拒绝同样记死链**。`net_policy` 的域名不可解析/
-                # 非公网地址等判定是**纯函数级确定性**结果——同一 URL 再抓一次只会
-                # 再花 6-8s DNS 解析得到同一拒绝（实机一个任务里同一坏地址抓了 3 次）。
-                # `net_policy` 模块无 orchestrator 实例可写 `_dead_fetch_urls`，
-                # 故在结果回传点记账（与 HTTP 死链同一份集合、同一跳过通道）。
-                _policy_reject = any(_mk in _res_txt for _mk in _FETCH_POLICY_REJECT_MARKS)
-                if _try_url and (isinstance(_http, int) and not (200 <= _http < 300)
-                                 or "HTTP 4" in _res_txt or "HTTP 5" in _res_txt
-                                 or _policy_reject):
-                    if not hasattr(self, "_dead_fetch_urls"):
-                        self._dead_fetch_urls = set()
-                    self._dead_fetch_urls.add(_try_url)
+            self._note_fetch_dead_url(step, result, task_id)
             # P1-1：react_agent 未收敛/失败 → 自动降级为 content_summary，
             # 不把"ReAct 达到最大轮数仍未收敛"这类过程文本传给报告
             if (
@@ -8730,7 +8833,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                     r"https?://[^\s<>\"'）)】\]]+", _goal_txt)]
                                 _explicit = [u for u in _explicit if u
                                              and u not in self._fetched_urls(task_id)
-                                             and u not in getattr(self, "_dead_fetch_urls", set())]
+                                             and not self._is_dead_fetch_url(task_id, u)]
                             except Exception:               # noqa: BLE001
                                 _explicit = []
                             if _explicit and fetch_role == "annual_report":
@@ -9328,6 +9431,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 分析步的前置：底稿必须在它派发**之前**就已经在工作区里（见该函数注释）
         self._ensure_paper_for_analysis(goal, step, task_id)
         result = self._dispatch(step, task_id)
+        # 任务15：**第一次尝试返回就记账**（策略拒绝/非 2xx 是确定性结果）。
+        # 记账若只留在调用方（`_execute_steps` 的步骤返回点），下面的重试循环看不见它，
+        # 同一坏 URL 仍会被重发 `_max_retry` 次。
+        self._note_fetch_dead_url(step, result, task_id)
         if result.get("budget_exceeded"):
             # 预算已耗尽：重试/重规划都只会被同样拒绝，直接返回如实失败
             return result
@@ -9343,6 +9450,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
             # 取消：不再重试/重规划（失败重试循环是实测最爱烧额度的地方）
             if self._cancel_requested(task_id):
+                break
+            # 任务15：**确定性策略拒绝不再重试**。net_policy 的拒绝是纯函数级结论
+            # （URL 无法解析 / 非公网地址 / 出口拒签…），重试只会再花 6-8s（DNS/连接）
+            # 拿到同一句拒绝，再白等一次 sleep(2)。命中即跳出，按死链如实记 FAILED
+            # （重规划与下游按"资料缺口"处理，路径不变）。
+            # 注意：只拦**策略拒绝**；HTTP 5xx / 超时等瞬时失败仍然重试（任务16 的
+            # `retryable` 语义），死链缓存里含 5xx 不代表它不值得重试。
+            _dead_url = self._step_fetch_url(step)
+            _reject_mark = self._fetch_result_reject_mark(result)
+            if _dead_url and _reject_mark:
+                tried.append(f"跳过重试（策略拒绝：{_dead_url[:60]}）")
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": step.get("capability", "?"),
+                               "message": (f"Step {step.get('step_id')} 跳过重试："
+                                           f"{_dead_url[:80]} 被网络策略拒绝（{_reject_mark}），"
+                                           "重试无意义"),
+                               "timestamp": self._now_iso()})
                 break
             attempt += 1
             tried.append(
@@ -9364,6 +9488,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
                 )
             result = self._dispatch(amended, task_id)
+            # 任务15：每次尝试返回都记账（下一次循环开头据此拦住死链）
+            self._note_fetch_dead_url(amended, result, task_id)
             issue = self._contract_issue(goal, amended, result)
         # 契约在重试耗尽后仍不通过：不得把 SUCCESS 空转当成功，
         # 标记为失败让下方重规划路径接管（或如实返回 FAILED）。
