@@ -8665,7 +8665,8 @@ def _post_research_study_run(self, p, body, admin):
     """`POST /api/research-study/run`：预览确认后**才**运行，并保存内部研究产物。
 
     body：`{spec?|"sample", input_id, confirmed: true, confirmed_subjects: [...],
-            feature_cutoff?, evaluation_as_of?}`。
+            feature_cutoff?, evaluation_as_of?}`；带 `study_id` 时不重新生成，
+    改走 `_study_run_by_identity`（§18.12 查看原版 / §18.13 改参分叉）。
     纪律：① 未带确认清单 → 400（"文件预览 → 明确截止/公司 → run_study"的顺序是硬门槛）；
     ② 确认的主体必须与文件里实际读到的主体一致（不拿请求里的公司名替换材料身份）；
     ③ 已生成同一研究ID → 不覆盖（旧目录原样保留，如实告知）。
@@ -8674,6 +8675,9 @@ def _post_research_study_run(self, p, body, admin):
     if body.get("confirmed") is not True:
         return self._json({"error": "需要先预览并确认主体与截止（confirmed=true）",
                            "code": "preview_required"}, 400)
+    sid = str(body.get("study_id") or "").strip()
+    if sid:
+        return _study_run_by_identity(self, sid, body, admin)
     input_id = str(body.get("input_id") or "__sample__")
     input_dir = _study_input_dir(input_id)
     if not input_dir:
@@ -8714,6 +8718,7 @@ def _post_research_study_run(self, p, body, admin):
         payload = _study_preview_payload(result)
         payload.update({
             "status": "exists", "dir": existing or "", "adopted": False,
+            "spec": spec,
             "artifacts": _study_artifacts(existing) if existing else [],
             "note": "同一研究已生成过：旧目录原样保留，未覆盖（改参数或输入会得到新的研究ID）",
         })
@@ -8723,6 +8728,7 @@ def _post_research_study_run(self, p, body, admin):
     payload = _study_preview_payload(result)
     payload.update({"status": "ok", "dir": str(folder), "input_id": input_id,
                     "input_dir": input_dir, "confirmed_subjects": subjects,
+                    "spec": spec,
                     "artifacts": _study_artifacts(str(folder)),
                     "adopted": False,
                     "note": ("内部研究产物已保存；**未采纳、未进交付包、未人工复核**；"
@@ -8730,6 +8736,140 @@ def _post_research_study_run(self, p, body, admin):
     audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
               "research_study.run", target=str(result.get("study_id") or "")[:16],
               result="ok", detail=f"subjects={','.join(subjects)}")
+    return self._json(payload)
+
+
+def _study_frozen_spec_of(d: str) -> dict:
+    """冻结目录 → `inputs.json` 里的冻结 spec（读不到就返回空 dict，不猜、不回填）。"""
+    try:
+        frozen = _study_read_json(os.path.join(d, "inputs.json"))
+    except (OSError, ValueError):
+        return {}
+    spec = frozen.get("spec") if isinstance(frozen, dict) else None
+    return dict(spec) if isinstance(spec, dict) else {}
+
+
+def _study_run_by_identity(self, sid: str, body: dict, admin):
+    """带 `study_id` 的 run 请求（接缝②，2026-10-11 §18.12／§18.13）。
+
+    - 只带 `study_id`（＋可选 `result_hash`）＝「查看原版」→ `restore_study`：按身份复用
+      冻结 inputs 走同一 `_compute_study`；实现已改变时**不重算**，直接读冻结产物并如实标注；
+      冻结文件 hash 不符 → 409 `restore_refused`（不给被改过的记录背书）。
+    - `study_id` ＋ `spec` ＝改参分叉 → `reparam_frozen_study`：冻结输入＋新 spec 出**新候选**，
+      旧目录只读不动；spec 逐字段相同 → 400（那是「查看原版」）；截止是冻结选择 → 409 `cutoff_frozen`。
+    两条分支共用同一身份硬门槛：身份必须命中已生成产物、可选 `result_hash` 必须与冻结记录一致、
+    确认主体必须与冻结记录里实际读到的一致（不按请求里的公司名替换材料身份）。
+    """
+    import quant_research.study as _study
+    d = _study_dir_of(sid)
+    if not d:
+        return self._json({
+            "error": (f"找不到研究 {sid[:16]} 的冻结产物目录：恢复只认已生成过的研究身份"
+                      "（要新研究就带 spec ＋ input_id 走生成）"),
+            "code": "study_not_found", "study_id": sid}, 404)
+    frozen_spec = _study_frozen_spec_of(d)
+    want_hash = str(body.get("result_hash") or "").strip()
+    if want_hash:
+        try:
+            man = _study_read_json(os.path.join(d, "study_manifest.json"))
+        except (OSError, ValueError):
+            return self._json({"error": "冻结 manifest 读不出来：不恢复（须重新上传或重跑）",
+                               "code": "restore_refused"}, 409)
+        frozen_hash = str(man.get("result_hash") or "")
+        if frozen_hash != want_hash:
+            return self._json({
+                "error": (f"result_hash 与冻结记录不符（冻结 {frozen_hash[:16]}… ≠ "
+                          f"请求 {want_hash[:16]}…）：不按请求指定的身份复用别的冻结记录"),
+                "code": "result_hash_mismatch",
+                "frozen_result_hash": frozen_hash, "request_result_hash": want_hash}, 409)
+    spec_arg = body.get("spec") if isinstance(body.get("spec"), dict) else None
+    if spec_arg:
+        # 截止是**冻结选择**：换截止＝换输入（不是改假设），要改就另开研究
+        for field in ("feature_cutoff", "evaluation_as_of"):
+            frozen_val = str(frozen_spec.get(field) or "").strip()
+            want_val = str(spec_arg.get(field) or "").strip()
+            if frozen_val and want_val != frozen_val:
+                return self._json({
+                    "error": (f"{field} 是冻结选择（冻结 {frozen_val}）：改截止＝换输入，"
+                              "不是改假设；要换截止请另开研究"),
+                    "code": "cutoff_frozen", "field": field,
+                    "frozen_value": frozen_val, "request_value": want_val}, 409)
+        try:
+            result = _study.reparam_frozen_study(d, spec_arg)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            return self._json({"error": f"改参失败：{exc}"}, 400)
+        if not result.get("ok", True):
+            code = str(result.get("code") or "restore_refused")
+            return self._json({"error": str(result.get("reason") or "改参被拒绝"),
+                               "code": code,
+                               "integrity": result.get("integrity")},
+                              400 if code == "spec_unchanged" else 409)
+    else:
+        try:
+            result = _study.restore_study(d)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            return self._json({"error": f"恢复失败：{exc}"}, 400)
+        if result.get("implementation_changed"):
+            # 不重算、不造新数字：直接把冻结产物原样装回来，如实标「读冻结产物」
+            result = dict(result.get("frozen") or {})
+        elif not result.get("ok", True):
+            return self._json({"error": str(result.get("reason") or "恢复被拒绝"),
+                               "code": "restore_refused",
+                               "integrity": result.get("integrity")}, 409)
+        elif not result.get("spec") and frozen_spec:
+            result["spec"] = json.loads(json.dumps(frozen_spec, ensure_ascii=False))
+    subjects = sorted({str(r.get("entity_id")) for r in
+                       ((result.get("previews") or {}).get("financial") or {}).get("records", [])
+                       if r.get("entity_id")})
+    confirmed = [str(x) for x in (body.get("confirmed_subjects") or []) if str(x).strip()]
+    if sorted(confirmed) != subjects:
+        return self._json({
+            "error": "确认的主体与冻结记录里读到的公司不一致：不按请求里的公司名替换材料身份",
+            "code": "subjects_unconfirmed",
+            "subjects_in_files": subjects, "confirmed_subjects": sorted(confirmed)}, 409)
+    input_id = f"frozen:{sid[:16]}"
+    user = str((admin or {}).get("user") or "")
+    if spec_arg:
+        try:
+            folder = _study.write_study(result, output_dir=_study_root())
+        except FileExistsError:
+            existing = _study_dir_of(str(result.get("study_id") or ""))
+            payload = _study_preview_payload(result)
+            payload.update({"status": "exists", "dir": existing or "", "adopted": False,
+                            "input_id": input_id, "spec": dict(result.get("spec") or {}),
+                            "artifacts": _study_artifacts(existing) if existing else [],
+                            "note": "同一改参候选已生成过：旧目录原样保留，未覆盖"})
+            return self._json(payload)
+        except (ValueError, OSError, TypeError) as exc:
+            return self._json({"error": f"产物落盘失败：{exc}"}, 500)
+        payload = _study_preview_payload(result)
+        payload.update({"status": "ok", "dir": str(folder), "input_id": input_id,
+                        "confirmed_subjects": subjects, "adopted": False,
+                        "spec": dict(result.get("spec") or {}),
+                        "artifacts": _study_artifacts(str(folder)),
+                        "note": ("改参候选已保存（冻结输入＋新参数、当前实现、内容寻址新身份）；"
+                                 "**未采纳、未覆盖旧目录、未人工复核**")})
+        for key in ("reparam_from", "reparam_spec_diff", "reparam_basis"):
+            if key in result:
+                payload[key] = result[key]
+        audit_log(user, self._client_ip(), "research_study.reparam",
+                  target=str(result.get("study_id") or "")[:16], result="ok",
+                  detail=f"from={sid[:16]} diff={len(result.get('reparam_spec_diff') or [])}")
+        return self._json(payload)
+    status = "restored_frozen" if result.get("recomputed") is False else "restored"
+    payload = _study_preview_payload(result)
+    payload.update({"status": status, "dir": d, "input_id": input_id,
+                    "confirmed_subjects": subjects, "adopted": False,
+                    "restored_from": str(result.get("restored_from") or d),
+                    "restore_basis": str(result.get("restore_basis") or ""),
+                    "result_hash_matches": bool(result.get("result_hash_matches")),
+                    "spec": dict(result.get("spec") or frozen_spec)})
+    if "recomputed" in result:
+        # 实现已改变 → 直接读冻结产物：recomputed=False 必须如实透传（不冒充重算）
+        payload["recomputed"] = bool(result.get("recomputed"))
+    audit_log(user, self._client_ip(), "research_study.restore",
+              target=str(result.get("study_id") or sid)[:16], result="ok",
+              detail=f"status={status}")
     return self._json(payload)
 
 
