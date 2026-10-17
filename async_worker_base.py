@@ -215,6 +215,7 @@ class AsyncWorkerBase(ABC):
     async def _handle(self, task: dict):
         tid = task.get("task_id","?"); instr = task.get("instruction","")
         ok = False; res = ""
+        _exc_retryable = None      # 任务16：失败异常的可重试性（仅失败时随结果上行）
         try:
             # L01：台账归属根任务（此前用派发 id，根任务台账读不到）；
             # 接收边界统一走 admit_dispatch（协议非法/银行缺身份/配置非法都拒绝）
@@ -232,6 +233,12 @@ class AsyncWorkerBase(ABC):
                 res = await self.execute(instr); self._failures = 0; ok = True
         except Exception as e:
             res = str(e); self._failures += 1
+            # 任务16（docs/arch_phase2_tasks15_16_17.md）：网络/Redis 连接类异常
+            # → 可重试（换时刻就可能好）；其余（逻辑/解析错误）→ 不可重试
+            # （与 worker_base.classify_step_retryable 同一规则；两套基类不互依，各自落地）
+            _exc_retryable = isinstance(e, (ConnectionError, TimeoutError,
+                                            redis.exceptions.ConnectionError,
+                                            redis.exceptions.TimeoutError))
             if self._failures >= self._max_failures:
                 await self._registry.register(self.agent_id, self.capabilities, "offline")
         finally:
@@ -243,6 +250,10 @@ class AsyncWorkerBase(ABC):
             self._active -= 1; await self._update()
             result_msg = {"task_id": tid, "agent_id": self.agent_id,
                           "status": "SUCCESS" if ok else "FAILED", "result": res}
+            # 任务16：可重试性作为**兄弟字段**上行（与 search_status 同一先例），
+            # 编排器 `_step_retryable` 读它决定是否重试；不带该字段=旧行为
+            if not ok and _exc_retryable is not None:
+                result_msg["retryable"] = bool(_exc_retryable)
             gaps = getattr(self, "_context_gaps", None) or []
             if gaps:
                 # 兼容缺口随结果回传（可观测），不只写在日志里

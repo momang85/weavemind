@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -78,6 +79,27 @@ def classify_model_error(exc: BaseException) -> str | None:
     if "refuse" in text or "content" in text or "policy" in text:
         return "model_deny"
     return None
+
+
+# ---------------------------------------------------------------------------
+# 任务16（docs/arch_phase2_tasks15_16_17.md）：worker 侧"是否值得重试"判定。
+# 随结果作为**兄弟字段** `retryable` 上行，编排器只读不猜：
+# True  = 网络类（连接失败/超时、Redis 断连）——换时刻就可能好；
+# False = 其余（逻辑错误/解析错误/内容拒绝/级联阻塞/空结果）——重发同样输入
+#         只会拿到同样失败，白等一轮 sleep(2)。
+# ---------------------------------------------------------------------------
+_RETRYABLE_EXC_TYPES: tuple[type[BaseException], ...] = (
+    ConnectionError,                     # 含 ConnectionRefusedError/ResetError 等
+    TimeoutError,                        # 含 socket.timeout（3.10+ 别名）
+    socket.gaierror,                     # DNS 解析失败：瞬时，换时刻可能成功
+    redis.exceptions.ConnectionError,    # Redis 断连（任务16 明确列为可重试）
+    redis.exceptions.TimeoutError,
+)
+
+
+def classify_step_retryable(exc: BaseException) -> bool:
+    """worker 执行异常 → `retryable`：网络/Redis 连接类 True，其余（逻辑类）False。"""
+    return isinstance(exc, _RETRYABLE_EXC_TYPES)
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +547,8 @@ class BaseWorker(ABC):
                 ctx, gaps, refuse_reason = admit_dispatch(task)
                 if ctx is None:
                     logger.error("'%s' 拒绝派发 %s：%s", self.agent_id, task_id, refuse_reason)
-                    self._publish_failure(task_id, refuse_reason)
+                    # 任务16：协议/身份拒绝是确定性结论，重发同样载荷同样拒绝 → 不可重试
+                    self._publish_failure(task_id, refuse_reason, retryable=False)
                     with self._current_task_lock:
                         self._current_task_id = None
                     continue
@@ -555,10 +578,11 @@ class BaseWorker(ABC):
                     exc,
                     exc_info=True,
                 )
-                # 如果任务还在手上，尝试回传失败结果
+                # 如果任务还在手上，尝试回传失败结果（任务16：按异常类型判可重试性）
                 if task is not None:
                     self._publish_failure(
-                        task.get("task_id", "unknown"), f"Worker error: {exc}"
+                        task.get("task_id", "unknown"), f"Worker error: {exc}",
+                        retryable=classify_step_retryable(exc),
                     )
             finally:
                 # 始终重置状态和能力中的 'busy' 为 'idle'
@@ -579,7 +603,8 @@ class BaseWorker(ABC):
 
         if not instruction:
             logger.warning("'%s' task '%s' has empty instruction.", self.agent_id, task_id)
-            self._publish_failure(task_id, "Empty instruction")
+            # 任务16：空指令是**载荷问题**，重发同样空 → 不可重试
+            self._publish_failure(task_id, "Empty instruction", retryable=False)
             return
 
         # 执行契约（派发载荷里的结构化字段）：检索查询由它生成，不依赖指令文本
@@ -631,14 +656,15 @@ class BaseWorker(ABC):
                 logger.error(
                     "'%s' task '%s' 模型上下文超限（model_ctx，不重试→降级）：%s",
                     self.agent_id, task_id, exc)
-                self._publish_failure(task_id, f"model_ctx: {exc}")
+                self._publish_failure(task_id, f"model_ctx: {exc}", retryable=False)
                 return
             if _policy_key == "model_deny":
                 # max=0：不重试，直接失败。
                 logger.error(
                     "'%s' task '%s' 模型内容拒绝（model_deny，不重试）：%s",
                     self.agent_id, task_id, exc)
-                self._publish_failure(task_id, f"model_deny: {exc}")
+                # 任务16：内容拒绝是确定性结论（同输入必得同拒绝）→ 不可重试
+                self._publish_failure(task_id, f"model_deny: {exc}", retryable=False)
                 return
             if _policy_key == "rate_limit":
                 logger.error(
@@ -651,7 +677,12 @@ class BaseWorker(ABC):
                 exc,
                 exc_info=True,
             )
-            self._publish_failure(task_id, str(exc))
+            # 任务16：限流属**瞬时**（退避等待后可恢复）→ 可重试；
+            # 其余按类型判：连接/超时/Redis 断连 → 可重试，网络外（逻辑/解析）→ 不可重试
+            self._publish_failure(
+                task_id, str(exc),
+                retryable=True if _policy_key == "rate_limit"
+                else classify_step_retryable(exc))
 
     def _task_permit(self, task: dict):
         """从派发载荷解出**执行许可**（T0-b）；结构不识别 = 没有许可（不猜）。"""
@@ -716,13 +747,15 @@ class BaseWorker(ABC):
     # 内部：结果发布
     # ------------------------------------------------------------------
 
-    def _publish_result(self, task_id: str, status: str, result: str) -> None:
+    def _publish_result(self, task_id: str, status: str, result: str,
+                        *, retryable: bool | None = None) -> None:
         """发布任务执行结果到结果频道。
 
         Args:
             task_id: 任务 ID。
             status: SUCCESS 或 FAILED。
             result: 结果字符串。
+            retryable: 任务16——本步失败是否值得重试（None=不带该字段，旧行为不变）。
         """
         channel = f"task_result:{task_id}"
         message = {
@@ -731,6 +764,10 @@ class BaseWorker(ABC):
             "status": status,
             "result": result,
         }
+        # 任务16：可重试性作为**兄弟字段**上行（与 search_status 同一先例）：
+        # `result` 的形状不动，编排器 `_step_retryable` 直接读这个布尔。
+        if retryable is not None:
+            message["retryable"] = bool(retryable)
         # P1-c②：检索真值作为**兄弟字段**上行——`result` 仍是 JSON 数组（旧边界不动），
         # 但"查询完成但零命中"与"根本没完成查询"从此跨层可分。
         # 放兄弟字段而不是塞进 `result`：现有消费者按数组解析 `result`（4 处），
@@ -779,9 +816,10 @@ class BaseWorker(ABC):
         except Exception:
             pass
 
-    def _publish_failure(self, task_id: str, error_msg: str) -> None:
-        """发布失败结果的便捷方法。"""
-        self._publish_result(task_id, "FAILED", error_msg)
+    def _publish_failure(self, task_id: str, error_msg: str,
+                         *, retryable: bool | None = None) -> None:
+        """发布失败结果的便捷方法（`retryable` 见 `_publish_result`）。"""
+        self._publish_result(task_id, "FAILED", error_msg, retryable=retryable)
 
     # ------------------------------------------------------------------
     # 内部：状态管理

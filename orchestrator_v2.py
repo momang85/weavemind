@@ -3105,6 +3105,73 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._mark_dead_fetch_url(task_id, url, reason)
         return url
 
+    def _step_retryable(self, result: dict) -> bool:
+        """任务16（docs/arch_phase2_tasks15_16_17.md）：本步结果是否值得重试。
+
+        worker 在失败路径上自带 `retryable` 布尔（True=网络超时/HTTP 5xx/Redis 断连；
+        False=URL 无法解析/内容拒绝/逻辑错误/级联阻塞/空结果），编排器只**读**不猜。
+        三个来源按显式程度排序，都没有 → True（旧 worker 没有该字段，行为不变）：
+
+        1. 结果字典上的兄弟字段 `retryable`（BaseWorker/AsyncWorkerBase 失败路径上行）；
+        2. 结构化结果 JSON 里的 `retryable`（web_fetch 的失败体）；
+        3. 检索真值 `search_status.retryable`（P1-c② 已有字段，任务16 起消费）——
+           只在检索**没打中结果**时才看它：`ok`（查到结果）的失败属于输出/逻辑问题，
+           不按检索真值跳过重试（契约校验失败仍按原路径修正重试）。
+        """
+        if isinstance(result.get("retryable"), bool):
+            return result["retryable"]
+        payload = result.get("result")
+        if isinstance(payload, dict) and isinstance(payload.get("retryable"), bool):
+            return payload["retryable"]
+        if isinstance(payload, str) and payload.lstrip()[:1] == "{":
+            try:
+                inner = json.loads(payload)
+            except Exception:                       # noqa: BLE001 - 非 JSON 按缺省
+                inner = None
+            if isinstance(inner, dict) and isinstance(inner.get("retryable"), bool):
+                return inner["retryable"]
+        _ss = result.get("search_status")
+        if (isinstance(_ss, dict) and str(_ss.get("status") or "")
+                and str(_ss.get("status")) != "ok"):
+            return bool(_ss.get("retryable"))
+        return True
+
+    def _step_retryable_reason(self, result: dict) -> str:
+        """不可重试的**人类可读原因**（写进步骤结果，反思与页面能回答"为什么没重试"）。"""
+        payload = result.get("result")
+        if isinstance(payload, str) and payload.lstrip()[:1] == "{":
+            try:
+                inner = json.loads(payload)
+            except Exception:                       # noqa: BLE001 - 非 JSON 走下面的真值
+                inner = None
+            if isinstance(inner, dict):
+                _err = str(inner.get("error") or "").strip()
+                if _err:
+                    return _err[:200]
+        _ss = result.get("search_status")
+        if isinstance(_ss, dict):
+            _r = str(_ss.get("reason") or "").strip() or str(_ss.get("status") or "")
+            if _r:
+                return f"检索未获得可用结果（{_r}）"[:200]
+        return "worker 判定该失败不是网络瞬时故障"
+
+    def _search_new_queries_available(self, goal: str, task_id: str,
+                                      retry_qs_seen: set) -> bool:
+        """本任务是否还有**没发过**的结构化检索查询（任务16：判"空结果"是否真不可重试）。
+
+        判定顺序与 `_search_retry_instruction` 的回退顺序一致：契约里有下一批 → 有；
+        行情目标（定向换词方案）→ 有；否则没有。生成失败时**不替契约下结论**（按有算，
+        宁可多试一轮也不掐死专项 §5 的补查重试）。
+        """
+        contract = self._task_contract(task_id)
+        if contract is not None:
+            try:
+                if contract.retry_query_line(tried=retry_qs_seen):
+                    return True
+            except Exception:                       # noqa: BLE001 - 生成失败按"有"算
+                return True
+        return self._is_market_goal(goal)
+
     def _structured_financial_preload(
         self, task_id: str, goal: str,
     ) -> dict | None:
@@ -9468,6 +9535,39 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                            "重试无意义"),
                                "timestamp": self._now_iso()})
                 break
+            # 任务16：worker 已判定"重试没有意义"（逻辑错误 / 内容拒绝 / 级联阻塞 /
+            # 空结果）→ 跳过重试直接记 FAILED，不再白花一轮 sleep(2)+派发。
+            # 唯一例外是检索的**空结果**：`no_results` 只说明"这批查询打不出结果"，
+            # 契约里若还有没发过的结构化下一批查询（专项 §5 补查重试），就照旧重试；
+            # 计划确实用尽（无可发新查询）才停——这与 NO_NEW_QUERY_MARK 的语义一致。
+            if not self._step_retryable(result):
+                _zero_hits = str((result.get("search_status") or {}).get("status") or "") == "no_results"
+                _can_requery = (
+                    _zero_hits
+                    and str(step.get("capability") or "") == "web_search"
+                    and self._search_new_queries_available(goal, task_id, retry_qs_seen)
+                )
+                if not _can_requery:
+                    tried.append("跳过重试（worker 判定不可重试）")
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "info", "agent": step.get("capability", "?"),
+                                   "message": (f"Step {step.get('step_id')} 跳过重试："
+                                               "worker 判定该失败不可重试"
+                                               "（逻辑错误/内容拒绝/空结果）"),
+                                   "timestamp": self._now_iso()})
+                    _why_retryable = self._step_retryable_reason(result)
+                    result = dict(result)
+                    result["retryable"] = False
+                    result["retry_skipped"] = True
+                    if result.get("status") != "FAILED":
+                        result["status"] = "FAILED"
+                    # 与下方 [CONTRACT_VIOLATION] 同一先例：原因写进结果文本，
+                    # 反思/页面拿 step_failure 就能回答"为什么没重试"。
+                    result["result"] = (
+                        str(result.get("result") or "")
+                        + f"\n\n[NOT_RETRYABLE] {_why_retryable}"
+                    ).strip()
+                    break
             attempt += 1
             tried.append(
                 f"重试#{attempt}"

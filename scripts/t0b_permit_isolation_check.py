@@ -99,9 +99,9 @@ def _act(name: str, permit_wire: dict | None) -> dict:
 
         dbl = _D()
         w.execute = dbl.execute
-        w._publish_result = lambda tid, status, result: published.append(
+        w._publish_result = lambda tid, status, result, **_kw: published.append(
             {"status": status, "result": result})
-        w._publish_failure = lambda tid, err: published.append(
+        w._publish_failure = lambda tid, err, **_kw: published.append(
             {"status": "FAILED", "result": err})
         w._process_task({"task_id": "d-1", "instruction": "查",
                          "permit": permit_wire})
