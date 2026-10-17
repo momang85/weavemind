@@ -34,6 +34,7 @@ from workspace import (
 
 import db_paths
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
+from capability_routing import CAPABILITY_WORKER_MAP  # noqa: F401  任务17：共享定义，见 L680 注释
 import chart_assembly
 from charts_pipeline import ChartPipelineMixin
 from structured_pipeline import StructuredPipelineMixin
@@ -678,20 +679,9 @@ KNOWN_CAPABILITIES = {
 
 # 任务14（P1 编排 dispatch 错配修复，设计见 docs/arch_phase2_p1_dispatch_routing.md）：
 # 能力 → **该能力的合法执行者**（worker 注册的 agent_id）。
-# 实机（任务12 复盘 `agents.db` 822 步 capability×executor 交叉表）：web_search 有
-# 19 步由 content_summarizer、5 步由 codeexecworker 执行；web_fetch 有 8 步由
-# content_summarizer 执行——这些"由别人代做"的步骤被记到原能力名下，把
-# by_capability 的成功率与真实能力健康度混在一起，且检索质量不可信却静默成功。
+# 任务17 起定义搬到 capability_routing.py（metrics/guardian 共享同一份），
+# 这里以同名导入暴露，旧引用（本文件内 3 处 + 测试）不变。
 # 不在键里的能力（content_summary / package 等）**不设限**：按现有实现自由执行。
-# 执行者名单以 worker 注册值为准（workers/*_worker.py 的 capabilities/agent_id）。
-CAPABILITY_WORKER_MAP = {
-    "web_search": {"search_agent"},
-    "web_fetch": {"webfetchworker"},
-    "code_execution": {"codeexecworker"},
-    "react_agent": {"reactagentworker"},
-    "report_generator": {"reportgeneratorworker"},
-    "data_analyzer": {"dataanalyzerworker"},
-}
 
 # P1-2：仅外部检索/报告等步骤允许 human_in_loop（执行前需用户确认）；
 # package/file_io/data_loader 等低风险内部步骤若被规划器误标，强制改为 pipeline，

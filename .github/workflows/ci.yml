@@ -68,6 +68,8 @@ jobs:
         run: python test_task15_dead_url_cache.py
       - name: "Retryable flag on step results (skip retry for logic errors)"
         run: python test_task16_retryable_flag.py
+      - name: "Capability×executor cross-table and routing mismatch alert (P2)"
+        run: python test_task17_routing_metrics.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)

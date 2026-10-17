@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from threading import Lock
 
 import db_paths
+from capability_routing import CAPABILITY_WORKER_MAP
 
 import redis
 
@@ -164,6 +165,10 @@ def _new_cap_row() -> dict:
         "success_dispatched": 0,
         "mismatch_steps": 0,
         "success_rate_dispatched": None, "success_rate_planned": None,
+        # 任务17：capability×executor 交叉表 —— 哪些 agent_id 执行过本能力的步，
+        # 以及白名单外执行者的步数（CAPABILITY_WORKER_MAP 见 capability_routing.py）
+        "executor_distribution": {},
+        "mismatch_count": 0,
     })
     return row
 
@@ -172,11 +177,15 @@ def _finalize_cap_row(row: dict) -> dict:
     """补齐两个口径的成功率（分母不同，分子都只算**真实派发成功**）：
     - success_rate_dispatched：派发步成功 / 派发步数（真实能力健康度）；
     - success_rate_planned：成功步 / 全部计划步（历史口径，含未执行/门禁/级联噪音）。
+    执行者分布按步数降序（占多的执行者排前面），同名稳定序。
     """
     d, s, n = row["total_dispatched"], row["success"], row["total_planned"]
     sd = row["success_dispatched"]
     row["success_rate_dispatched"] = round(sd / d * 100, 1) if d else None
     row["success_rate_planned"] = round(s / n * 100, 1) if n else None
+    row["executor_distribution"] = dict(sorted(
+        (row.get("executor_distribution") or {}).items(),
+        key=lambda kv: (-kv[1], kv[0])))
     return row
 
 
@@ -200,6 +209,13 @@ def _db_capability_stats() -> dict:
     覆盖范围必须显式声明在 `scope` 里：`steps_json` 自 2026-09 才开始落库，
     更早的任务没有这个字段，所以它是**有 steps 落库的那批任务**的能力分布，
     不是全量任务。
+
+    任务17 起每个能力再给一张 capability×executor 交叉表：
+    - `executor_distribution`：执行过本能力步的 agent_id → 步数（只含真实派发步）；
+    - `mismatch_count`：其中执行者**不在 `CAPABILITY_WORKER_MAP` 白名单**里的
+      步数。不在表里的能力不设限，恒为 0（不是"没错配"而是"没有白名单"）。
+      与任务14 的 `mismatch_steps` 口径不同：后者靠运行时 `worker_mismatch`
+      标记（任务14 起才写），前者直接由白名单推出来，历史步也能算。
     """
     out = {
         "available": False,
@@ -247,6 +263,13 @@ def _db_capability_stats() -> dict:
                 agent = str(ri.get("agent_id") or "").strip()
             if agent:
                 row["total_dispatched"] += 1
+                row["executor_distribution"][agent] = (
+                    row["executor_distribution"].get(agent, 0) + 1)
+                # 任务17：白名单外的执行者 = 错配。不在 CAPABILITY_WORKER_MAP
+                # 里的能力不设限（.get 返回 None）→ 不计错配。
+                _expected = CAPABILITY_WORKER_MAP.get(cap)
+                if _expected and agent not in _expected:
+                    row["mismatch_count"] += 1
             # 任务14（P1）：能力-执行者错配告警计数（设计 step 5）。
             # 错配步 = 结果带 worker_mismatch 标记（含 search_degraded 子计数）——
             # 这是"由别人代做"的实锤，按**步骤登记的能力**归属（下游记账 distortion
@@ -273,9 +296,45 @@ def _db_capability_stats() -> dict:
             " docs/arch_phase2_p0_metrics_split.md：success_rate 为真实派发口径"
             "（派发步成功/派发步数），success_rate_planned 为历史口径"
             "（含未执行/门禁/级联噪音）。该字段自 2026-09 起才写入，"
-            "更早任务不在内"),
+            "更早任务不在内。executor_distribution / mismatch_count 为"
+            " capability×executor 交叉表（白名单见 capability_routing.py，"
+            "表外能力不设限，不计错配）"),
     })
     return out
+
+
+def _routing_health(cap_stats: dict) -> dict:
+    """任务17：能力×执行者错配的汇总面（worker_guardian 心跳读这里告警）。
+
+    任一能力的 `mismatch_count > 0` → `has_mismatch=True`，`details` 只列
+    错配能力。没有错配时 `has_mismatch=False`、`details=[]`（字段恒在，
+    读方不用判键）。`by_capability` 不可用（available=False）时视为
+    "不知道"，同样写 False 但带 `available` 标记，不伪装成"没错配"。
+    """
+    by_cap = cap_stats.get("by_capability") or {}
+    details = []
+    for cap, row in sorted(by_cap.items()):
+        cnt = int(row.get("mismatch_count") or 0)
+        if cnt <= 0:
+            continue
+        dist = row.get("executor_distribution") or {}
+        expected = CAPABILITY_WORKER_MAP.get(cap) or set()
+        details.append({
+            "capability": cap,
+            "mismatch_count": cnt,
+            "unexpected_executors": [a for a in dist if a not in expected],
+            "expected_executors": sorted(expected),
+            "executor_distribution": dist,
+        })
+    return {
+        "has_mismatch": bool(details),
+        "available": bool(cap_stats.get("available")),
+        "details": details,
+        "note": (
+            "mismatch_count = 派发步里执行者不在 CAPABILITY_WORKER_MAP 白名单"
+            "内的步数（按步骤登记能力归属，历史步可推，无需运行时标记）；"
+            "表外能力（content_summary/package 等）不设限 → 恒不在此列"),
+    }
 
 
 class MetricsCollector:
@@ -636,6 +695,9 @@ class MetricsCollector:
                         "genuine_failed": v["genuine_failed"],
                         "other": v["other"],
                         "mismatch_steps": v.get("mismatch_steps", 0),
+                        # 任务17：capability×executor 交叉表随行下发
+                        "executor_distribution": v.get("executor_distribution", {}),
+                        "mismatch_count": v.get("mismatch_count", 0),
                     }
                     for k, v in sorted(cap_stats["by_capability"].items())
                 },
@@ -657,6 +719,12 @@ class MetricsCollector:
                     "实际执行者不是它）；按步骤登记的**原能力**归属。web_search 步的"
                     "错配同时带 search_degraded，任务终态降为 SUCCESS_WITH_ISSUES。"
                     "该标记自任务14 起写入，此前的错配步骤无标记（历史数据为 0）"),
+                # 任务17：能力×执行者交叉表的健康面汇总（worker_guardian 心跳
+                # 读 `has_mismatch` 发 capability_routing_mismatch 告警）。
+                # 口径与 by_capability_mismatch 不同：这里由白名单**推导**
+                # （任何带 agent_id 的步都能算，含任务14 之前的历史步），
+                # 后者靠运行时标记，两者不一致时以这里的交叉表为准。
+                "routing_health": _routing_health(cap_stats),
                 # 分层口径说明随汇总下发：`success_rate` 换口径后，读汇总的人
                 # 必须能看出"计划口径"与"派发口径"的区别，否则会拿旧数字对新数字
                 "by_capability_metric_note": (

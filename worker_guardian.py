@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -183,6 +184,9 @@ class WorkerGuardian:
             # Guardian 自身心跳
             if time.time() - last_guardian_hb >= GUARDIAN_HEARTBEAT_INTERVAL:
                 self._publish_guardian_heartbeat()
+                # 任务17：心跳顺带读 metrics 汇总的 routing_health，
+                # 能力×执行者错配 → 发 capability_routing_mismatch 告警
+                self._check_routing_health()
                 last_guardian_hb = time.time()
                 # 任务6：每次心跳顺带回收 stuck 任务（超 task_timeout×1.5 → cancelled）
                 self._reap_stuck_tasks()
@@ -501,6 +505,51 @@ class WorkerGuardian:
             })
         except Exception:
             pass
+
+    def _check_routing_health(self) -> None:
+        """任务17：能力×执行者错配告警（读 metrics 汇总，不自己算库）。
+
+        数据源是 metrics 进程写的 `routing_health`（口径见 metrics_collector.
+        `_routing_health`）：任一能力有白名单外执行者 → 发一次
+        `capability_routing_mismatch` 告警。
+
+        去重：错配是**持续状态**而不是事件，心跳每 30s 一次，不去重就会每
+        30s 刷一条。按 (能力, 错配步数) 指纹记忆，指纹没变不再告警；
+        错配消失后指纹复位，下次出现会重新告警。
+        汇总文件缺失/损坏（metrics 未跑或还没写）→ 静默返回，
+        不能把"没有数据"当成"没有错配"来告警。
+        """
+        try:
+            from metrics_collector import SUMMARY_FILE
+            with open(SUMMARY_FILE, encoding="utf-8") as f:
+                routing = (json.load(f) or {}).get("routing_health") or {}
+        except Exception:
+            return
+
+        try:
+            details = routing.get("details") or []
+            if not routing.get("has_mismatch") or not isinstance(details, list):
+                self._last_routing_mismatch = None
+                return
+
+            sig = tuple(sorted(
+                (str(d.get("capability") or ""), int(d.get("mismatch_count") or 0))
+                for d in details if isinstance(d, dict)))
+            if not sig or sig == getattr(self, "_last_routing_mismatch", None):
+                return                                        # 同一错配已告警过
+            self._last_routing_mismatch = sig
+
+            parts = []
+            for d in details:
+                if not isinstance(d, dict):
+                    continue
+                bad = ", ".join(d.get("unexpected_executors") or []) or "?"
+                parts.append(f"{d.get('capability')} 错配 {d.get('mismatch_count')} 步"
+                             f"（白名单外执行者：{bad}）")
+            self._alert("capability_routing_mismatch",
+                        "能力-执行者错配：" + "；".join(parts))
+        except Exception as exc:
+            logger.warning("routing health check failed: %s", exc)
 
     # ------------------------------------------------------------------
     # stuck 任务回收（任务6 watchdog）
