@@ -1369,16 +1369,20 @@ def _volume_price_lines(blk: dict) -> list[str]:
             return "读数缺失"
         return f"{float(v) / float(c_delta) * 100:.1f}%"
 
+    # 白酒收入同比：原写法把跨行表达式放进 f-string，只有 Python 3.12+（PEP 701）能解析，
+    # CI 与生产镜像（python:3.11-slim）直接语法错误；提成局部变量，输出不变。
+    b_rev_prev = rec.get("baijiu_revenue_prev_yuan")
+    b_rev_growth = (b_delta / b_rev_prev
+                    if isinstance(b_delta, (int, float))
+                    and isinstance(b_rev_prev, (int, float)) and b_rev_prev else None)
+
     out += ["| 白酒量价（同口径：分产品:白酒） | 上期 | 本期 | 同比 | 贡献 | 占公司收入变化 |",
             "|---|---|---|---|---|---|",
             f"| 销量（{v_unit or '单位缺失'}） | {_num2(q0)} | {_num2(q1)} | {_pct_signed(g)} | "
             f"{_yis(veff)}（数量） | {share(veff)} |",
-            f"| 白酒收入 | {_yis(vp.get('revenue_prev_yuan') or rec.get('baijiu_revenue_prev_yuan'))} | "
+            f"| 白酒收入 | {_yis(vp.get('revenue_prev_yuan') or b_rev_prev)} | "
             f"{_yis(vp.get('revenue_cur_yuan') or rec.get('baijiu_revenue_cur_yuan'))} | "
-            f"{_pct_signed((b_delta / rec.get('baijiu_revenue_prev_yuan'))
-                           if isinstance(b_delta, (int, float))
-                           and isinstance(rec.get('baijiu_revenue_prev_yuan'), (int, float))
-                           and rec.get('baijiu_revenue_prev_yuan') else None)} | "
+            f"{_pct_signed(b_rev_growth)} | "
             f"{_yis(b_delta)} | {share(b_delta)} |",
             f"| 单位实现收入（含产品结构） | {_per_ton(u0)} | {_per_ton(u1)} | "
             f"{_pct_signed((gu / u0) if isinstance(u0, (int, float)) and u0 else None)} | "

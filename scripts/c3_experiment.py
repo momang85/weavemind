@@ -169,7 +169,10 @@ def main() -> int:
                     if r.get("saved"):
                         extra = f"（写入 {r['saved'].get('experiment_id')}，同版幂等={r['saved'].get('reopened_same_bytes')}）"
                     print(f"   - {eid} {tag}: 数值与判据身份一致{extra}")
-    print(f"\n{'ALL PASS' if not fails else 'FAILED:\n  ' + '\n  '.join(fails)}")
+    # 旧写法把含反斜杠的字符串写进 f-string 表达式，Python ≤3.11 报语法错误（PEP 701 才放宽）；
+    # 提成局部变量，输出不变。
+    tail = "ALL PASS" if not fails else "FAILED:\n  " + "\n  ".join(fails)
+    print(f"\n{tail}")
     return 0 if not fails else 1
 
 
