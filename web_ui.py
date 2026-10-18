@@ -1252,6 +1252,15 @@ def _system_status():
                     search_health = json.loads(raw)
             except Exception:
                 pass
+        # 任务20：Redis 自身的可用性（**本进程**探测）。此前 Redis 不可用时这里只有
+        # 一堆读不到的快照（search/source/embedding 全"未知"），用户分不清是 Redis 挂了
+        # 还是上游没数据；现在把"Redis 不可用 + 降级模式已持续多久"直接说出来。
+        try:
+            import redis_health as _redis_health
+            redis_status = _redis_health.status_snapshot()
+        except Exception as exc:
+            logging.getLogger("web_ui").warning("Redis 健康快照失败：%s", str(exc)[:120])
+            redis_status = {}
         try:
             # 行情数据源健康（eastmoney/tencent/sina 熔断 + 冷却），进程内快照
             from adapters.source_health import get_health as get_source_health
@@ -1288,6 +1297,7 @@ def _system_status():
             "health": health,
             "dependencies": dependencies,
             "search_health": search_health,
+            "redis": redis_status,
             "source_health": source_health,
             "budget": budget,
             "queues": queues,
@@ -4246,12 +4256,20 @@ def main():
 def _get_health(self, p):
     if p == "/api/health":
         # 公开健康检查：无需登录，供探活/负载均衡使用；附带沙箱状态供部署确认
-        return self._json({
+        payload = {
             "status": "ok",
             "service": "weavemind-web",
             "time": _now_iso(),
             "code_sandbox": _code_sandbox_status(),
-        })
+        }
+        # 任务20：Redis 可用性**公开可见**（探活/负载均衡据此摘流）。公开接口只暴露
+        # 布尔与延迟：错误文本里带内网地址/端口，不进无鉴权响应（完整版在 /api/status）。
+        try:
+            import redis_health as _redis_health
+            payload["redis"] = _redis_health.public_snapshot()
+        except Exception as exc:                         # noqa: BLE001 - 探活失败不坏探活接口
+            logging.getLogger("web_ui").warning("Redis 公开健康快照失败：%s", str(exc)[:120])
+        return self._json(payload)
 
 def _get_bootstrap(self, p):
     if p == "/api/auth/bootstrap":

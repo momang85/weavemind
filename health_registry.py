@@ -35,6 +35,7 @@ _NAME_SANDBOX = "code_sandbox"
 _NAME_PLANNER = "planner"
 _NAME_MCP = "mcp"
 _NAME_LORA = "lora"
+_NAME_REDIS = "redis"  # 任务20
 
 # 状态语义（专项 §6）：缺快照与过期都不能是绿色可用
 STATE_AVAILABLE = "available"
@@ -246,6 +247,26 @@ def probe_search() -> dict:
     return _entry(_NAME_SEARCH, state == STATE_DEGRADED,
                   "引擎不健康：" + ", ".join(unhealthy), detail=detail,
                   checked_at=checked, state=state)
+
+
+def probe_redis() -> dict:
+    """Redis 自身（任务20）：**直接探测**，不看任何 Redis 快照——它是别人的证据通道，
+    它挂了的时候"读它的快照"这条路本来就不通。
+
+    不可用 = `unavailable`（队列/结果通道中断，任务无法派发与回传）；可用 = `available`
+    （延迟进 detail）。探测结果按 TTL 缓存，避免每一次健康轮询都真连一次。
+    """
+    import redis_health
+    snap = redis_health.status_snapshot()
+    if not snap.get("available"):
+        return _entry(_NAME_REDIS, False,
+                      f"Redis 不可用：{snap.get('error') or '连接失败'}"
+                      + ("（降级模式）" if snap.get("degraded_mode") else ""),
+                      detail=f"degraded={bool(snap.get('degraded_mode'))}",
+                      state=STATE_UNAVAILABLE)
+    return _entry(_NAME_REDIS, True, "",
+                  detail=f"latency={snap.get('latency_ms')}ms",
+                  state=STATE_AVAILABLE)
 
 
 def probe_market_source() -> dict:
@@ -554,7 +575,7 @@ def _live_probe_lora() -> dict:
 
 _PROBES = (
     probe_llm, probe_search, probe_market_source, probe_embedding, probe_sandbox,
-    probe_planner, probe_mcp, probe_lora,
+    probe_planner, probe_mcp, probe_lora, probe_redis,
 )
 
 

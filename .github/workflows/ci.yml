@@ -74,6 +74,8 @@ jobs:
         run: python test_task18_acceptance_evidence.py
       - name: "Search coverage summary in report footer and task detail API (P1)"
         run: python test_task19_search_coverage.py
+      - name: "Redis graceful degradation: probe, dispatch gate, self-heal, health surfaces (P1)"
+        run: python test_task20_redis_degradation.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)

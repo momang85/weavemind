@@ -5591,6 +5591,36 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return None
 
     # ── Dispatch ──
+    def _redis_dispatch_failure(self, task_id: str, capability: str, step_id: str,
+                                ticket, exc: Exception) -> dict:
+        """任务20：派发时 Redis 连接类失败的统一收尾（退账 + 标降级 + 可读原因）。
+
+        与"闸门拒绝派发"共用同一返回形状（`status=FAILED` + `redis_degraded` +
+        `retryable`）：两者都表示**这一步没执行**，而不是执行了却失败；标可重试是为了
+        Redis 恢复后重做能真的跑起来。收尾自身失败只记日志，不改变返回值。
+        """
+        try:
+            self._budget_settle(task_id, ticket, ok=False, note="redis_unavailable")
+        except Exception as _be:                          # noqa: BLE001 - 退账失败不拦收尾
+            logger.warning("Redis 降级退账失败（task=%s）：%s", task_id, str(_be)[:120])
+        try:
+            import redis_health as _redis_health
+            _redis_health.set_degraded_mode(True, error=str(exc), source="orchestrator")
+        except Exception as _re:                          # noqa: BLE001
+            logger.warning("降级标志写入失败：%s", str(_re)[:120])
+        logger.error("拒绝派发：Redis 连接失败（step=%s capability=%s task=%s）：%s",
+                     step_id, capability, task_id, str(exc)[:150])
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "error", "agent": capability,
+                       "message": (f"步骤 {step_id} 未派发：Redis 连接失败"
+                                   f"（{str(exc)[:120]}）；系统进入降级模式"),
+                       "timestamp": self._now_iso()})
+        return {"task_id": step_id, "status": "FAILED", "redis_degraded": True,
+                "retryable": True,
+                "result": (f"Redis 不可用，步骤未派发（{str(exc)[:120]}）。"
+                           "队列/结果通道中断：恢复后心跳会自动解除降级，"
+                           "本次尝试按可重试记账。")}
+
     def _dispatch(self, step: dict, task_id: str) -> dict:
         """Send one step to a worker and wait for result."""
         capability = step.get("capability", "")
@@ -5767,6 +5797,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 唯一派发 ID：避免 task_result:{step_id} 与其它任务/历史残留键碰撞
         # （步骤 ID 如 "1"/"2" 在所有任务中通用，曾导致跨任务误取结果）
         dispatch_id = f"{step_id}-{uuid.uuid4().hex[:8]}"
+        # 任务20：Redis 降级模式下**不再**往队列里塞任务——塞不进去只会白等一次完整
+        # 步骤超时，用户看到的还是一句笼统的"步骤失败"。闸门自身会按缓存 TTL 复探一次
+        # （Redis 已恢复就放行），所以降级期间不必重启服务。
+        _redis_down_why = ""
+        try:
+            import redis_health as _redis_health
+            _redis_down_why = _redis_health.dispatch_gate()
+        except Exception as exc:                         # noqa: BLE001 - 闸门坏不拦派发
+            logger.warning("Redis 降级闸门不可用：%s", str(exc)[:120])
+        if _redis_down_why:
+            logger.error("拒绝派发（Redis 降级）：step=%s capability=%s task=%s",
+                         step_id, capability, task_id)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": capability,
+                           "message": f"步骤 {step_id} 未派发：{_redis_down_why}",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step_id, "status": "FAILED", "redis_degraded": True,
+                    "retryable": True, "result": _redis_down_why}
         with self._task_starts_lock:
             task_start_ts = self._task_starts.get(task_id, time.time())
         # L01：派发载荷带版本化身份上下文。`task_id` 仍是派发 id（结果通道
@@ -5794,26 +5842,42 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "result": f"根任务预算不足，未派发：{str(exc)[:150]}"}
 
         ctx = make_context(root_task_id=task_id, step_id=step_id, dispatch_id=dispatch_id)
-        r.lpush(f"task_queue:{agent_id}", json.dumps({
-            "task_id": dispatch_id,
-            "context": ctx.to_wire(),
-            # T0-b：执行许可随派发下发（worker 是另一个进程，按**可信当前记录**核它，
-            # 而不是靠本进程内存里的取消标志——那个它看不见）
-            "permit": _permit.to_wire(),
-            "instruction": instruction,
-            "task_start_ts": task_start_ts,
-            "step_deadline": time.time() + timeout,
-            "workspace": str(task_workspace(task_id)),
-            "simple": bool(self._task_simple.get(task_id, False)),
-            # 执行契约随派发下发（结构化字段）：Worker 的检索查询由它生成，不依赖
-            # 指令里可被模型删掉的一行 `[检索查询]`
-            **({"contract": contract_wire} if contract_wire else {}),
-            # 目标文本随派发下发：打包步骤据此判断"预载数据是否为交付物"
-            # （预载的行情/结构化数据默认不进交付包，除非目标明确要数据文件）
-            "goal": str(
-                (getattr(self, "_task_goals", {}) or {}).get(task_id, "") or ""
-            )[:400],
-        }, ensure_ascii=False))
+        try:
+            r.lpush(f"task_queue:{agent_id}", json.dumps({
+                "task_id": dispatch_id,
+                "context": ctx.to_wire(),
+                # T0-b：执行许可随派发下发（worker 是另一个进程，按**可信当前记录**核它，
+                # 而不是靠本进程内存里的取消标志——那个它看不见）
+                "permit": _permit.to_wire(),
+                "instruction": instruction,
+                "task_start_ts": task_start_ts,
+                "step_deadline": time.time() + timeout,
+                "workspace": str(task_workspace(task_id)),
+                "simple": bool(self._task_simple.get(task_id, False)),
+                # 执行契约随派发下发（结构化字段）：Worker 的检索查询由它生成，不依赖
+                # 指令里可被模型删掉的一行 `[检索查询]`
+                **({"contract": contract_wire} if contract_wire else {}),
+                # 目标文本随派发下发：打包步骤据此判断"预载数据是否为交付物"
+                # （预载的行情/结构化数据默认不进交付包，除非目标明确要数据文件）
+                "goal": str(
+                    (getattr(self, "_task_goals", {}) or {}).get(task_id, "") or ""
+                )[:400],
+            }, ensure_ascii=False))
+        except Exception as _lp_exc:                      # noqa: BLE001 - 只接管 Redis 连接类
+            # 任务20：连接类失败 = Redis 运行中宕了（不是任务本身的问题）。标降级、清标志、
+            # 把预算预留退回去，并给出一句能定位的话；其它异常照旧上抛，不改既有语义。
+            _redis_down = False
+            try:
+                import redis as _redis_mod
+                _redis_down = isinstance(
+                    _lp_exc,
+                    (_redis_mod.exceptions.ConnectionError,
+                     _redis_mod.exceptions.TimeoutError))
+            except Exception:                             # noqa: BLE001
+                _redis_down = False
+            if not _redis_down:
+                raise
+            return self._redis_dispatch_failure(task_id, capability, step_id, _ticket, _lp_exc)
 
         # Wait for result（M0-c：等待结果分四类，取消不再被写成"超时"）
         self._track_inflight(task_id, dispatch_id, time.time())

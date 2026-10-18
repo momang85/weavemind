@@ -143,6 +143,9 @@ class WorkerGuardian:
         self._running = False
         self._shutting_down = False
 
+        # 任务20：Redis 探活的本地镜像（告警按**状态变化**发，不按心跳频率刷屏）
+        self._redis_degraded = False
+
         logger.info(
             "WorkerGuardian ready (mode=%s). "
             "Heartbeat timeout=%ds, quarantine=%d restarts / %ds, grace period=%.0fs",
@@ -164,6 +167,9 @@ class WorkerGuardian:
 
         # 注册 Guardian 自己的心跳
         self._publish_guardian_heartbeat()
+        # 任务20：启动即探一次 Redis——"起来才发现 Redis 不在"要在启动日志里留下结论，
+        # 而不是让检索在后续步骤里无声失效（launcher 只在**拉起服务前**自检一次）。
+        self._check_redis_health()
         # 任务6：启动即先回收一轮（上次宕机遗留的 RUNNING 不该永久滞留）
         self._reap_stuck_tasks()
 
@@ -184,6 +190,8 @@ class WorkerGuardian:
             # Guardian 自身心跳
             if time.time() - last_guardian_hb >= GUARDIAN_HEARTBEAT_INTERVAL:
                 self._publish_guardian_heartbeat()
+                # 任务20：每次心跳探一次 Redis，恢复后自动退出降级模式（无需重启）
+                self._check_redis_health()
                 # 任务17：心跳顺带读 metrics 汇总的 routing_health，
                 # 能力×执行者错配 → 发 capability_routing_mismatch 告警
                 self._check_routing_health()
@@ -505,6 +513,54 @@ class WorkerGuardian:
             })
         except Exception:
             pass
+
+    def _check_redis_health(self) -> dict:
+        """任务20：Redis 探活（启动 + 每次心跳）→ 告警 / 降级标志 / 自动恢复。
+
+        为什么需要它：`launcher.py` 只在**拉起服务前**自检一次 Redis（不通过就拒绝启动），
+        但 Redis 在运行中崩溃没有任何人再看——worker 的 BRPOP 拿不到任务、编排器的
+        `lpush` 抛连接异常、webui 的检索/行情健康快照全读成"未知"，用户看到的只是
+        "任务失败了"。这里让**运行期宕机**立即可见，并在恢复后自动退出降级。
+
+        告警按**状态变化**发（不可用持续期间不每 30s 刷一条）；注意告警通道本身就是
+        Redis，Redis 挂着时 `_alert` 发不出去——所以同时用 `logger.error` 落到本地日志，
+        日志才是那一刻唯一可靠的证据通道。
+
+        返回探测结果（`{available, latency_ms, error}`），失败不抛。
+        """
+        try:
+            import redis_health as rh
+        except Exception as exc:                        # noqa: BLE001 - 探活装不上不拦守护
+            logger.warning("Redis 探活不可用：%s", str(exc)[:120])
+            return {}
+        try:
+            result = rh.check_redis()
+        except Exception as exc:                        # noqa: BLE001 - 探测异常=不可用
+            result = {"available": False, "latency_ms": None,
+                      "error": rh.sanitize_error(exc) or "探测异常"}
+        was_bad = bool(getattr(self, "_redis_degraded", False))
+        is_bad = not bool(result.get("available"))
+        try:
+            rh.set_degraded_mode(is_bad, error=str(result.get("error") or ""),
+                                 source="worker_guardian")
+        except Exception as exc:                        # noqa: BLE001 - 标志写不进不拦守护
+            logger.warning("降级标志写入失败：%s", str(exc)[:120])
+        self._redis_degraded = is_bad
+
+        if is_bad and not was_bad:
+            why = rh.sanitize_error(result.get("error")) or "连接失败"
+            logger.error(
+                "Redis 不可用（%s）→ 进入降级模式：队列/结果通道中断，新步骤无法派发、"
+                "worker 拿不到任务；心跳每 %ds 复检，恢复后自动解除（无需重启）。",
+                why, GUARDIAN_HEARTBEAT_INTERVAL)
+            self._alert("redis_unavailable",
+                        f"Redis 不可用（{why}）：系统进入降级模式，检索/派发通道中断")
+        elif not is_bad and was_bad:
+            logger.info("Redis 已恢复（延迟 %sms）→ 退出降级模式，队列/结果通道恢复",
+                        result.get("latency_ms"))
+            self._alert("redis_recovered",
+                        f"Redis 已恢复（延迟 {result.get('latency_ms')}ms）：退出降级模式")
+        return result
 
     def _check_routing_health(self) -> None:
         """任务17：能力×执行者错配告警（读 metrics 汇总，不自己算库）。
