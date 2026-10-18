@@ -1214,6 +1214,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 pass
         return result
 
+    @staticmethod
+    def _summarize_search_coverage(steps: list) -> dict:
+        """任务19：检索覆盖率汇总（委托 `search_coverage`，与报告/API 同一口径）。
+
+        为什么口径要收敛到一个模块：报告末尾的"数据来源摘要"、任务详情的
+        `search_coverage`、以及本函数的收尾日志，说的必须是**同一组数字**——
+        各写一份迟早会漂移，而这三个数正是读者用来判断"结论有没有来源"的。
+        """
+        try:
+            import search_coverage as _sc
+            return _sc.summarize_search_coverage(steps)
+        except Exception as exc:                 # noqa: BLE001 - 汇总失败不影响收尾
+            logger.warning("检索覆盖率汇总失败：%s", str(exc)[:140])
+            return {}
+
     def _now_iso(self):
         import datetime
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -7741,12 +7756,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "required": bool(self._review_is_required()),
             }
             _ctr = self._task_contract(task_id)
+            # 任务19：把**本次运行**的步骤真值交给装配器（报告末尾的"数据来源摘要"
+            # 按它现算）。不能让它去读 DB：此刻终态行还没写，读了会漏步或读到上一轮。
+            _cov_steps = [
+                {"capability": s.get("capability"),
+                 "result": completed_all.get(s.get("step_id"), {})}
+                for s in all_steps
+            ]
             _asm = assemble_and_verify(
                 task_id, goal, detail, wrapper=delivery, project=project,
                 paper=_wp, accept_fn=self._accept_fn_for(task_id, goal),
                 review_facts=_review_facts,
                 # C-5：研究状态按契约必答问题裁决，并绑定契约指纹
-                contract=({"wire": _ctr.to_wire()} if _ctr is not None else None))
+                contract=({"wire": _ctr.to_wire()} if _ctr is not None else None),
+                steps=_cov_steps)
             report = _asm["report"]
             write_wrapper(task_id, delivery)
             self._delivery(task_id)["hard_fail"] = str(_asm.get("hard_fail") or "")
@@ -7807,6 +7830,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             logger.error(
                 "Task %s 检索步降级（步骤 %s）：终态按有缺口交付",
                 task_id, "、".join(_degraded_steps[:6]),
+            )
+        # 任务19：检索覆盖率（可见性）——报告末尾的"数据来源摘要"与任务详情 API
+        # 都由 `search_coverage` 现算，这里只把同一份数字写进日志，便于离线核对
+        # "报告里说覆盖率多少"与"这次实际跑成什么样"是不是一回事。
+        _cov = self._summarize_search_coverage([
+            {"capability": s.get("capability"),
+             "result": completed_all.get(s.get("step_id"), {})}
+            for s in all_steps
+        ])
+        if _cov.get("total_search_steps"):
+            logger.info(
+                "检索覆盖率（task=%s）：有效 %s/%s（%.0f%%），降级 %s，零来源 %s，未完成 %s",
+                task_id, _cov.get("ok_steps"), _cov.get("total_search_steps"),
+                100.0 * float(_cov.get("coverage_rate") or 0.0),
+                _cov.get("degraded_steps"), _cov.get("zero_source_steps"),
+                _cov.get("incomplete_steps"),
             )
         if overall == "SUCCESS_WITH_ISSUES":
             logger.error(

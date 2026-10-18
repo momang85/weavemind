@@ -5241,6 +5241,17 @@ def _get_task_page(self, p):
                 logging.getLogger("web_ui").warning("可行动状态计算失败（%s）：%s",
                                                     tid, str(exc)[:120])
                 actionable = None
+            # 任务19：检索覆盖率（可见性）——从步骤真值现算，与报告末尾的
+            # "数据来源摘要"同一口径（`search_coverage`）。没有检索步（纯代码/离线
+            # 任务）→ None，前端不显示这一块，不用 0% 冒充"检索质量差"。
+            search_coverage = None
+            try:
+                import search_coverage as _sc
+                _cov = _sc.summarize_search_coverage(data.get("steps") or [])
+                search_coverage = _cov if _cov.get("total_search_steps") else None
+            except Exception as exc:                     # noqa: BLE001
+                logging.getLogger("web_ui").warning("检索覆盖率计算失败（%s）：%s",
+                                                    tid, str(exc)[:120])
             return self._json({
             "task_id": tid,
             "status": data.get("status", "PENDING"),
@@ -5260,6 +5271,9 @@ def _get_task_page(self, p):
             # 与 `acceptance`（终态摘要）分键：库里只有摘要、或这一版没跑过验收 → null，
             # 前端据此显示"证据未入库"，不回退去读可能被别的版本覆盖过的快照文件。
             "acceptance_evidence": data.get("acceptance_evidence"),
+            # 任务19：检索覆盖率（total/ok/zero_source/degraded/incomplete/coverage_rate），
+            # 无检索步时为 null；报告末尾的"数据来源摘要"用的是同一份汇总
+            "search_coverage": search_coverage,
             "llm_degraded": data.get("llm_degraded"),
             "elapsed_sec": elapsed,
             "review_state": review_state,

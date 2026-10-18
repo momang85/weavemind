@@ -2324,13 +2324,49 @@ def ensure_body_accepted(task_id: str, goal: str, detail: str,
 # ── 装配 + 判定 + 记录交付（唯一顺序）────────────────────────
 
 
+def _task_steps(task_id: str) -> list:
+    """任务的步骤真值（DB 投影口径）。读不到就返回空列表——摘要块静默跳过。"""
+    try:
+        import task_state as _ts
+        return list((_ts.task_projection(task_id) or {}).get("steps") or [])
+    except Exception as exc:                     # noqa: BLE001 - 步骤读不到不阻断交付
+        logger.warning("检索覆盖率：步骤读取失败（task=%s）：%s", task_id, str(exc)[:140])
+        return []
+
+
+def _attach_search_coverage(report: str, task_id: str, steps=None) -> str:
+    """任务19：在交付物**末尾**附"数据来源摘要"（只追加，不改正文一个字）。
+
+    - 口径与任务详情 API 的 `search_coverage` 同源（`search_coverage.summarize_search_coverage`）；
+    - `steps`：编排器收尾时传**本次运行**的步骤真值（那一刻 DB 里还没有这轮的行，
+      读 DB 会漏或读到上一轮）；人工修订等路径不传，按 DB 投影读（那些任务早已落库）；
+    - 幂等：先剥掉上次装配留下的摘要块，再按当前步骤重算——修订重装不会叠加、也不会
+      把上一版的覆盖率当成这一版的；
+    - 没有检索步（纯代码/离线任务）→ 不追加，并且把可能残留的旧摘要块剥掉；
+    - 步骤解析不了 → 原样返回（`_task_steps` 已吞异常并告警）。
+    """
+    try:
+        import search_coverage as _sc
+        summary = _sc.summarize_search_coverage(
+            steps if steps is not None else _task_steps(task_id))
+        text = _sc.strip_coverage_block(report)
+        block = _sc.render_coverage_block(summary, rules_version=_rules_version())
+        if not block:
+            return text
+        return (text.rstrip("\n") + "\n\n" + block) if text.strip() else block
+    except Exception as exc:                     # noqa: BLE001 - 摘要算不出来不阻断交付
+        logger.warning("检索覆盖率摘要追加失败（task=%s）：%s", task_id, str(exc)[:140])
+        return report
+
+
 def assemble_and_verify(task_id: str, goal: str, body: str, *,
                         wrapper: str = "", project: str | None = None,
                         accept_fn=None, extra_notes=(),
                         paper: dict | None = None,
                         review_facts: dict | None = None, ws_dir=None,
                         contract: dict | None = None,
-                        assemble_body_as_is: bool = False) -> dict:
+                        assemble_body_as_is: bool = False,
+                        steps: list | None = None) -> dict:
     """按固定顺序装配交付正文、判定状态并记录交付 hash。
 
     顺序（编排器收尾与 web_ui 修订必须逐字节一致）：
@@ -2350,6 +2386,10 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     重写成另一份字节（实测：采纳版 13309 字 vs 重装配 8038 字），于是
     `record_delivery(accepted_body=…)` 记的不是采纳版 → 导出守卫判"version changed"，
     用户会看到"采纳了却导不出来"。
+
+    `steps`：本次运行的步骤真值（编排器收尾传内存态——那一刻 DB 里还没有这一轮的行；
+    人工修订等路径不传，按 DB 投影读）。只用于报告末尾的"数据来源摘要"（任务19），
+    不参与验收、不参与交付状态判定。
     """
     store = VersionStore(_ws(task_id, ws_dir), task_id)
     # F1：研究任务改用**代码装配的研究简报**作为交付正文（关键发现/财务对照/图表/
@@ -2490,6 +2530,9 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
         head = (head + "\n\n" + note) if head else note
     report = f"{head}{SEPARATOR}{body}" if head else str(body)
     report = rewrite_report_links(report, task_id)
+    # 任务19：报告末尾附"数据来源摘要"（检索步覆盖率），必须在 `record_delivery` 之前——
+    # 交付 hash 要覆盖读者真正看到的这份字节；正文 `body` 不带此块（验收对象不变）。
+    report = _attach_search_coverage(report, task_id, steps=steps)
 
     version = store.adopted()
     review_ok, review_why = review_valid_for(version, facts)
