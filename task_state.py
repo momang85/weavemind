@@ -907,7 +907,8 @@ def update_delivery_projection(task_id: str, *, report: str = "",
         try:
             _add_missing_columns(con)
             row = con.execute(
-                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+                "SELECT status, acceptance_json FROM task_history WHERE task_id=?",
+                (task_id,)
             ).fetchone()
             cur_status = str(row[0] or "").upper() if row else ""
             _terminal = cur_status in (CANCELLED, FAILED)
@@ -917,8 +918,13 @@ def update_delivery_projection(task_id: str, *, report: str = "",
             sets = ["report=?", "updated_at=CURRENT_TIMESTAMP"]
             params: list = [str(report)]
             if acceptance is not None:
+                # 任务18：人工修订的摘要同样不得抹掉**同一份正文**的逐项证据
+                _prior_json = str(row["acceptance_json"] or "") if row is not None else ""
                 sets.append("acceptance_json=?")
-                params.append(json.dumps(acceptance, ensure_ascii=False))
+                params.append(json.dumps(
+                    _carry_acceptance_evidence(_prior_json, acceptance)
+                    if isinstance(acceptance, dict) else acceptance,
+                    ensure_ascii=False))
             if status and not _terminal:          # 终态任务**永不**改状态
                 sets.append("status=?")
                 params.append(str(status))
@@ -932,6 +938,95 @@ def update_delivery_projection(task_id: str, *, report: str = "",
     except Exception as exc:
         logger.warning("任务 %s 交付投影写入失败：%s", task_id, str(exc)[:200])
         return False
+
+
+def save_acceptance_evidence(task_id: str, evidence: dict,
+                             db_path: str | None = None) -> bool:
+    """把**这一轮的验收证据**写进任务行（任务18）。
+
+    为什么还要一条单独的写入路径：验收发生在报告步骤里，`record_completion` 只在
+    **终态**写 `acceptance_json`，且写的是摘要（overall/gaps/rules_*）。任务若在验收
+    之后因别的步骤失败而没带验收摘要，或摘要本身不含逐项结论，事后就答不出
+    "当时哪条规则没过、按哪版规则判的"——失败任务恰恰最需要这份账。
+
+    纪律（设计文档硬约束）：
+    - 复用 `acceptance_json` / `rules_fingerprint` 两列，不新增列、不做迁移；
+    - 只 UPDATE：没有这一行（未入库的任务）就不写，返回 False，**不 INSERT**；
+    - 失败只 `logger.warning` 返回 False，绝不抛回流水线——验收证据是可见性，
+      不是交付的前置条件。
+    """
+    if not isinstance(evidence, dict) or not evidence:
+        return False
+    try:
+        blob = json.dumps(evidence, ensure_ascii=False)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 验收证据序列化失败：%s", task_id, str(exc)[:160])
+        return False
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            cur = con.execute(
+                "UPDATE task_history SET acceptance_json=?, rules_fingerprint=?,"
+                " updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
+                (blob, str(evidence.get("rules_fingerprint") or ""), task_id),
+            )
+            con.commit()
+            if not cur.rowcount:
+                logger.warning("任务 %s 验收证据未命中任务行（未落库）", task_id)
+                return False
+            return True
+        finally:
+            con.close()
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 验收证据写入失败：%s", task_id, str(exc)[:200])
+        return False
+
+
+def _carry_acceptance_evidence(prior_json: str, summary: dict) -> dict:
+    """终态摘要**不丢**已入库的逐项验收证据（任务18，配合 `record_completion`）。
+
+    只搬证据键（`checks` / `report_type` / `evaluated_at` / `score`），且必须是
+    **同一份正文**（`report_sha256` 相同）：正文换了（人工修订、换版重验）旧明细
+    就属于别的版本，不得冒充本版结论——与 `GET /api/task/<id>/acceptance` 里
+    `stale_file` 不返回旧 `checks` 的口径一致。
+    """
+    if not prior_json or not summary:
+        return summary
+    _keys = ("checks", "report_type", "evaluated_at", "score")
+    if any(k in summary for k in _keys):
+        return summary
+    try:
+        prior = json.loads(prior_json)
+    except Exception:                                 # noqa: BLE001 - 坏 JSON 当没有
+        return summary
+    if not isinstance(prior, dict) or not prior.get("checks"):
+        return summary
+    _sha = str(summary.get("report_sha256") or "")
+    if not _sha or str(prior.get("report_sha256") or "") != _sha:
+        return summary
+    out = dict(summary)
+    for k in _keys:
+        if k in prior:
+            out[k] = prior[k]
+    return out
+
+
+def _acceptance_write_columns(row, summary: dict) -> tuple[str, str]:
+    """终态要写进 `acceptance_json` / `rules_fingerprint` 的值（任务18）。
+
+    - 摘要是空的（FAILED 终态常不带验收）：**保留**库里已有的证据，不写空串——
+      此前空摘要会把列覆盖成 `''`，等于把"这份报告当时验收结论是什么"抹掉；
+    - 摘要非空：同一正文时把逐项证据并进摘要（见 `_carry_acceptance_evidence`）；
+    - 指纹：摘要没带就沿用库里已有的，不写空。
+    """
+    prior_json = str(row["acceptance_json"] or "") if row is not None else ""
+    prior_fp = str(row["rules_fingerprint"] or "") if row is not None else ""
+    if not summary:
+        return prior_json, prior_fp
+    merged = _carry_acceptance_evidence(prior_json, summary)
+    return (json.dumps(merged, ensure_ascii=False),
+            str(merged.get("rules_fingerprint") or prior_fp))
 
 
 def _attempt_is_current(task_id: str, attempt_id: str) -> bool:
@@ -985,8 +1080,10 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
             _add_missing_columns(con)
             # 取消是**可持久终态**（M0-c）：迟到的 SUCCESS/FAILED 不得把它覆盖回去
             # （用户主动停止后又被"结果回来了"改写成成功，等于把停止当没发生）
+            # 任务18：连带读出现在库里的验收证据/指纹——终态摘要不得把它们抹掉
             row = con.execute(
-                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+                "SELECT status, acceptance_json, rules_fingerprint"
+                " FROM task_history WHERE task_id=?", (task_id,)
             ).fetchone()
             if row and str(row[0] or "") == CANCELLED and str(status or "") != CANCELLED:
                 # 返回 True：终态已经落定（CANCELLED），没有"写失败"这回事——
@@ -996,6 +1093,7 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
                     task_id, status,
                 )
                 return True
+            _acc_blob, _acc_fp = _acceptance_write_columns(row, acceptance)
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,report,steps_json,logs_json,"
@@ -1009,8 +1107,8 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
                 (task_id, goal, str(status or SUCCESS), report,
                  json.dumps(steps or [], ensure_ascii=False),
                  json.dumps((logs or [])[-200:], ensure_ascii=False),
-                 json.dumps(acceptance, ensure_ascii=False) if acceptance else "",
-                 str(acceptance.get("rules_fingerprint") or ""), "完成"),
+                 _acc_blob,
+                 _acc_fp, "完成"),
             )
             con.commit()
             return True
@@ -1217,6 +1315,11 @@ def task_projection(task_id: str, db_path: str | None = None) -> dict:
             steps = parsed if isinstance(parsed, list) else []
         else:
             logs = parsed if isinstance(parsed, list) else []
+    _acc = row.get("acceptance") or None
+    # 任务18：`acceptance_evidence` = 入库的**逐项验收证据**（checks / report_type /
+    # evaluated_at / score 等）。列里只有终态摘要（旧任务、或这一版没跑过验收）时
+    # 为 None——调用方据"空"判"没有证据"，不编。`acceptance` 的既有语义（终态摘要）不动。
+    _evidence = _acc if isinstance(_acc, dict) and _acc.get("checks") else None
     return {
         "task_id": task_id,
         "status": row.get("status") or "PENDING",
@@ -1226,7 +1329,8 @@ def task_projection(task_id: str, db_path: str | None = None) -> dict:
         "logs": logs,
         "project": row.get("project") or "",
         "revision": bool(row.get("revision")) if "revision" in row else False,
-        "acceptance": row.get("acceptance") or None,
+        "acceptance": _acc,
+        "acceptance_evidence": _evidence,
         "llm_degraded": row.get("llm_degraded") if "llm_degraded" in row else None,
         "phase": row.get("phase") or "",
         "rules_fingerprint": row.get("rules_fingerprint") or "",

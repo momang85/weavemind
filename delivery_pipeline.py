@@ -2063,6 +2063,59 @@ def accept_task_meta(task_id: str) -> dict:
     return meta
 
 
+# 单条检查项入库前保留的最大字节数（任务18：见 `_compact_acceptance_checks`）
+_EVIDENCE_CHECK_MAX_CHARS = 2000
+
+
+def _compact_acceptance_checks(checks: dict) -> dict:
+    """逐项结论**瘦身**后入库：过长的单条只留判定与短说明。
+
+    为什么瘦身：`number_traceability` 一类检查会带全量数字轨迹（实测单条 25KB，
+    整份 `checks` 40~80KB），而 `acceptance_json` 这一列每次任务页/投影读取都要解析，
+    不该为可见性把任务行撑到几十 KB。瘦身后保留的是"这条规则过没过、为什么"，
+    丢掉的是逐笔明细——明细仍在 `acceptance_report.json` 与验收事件流里。
+    """
+    out: dict = {}
+    for key, val in (checks or {}).items():
+        if not isinstance(val, dict):
+            out[key] = val
+            continue
+        if len(json.dumps(val, ensure_ascii=False)) <= _EVIDENCE_CHECK_MAX_CHARS:
+            out[key] = val
+            continue
+        out[key] = {
+            "pass": val.get("pass"),
+            "applicable": val.get("applicable"),
+            "status": val.get("status"),
+            "details": str(val.get("details") or "")[:400],
+            "gaps": list(val.get("gaps") or [])[:10],
+            "trimmed": True,
+        }
+    return out
+
+
+def _acceptance_evidence(result: dict, report_type: str = "") -> dict:
+    """一次验收 → 入库证据字典（任务18）。空值不写（键缺席 = 没有这项事实，不编 0）。"""
+    ev = {
+        "overall": result.get("overall"),
+        # 验收器目前不产出分数：如实为 None（被下面的过滤去掉），不假装有分
+        "score": result.get("score"),
+        "gaps": list(result.get("gaps") or []),
+        "checks": _compact_acceptance_checks(result.get("checks") or {}),
+        "report_type": str(result.get("report_type") or report_type or ""),
+        "profile": str(result.get("profile") or ""),
+        "rules_version": str(result.get("rules_version") or ""),
+        "rules_fingerprint": str(result.get("rules_fingerprint") or ""),
+        "report_sha256": str(result.get("report_sha256") or ""),
+        "evaluated_at": str(result.get("evaluated_at") or ""),
+    }
+    if not ev["evaluated_at"]:
+        # UTC + Z。设计文档写的是 `datetime.utcnow()`：3.12 起已弃用，且本模块
+        # 没有 datetime 导入——`time.gmtime` 输出同样口径，不为此新增导入。
+        ev["evaluated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return {k: v for k, v in ev.items() if v not in (None, "", [], {})}
+
+
 def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     trigger: str = "报告步骤", prefer_body: bool = True,
                     hooks: dict | None = None, ws_dir=None,
@@ -2198,6 +2251,16 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                                task_id, str(_acc["report_sha256"])[:16])
         except Exception as exc:
             logger.warning("验收产物落盘/绑定失败（task=%s）：%s", task_id, str(exc)[:120])
+        # 任务18：验收**证据**入库（这一行就是最后一次 run_acceptance 的结论，
+        # 含虚假标注自动修复后的复检）。此前逐项 checks 只活在快照文件与审计事件里，
+        # 进程死了/文件被换版覆盖，任务行就答不出"当时哪条规则没过、用的哪版规则"。
+        # 失败只 warning：可见性改动不得影响交付（设计文档硬约束）。
+        try:
+            import task_state as _ts
+            _ts.save_acceptance_evidence(
+                task_id, _acceptance_evidence(result, _report_type))
+        except Exception as exc:                 # noqa: BLE001
+            logger.warning("验收证据入库失败（task=%s）：%s", task_id, str(exc)[:160])
         try:
             from acceptance_checker import append_acceptance_event, build_acceptance_event
             _ev = build_acceptance_event(

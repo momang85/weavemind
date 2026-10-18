@@ -5256,6 +5256,10 @@ def _get_task_page(self, p):
             "acceptance": (dict(data.get("acceptance") or {}, **(acceptance_bound or {}))
                            if isinstance(data.get("acceptance"), dict)
                            else (acceptance_bound or data.get("acceptance"))),
+            # 任务18：逐项验收证据（checks/report_type/evaluated_at，来自任务行）。
+            # 与 `acceptance`（终态摘要）分键：库里只有摘要、或这一版没跑过验收 → null，
+            # 前端据此显示"证据未入库"，不回退去读可能被别的版本覆盖过的快照文件。
+            "acceptance_evidence": data.get("acceptance_evidence"),
             "llm_degraded": data.get("llm_degraded"),
             "elapsed_sec": elapsed,
             "review_state": review_state,
