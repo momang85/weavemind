@@ -78,6 +78,8 @@ jobs:
         run: python test_task20_redis_degradation.py
       - name: "Supervise mode on by default with restart audit and alert (P1)"
         run: python test_task21_supervise_default.py
+      - name: "Report compaction: body cap, body/appendix split, packaged body (P1)"
+        run: python test_task22_report_compaction.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)

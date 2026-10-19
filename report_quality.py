@@ -386,3 +386,39 @@ def compare_versions(cur_text: str, cand_text: str, *,
     return False, (f"硬约束无差异（验收 {cur['overall'] or '未知'}、缺口 {cur['gaps']}、"
                    f"占位 {cur['placeholders']}）{_vec}，保持当前版本；长度差异"
                    f"（{cur['length']} → {cand['length']} 字符）不作为改进依据")
+
+
+# ── 任务22：主文/附录分层与字数约束 ─────────────────────────────────────
+# README 路线图第1优先级"4–6页主文"：格式+内容要求共 13 条、没有字数约束时，
+# 模型自然输出 180-210 行（≈11 页）。这里给出**主文上限**与**分割点**的唯一定义，
+# 报告步骤（报告落盘/交付打包/PDF 渲染）都用同一份口径，不各写一套。
+#
+# 附录级标题：来源清单、数据来源摘要（task19）、核查细节。取**最靠前**的一个作分割点；
+# 主文 = 分割点之前的全部内容（标题/数据时效/执行摘要/关键数字表/分析/风险结论）。
+APPENDIX_HEADING_RE = re.compile(r"^#{2}\s*(附录|参考来源|数据来源|核查细节)(?:[：:].*)?\s*$", re.M)
+
+# 主文字数上限（字符数）：1800 中文字 × 2 字符/字的**估算起点**，按实机报告调优。
+# 只警告不阻断（设计文档约束：阈值这一版是起点）。
+BODY_CHAR_LIMIT = 3600
+
+
+def split_report_appendix(report: str) -> tuple[str, str]:
+    """报告 → `(主文, 附录)`；没有附录级标题时返回 `(整篇, "")`。
+
+    只按标题切分，不改动任何正文（不重排、不删除），因此两段拼回等于原文。
+    """
+    text = str(report or "")
+    m = APPENDIX_HEADING_RE.search(text)
+    if not m:
+        return text, ""
+    return text[: m.start()].rstrip() + "\n", text[m.start():]
+
+
+def body_length_warning(body: str, *, limit: int = BODY_CHAR_LIMIT) -> dict | None:
+    """主文超限 → 可入库的告警字典；未超限 → `None`（键缺席 = 没有这项事实）。"""
+    chars = len(str(body or ""))
+    if chars <= int(limit):
+        return None
+    return {"chars": chars, "limit": int(limit),
+            "note": f"主文 {chars} 字符，超过目标上限 {int(limit)}（只提示，不影响验收结论）"}
+

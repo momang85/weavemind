@@ -676,6 +676,23 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
     return out
 
 
+def _delivered_body_md(md_bytes: bytes) -> bytes | None:
+    """交付正文 → 主文字节（任务22）；没有附录（完整版即主文）时返回 `None`。
+
+    直接从**同一份交付正文**切分，不读工作区磁盘：打包/快照期间正文若发生修订，
+    包内主文不会与 `reports/report.md` 错版（宁可不放，也不混两版）。
+    """
+    try:
+        from report_quality import split_report_appendix
+        body, appendix = split_report_appendix(bytes(md_bytes).decode("utf-8"))
+    except Exception as exc:                     # noqa: BLE001 - 切不出就不放，不阻断打包
+        logger.warning("交付主文拆分失败（按无附录处理）：%s", str(exc)[:120])
+        return None
+    if not appendix.strip() or not body.strip():
+        return None
+    return body.encode("utf-8")
+
+
 def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
                     pdf_bytes: bytes = b"") -> dict:
     """快照时刻把**要进包的成员按字节冻结**（正文/PDF/底稿/图表/审计稿/引用证据）。
@@ -690,6 +707,9 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
     payload: dict[str, bytes] = {}
     if md_bytes:
         payload["reports/report.md"] = bytes(md_bytes)
+        _body = _delivered_body_md(bytes(md_bytes))
+        if _body is not None:
+            payload["reports/report_body.md"] = _body
     if pdf_bytes:
         payload["reports/report.pdf"] = bytes(pdf_bytes)
     for name, arc in (("working_paper.json", "working_paper.json"),
@@ -1201,6 +1221,12 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
         mdb = bytes(md_bytes)
         (reports / "report.md").write_bytes(mdb)
         files: list[tuple[_P, str]] = [(reports / "report.md", "reports/report.md")]
+        # 任务22：交付包同时带**主文**（附录前），下载/阅读优先看它；没有附录
+        # 级标题（= 完整版本身就是主文）时不进包，避免同一份内容两个成员。
+        _body_bytes = _delivered_body_md(mdb)
+        if _body_bytes is not None:
+            (reports / "report_body.md").write_bytes(_body_bytes)
+            files.append((reports / "report_body.md", "reports/report_body.md"))
         pdf_name = ""
         if pdf_bytes:
             (reports / "report.pdf").write_bytes(bytes(pdf_bytes))
@@ -2108,6 +2134,8 @@ def _acceptance_evidence(result: dict, report_type: str = "") -> dict:
         "rules_fingerprint": str(result.get("rules_fingerprint") or ""),
         "report_sha256": str(result.get("report_sha256") or ""),
         "evaluated_at": str(result.get("evaluated_at") or ""),
+        # 任务22：主文超字数（只提示，不影响 overall）；未超限时键缺席
+        "length_warning": result.get("length_warning"),
     }
     if not ev["evaluated_at"]:
         # UTC + Z。设计文档写的是 `datetime.utcnow()`：3.12 起已弃用，且本模块
@@ -2218,6 +2246,18 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                         if gone and hint not in result.get("gaps", []):
                             result.setdefault("gaps", []).append(hint)
         except Exception:
+            pass
+        # 任务22：主文字数（附录前）超限只记警告，不阻断交付、不改 overall。
+        # 放进 result 后由 `_acceptance_evidence` 随证据入库（键缺席=未超限）。
+        try:
+            from report_quality import body_length_warning, split_report_appendix
+            _body, _appendix = split_report_appendix(report)
+            _lw = body_length_warning(_body)
+            if _lw:
+                result["length_warning"] = _lw
+                logger.warning("主文超字数限制：%d 字符（目标≤%d）",
+                               _lw["chars"], _lw["limit"])
+        except Exception:                        # noqa: BLE001 - 量不出字数不阻断验收
             pass
         # 落盘：快照（覆盖写）+ 审计事件（追加），两者都在绑定之前完成
         try:

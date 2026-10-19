@@ -626,6 +626,30 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             return c[:max_chars]
         return body[:max_chars]
 
+    @staticmethod
+    def _write_report_files(report_dir: Path, report: str) -> dict:
+        """落盘 report.md（完整版，不变）+ 主文/附录拆分文件（任务22）。
+
+        - `report_body.md`：附录前主文（执行摘要/关键数字表/分析/风险结论）；
+        - `report_appendix.md`：附录（来源清单/核查细节/数据来源摘要）；
+        - 没有附录级标题时不写与完整版重复的副本（report.md 本身就是主文）；
+        - 主文超字数上限只 warning，不阻断（阈值是估算起点，按实机调优）；
+        - 返回的 `length_warning` 随步骤结果带回编排器，进验收证据入库。
+        """
+        from report_quality import body_length_warning, split_report_appendix
+        body, appendix = split_report_appendix(report)
+        (report_dir / "report.md").write_text(report, encoding="utf-8")
+        out = {"chars": len(report), "body_chars": len(body),
+               "appendix_chars": len(appendix)}
+        if appendix.strip():
+            (report_dir / "report_body.md").write_text(body, encoding="utf-8")
+            (report_dir / "report_appendix.md").write_text(appendix, encoding="utf-8")
+        warn = body_length_warning(body)
+        if warn:
+            logger.warning("主文超字数限制：%d 字符（目标≤%d）", warn["chars"], warn["limit"])
+            out["length_warning"] = warn
+        return out
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -850,13 +874,13 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             report = self._strip_rejected_sources(report)
 
             rpath = report_dir / "report.md"
-            rpath.write_text(report, encoding="utf-8")
+            _info = self._write_report_files(report_dir, report)
             return json.dumps({
                 "status": "success",
                 "report_path": str(rpath),
                 "charts": len(charts),
                 "datasets": len(data_csvs),
-                "chars": len(report),
+                **_info,
             }, ensure_ascii=False)
         except Exception as exc:
             # 回退：LLM 不可用时，输出以任务主题为标题的结构化报告（不套数据管道模板）
@@ -924,13 +948,14 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                         "fallback": True,
                         "kept_existing": True,
                     }, ensure_ascii=False)
-                rpath.write_text(report, encoding="utf-8")
+                _info = self._write_report_files(report_dir, report)
                 return json.dumps({
                     "status": "success",
                     "report_path": str(rpath),
                     "charts": len(charts),
                     "datasets": len(data_csvs),
                     "fallback": True,
+                    **_info,
                 }, ensure_ascii=False)
             except Exception as e2:
                 return json.dumps({"status": "failed", "error": str(e2)})

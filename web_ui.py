@@ -7417,15 +7417,19 @@ def _post_task_package(self, p, body, admin):
     pdf_bytes = b""
     pdf_error = ""
     try:
-        # PDF 从**同一份交付正文**渲染（不再各自重读"当前版本"）
+        # PDF 从**同一份交付正文**渲染（不再各自重读"当前版本"）。
+        # 任务22：优先用**主文**（附录前）渲染——更短=更快=更清楚，来源清单等
+        # 附录内容仍可从完整正文/交付包查阅；没有附录级标题时即完整正文本身。
+        from report_quality import split_report_appendix
         from report_pdf import markdown_to_pdf
+        pdf_source, _appendix = split_report_appendix(delivered)
         title = ""
         for ln in delivered.split("\n"):
             s = ln.strip()
             if s.startswith("# "):
                 title = s[2:].strip()
                 break
-        pdf_bytes = markdown_to_pdf(delivered, title=title or "任务报告", workspace=ws)
+        pdf_bytes = markdown_to_pdf(pdf_source, title=title or "任务报告", workspace=ws)
     except Exception as exc:                     # noqa: BLE001 - PDF 失败不阻断打包
         pdf_error = str(exc)[:160]
     try:
