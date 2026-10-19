@@ -4269,6 +4269,13 @@ def _get_health(self, p):
             payload["redis"] = _redis_health.public_snapshot()
         except Exception as exc:                         # noqa: BLE001 - 探活失败不坏探活接口
             logging.getLogger("web_ui").warning("Redis 公开健康快照失败：%s", str(exc)[:120])
+        # 任务23：LLM 端点熔断状态公开可见（同口径：只有状态名/端点名/计数，
+        # 不含任何地址或密钥；Redis 镜像读不到时只报 CLOSED，不坏探活接口）。
+        try:
+            from llm_circuit_breaker import health_view as _llm_health_view
+            payload["llm"] = _llm_health_view()
+        except Exception as exc:                         # noqa: BLE001
+            logging.getLogger("web_ui").warning("LLM 熔断快照失败：%s", str(exc)[:120])
         return self._json(payload)
 
 def _get_bootstrap(self, p):

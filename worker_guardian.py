@@ -195,6 +195,8 @@ class WorkerGuardian:
                 # 任务17：心跳顺带读 metrics 汇总的 routing_health，
                 # 能力×执行者错配 → 发 capability_routing_mismatch 告警
                 self._check_routing_health()
+                # 任务23：心跳顺带看 LLM 端点熔断（本进程 + worker 镜像）→ llm_circuit_open
+                self._check_llm_circuit()
                 last_guardian_hb = time.time()
                 # 任务6：每次心跳顺带回收 stuck 任务（超 task_timeout×1.5 → cancelled）
                 self._reap_stuck_tasks()
@@ -606,6 +608,49 @@ class WorkerGuardian:
                         "能力-执行者错配：" + "；".join(parts))
         except Exception as exc:
             logger.warning("routing health check failed: %s", exc)
+
+    def _check_llm_circuit(self) -> None:
+        """任务23：LLM 端点熔断告警（本进程单例 + worker 写的 Redis 镜像取最坏）。
+
+        为什么 guardian 要知道：真正发起模型调用的是 worker 进程，主端点持续故障时
+        它会把调用切到备援（`llm_circuit_breaker`），别的进程看不见——用户只会觉得
+        "结果变差了"。熔断期间必须有一条显式告警，而不是靠事后翻日志。
+
+        数据源：`llm_circuit_breaker.aggregate_view()`（本进程单例 + `llm:circuit:{service}`
+        镜像，取最坏状态；镜像带 TTL，进程死了自动过期）。Redis 不可用或没装熔断器
+        → 静默返回：不能把"读不到"当成"没熔断"来告警。
+
+        去重：熔断是**持续状态**，按 (state, 活跃端点, 连续失败数) 指纹记忆，
+        指纹没变不重复告警；恢复后指纹复位，下次熔断会重新告警。
+        """
+        try:
+            from llm_circuit_breaker import STATE_CLOSED, aggregate_view
+            view = aggregate_view()
+        except Exception:
+            return
+
+        try:
+            state = str(view.get("state") or "")
+            endpoint = str(view.get("active_endpoint") or "")
+            failures = int(view.get("consecutive_failures") or 0)
+            if state == STATE_CLOSED:
+                if getattr(self, "_last_llm_circuit", None):
+                    self._last_llm_circuit = None
+                    self._alert("llm_circuit_recovered",
+                                "LLM 端点熔断已恢复：活跃端点回到 primary，连续失败计数清零")
+                return
+            sig = (state, endpoint, failures)
+            if sig == getattr(self, "_last_llm_circuit", None):
+                return                                        # 同一熔断状态已告警过
+            self._last_llm_circuit = sig
+            self._alert("llm_circuit_open",
+                        f"LLM 端点熔断中（state={state}）：活跃端点 {endpoint}，"
+                        f"连续失败 {failures} 次，已按备援列表顺序切换")
+            # 告警通道本身走 Redis，Redis 出问题时发不出去：同时落本地日志
+            logger.error("LLM 端点熔断：state=%s 活跃端点=%s 连续失败=%d",
+                         state, endpoint, failures)
+        except Exception as exc:
+            logger.warning("llm circuit check failed: %s", exc)
 
     # ------------------------------------------------------------------
     # stuck 任务回收（任务6 watchdog）

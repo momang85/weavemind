@@ -80,6 +80,42 @@ class AsyncWorkerBase(ABC):
         self, system="", prompt="", instruction="",
         max_attempts=3, max_tokens=2000,
     ) -> str:
+        # 任务23：LLM 端点熔断（docs/arch_phase4_task23_llm_failover.md）。
+        # 调用前把本进程 LLM_* 指向熔断器的当前活跃端点（未配备援 → 原样返回、
+        # 不写环境变量，零影响）；成功/失败回喂熔断器记连续失败计数。
+        # 备援期间同时取该备援的模型名：model_roles 优先于 LLM_MODEL，不传 override
+        # 就会把主端点模型名发给备援供应商（实机 404），切了等于没切。
+        model_override = None
+        try:
+            from llm_circuit_breaker import activate_for_call, active_model_override
+            activate_for_call(self.agent_id)
+            model_override = active_model_override()
+        except Exception:
+            pass  # 熔断器自身故障绝不拦调用
+        try:
+            result = await self._call_llm_transport(
+                system=system, prompt=prompt, instruction=instruction,
+                max_attempts=max_attempts, max_tokens=max_tokens,
+                model_override=model_override,
+            )
+        except Exception as exc:
+            try:
+                from llm_circuit_breaker import report_failure
+                report_failure(exc)
+            except Exception:
+                pass
+            raise
+        try:
+            from llm_circuit_breaker import report_success
+            report_success()
+        except Exception:
+            pass
+        return result
+
+    async def _call_llm_transport(
+        self, system="", prompt="", instruction="",
+        max_attempts=3, max_tokens=2000, model_override=None,
+    ) -> str:
         # 步骤级流式输出（O-21）：长生成过程逐块发布到 Redis，前端实时显示
         if os.environ.get("STREAM_OUTPUT", "1") != "0":
             try:
@@ -99,6 +135,8 @@ class AsyncWorkerBase(ABC):
                         max_tokens=max_tokens,
                         # B1：步骤执行为 exec 用途，按 llm.model_roles.exec 选模型
                         usage="exec",
+                        # 任务23：备援端点用自己的模型名（None=与改动前逐字节一致）
+                        model_override=model_override,
                     )),
                 )
             except Exception as exc:
@@ -116,6 +154,8 @@ class AsyncWorkerBase(ABC):
             max_tokens=max_tokens,
             # B1：步骤执行为 exec 用途
             usage="exec",
+            # 任务23：同上
+            model_override=model_override,
         )
         return result if isinstance(result, str) else str(result)
 

@@ -80,6 +80,8 @@ jobs:
         run: python test_task21_supervise_default.py
       - name: "Report compaction: body cap, body/appendix split, packaged body (P1)"
         run: python test_task22_report_compaction.py
+      - name: "LLM circuit breaker: 5-strike OPEN, ordered backup failover, 60s probe, guardian alert (P1)"
+        run: python test_task23_llm_failover.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)
