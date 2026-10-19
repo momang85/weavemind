@@ -6004,7 +6004,10 @@ class TestLauncherSupervise(unittest.TestCase):
         )
 
     def test_start_respects_supervise_env(self):
-        """WEAVEMIND_SUPERVISE=1 时 start 进入守护模式，否则保持原状。"""
+        """任务21 起 WEAVEMIND_SUPERVISE 默认开启：未设置也进守护模式。
+
+        旧语义（=1 才守护）已翻转：task20 真机演练证实编排器/critic 崩溃后
+        无人重启；=0（off/false/no 同义）保留为显式关闭出口。"""
         launcher, tmp = self._setup()
         # 依赖自检与 Redis 预检走真实实现会拉起/探测本机 Redis —— 本用例只关心
         # supervise 分支，故一并隔离，保持测试无运行时副作用。
@@ -6018,6 +6021,7 @@ class TestLauncherSupervise(unittest.TestCase):
         sup.assert_called_once()
         start.assert_not_called()
 
+        # 未设置：任务21 起默认进守护模式
         env = dict(os.environ)
         env.pop("WEAVEMIND_SUPERVISE", None)
         with mock.patch.object(launcher, "_run_dependency_check"), \
@@ -6027,8 +6031,19 @@ class TestLauncherSupervise(unittest.TestCase):
                 mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
                 mock.patch.dict(os.environ, env, clear=True):
             launcher.main()
-        start2.assert_called_once()
-        sup2.assert_not_called()
+        sup2.assert_called_once()
+        start2.assert_not_called()
+
+        # WEAVEMIND_SUPERVISE=0：显式关闭，恢复一次性启动（CI/单测不需要守护）
+        with mock.patch.object(launcher, "_run_dependency_check"), \
+                mock.patch.object(launcher, "_check_redis_or_exit"), \
+                mock.patch.object(launcher, "supervise_services") as sup3, \
+                mock.patch.object(launcher, "start_services") as start3, \
+                mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
+                mock.patch.dict(os.environ, {"WEAVEMIND_SUPERVISE": "0"}, clear=False):
+            launcher.main()
+        start3.assert_called_once()
+        sup3.assert_not_called()
 
 
 class TestP0StatusHonesty(unittest.TestCase):

@@ -16,6 +16,14 @@ chcp 65001 >nul 2>&1
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 
+REM ---- Guardian (supervise) mode: ON by default ----
+REM Task 21: `launcher.py up` starts a detached supervisor that polls the services
+REM every 30s and restarts crashed orchestrator/critic processes. Set
+REM WEAVEMIND_SUPERVISE=0 before this script (or in the environment) to disable
+REM auto-restart while debugging. Restart events are audited to logs/audit.jsonl
+REM (action=process_restarted) and published on orchestrator:alert.
+if not defined WEAVEMIND_SUPERVISE set "WEAVEMIND_SUPERVISE=1"
+
 echo.
 echo   ============================================
 echo     WeaveMind -- ZhiGuang AI System
@@ -90,6 +98,7 @@ echo     Ready.  %WM_URL%
 echo     Stop:   stop.bat
 echo     Status: %PY% launcher.py status
 echo     Health: %PY% launcher.py readiness
+echo     Guardian: auto-restart ON - set WEAVEMIND_SUPERVISE=0 to disable
 echo   ============================================
 echo.
 start "" "%WM_URL%"
