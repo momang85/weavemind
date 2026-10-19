@@ -1646,9 +1646,14 @@ def _parse_json_content(raw: str) -> dict[str, Any]:
 def _load_llm_config():
     try:
         cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-        with open(cfg_path, 'r') as f:
+        # 缺陷D：显式 utf-8。默认编码在 Windows 是 cp936/gbk，config.json 里的中文
+        # 注释/值会 UnicodeDecodeError → 整段配置静默丢失（主模型角色映射一起丢）。
+        with open(cfg_path, 'r', encoding='utf-8') as f:
             return json.load(f).get('llm', {})
-    except Exception: return {}
+    except Exception as e:
+        # 不吞异常：读不到/解不开要留痕（此前裸 except 让"配置丢了"无从发现）
+        logger.warning("LLM 配置加载失败: %s", e)
+        return {}
 
 _LLM_CFG = _load_llm_config()
 _MODEL_ROLES_CFG = {
@@ -1662,9 +1667,13 @@ def _load_backup_config() -> dict:
     """读取备用 LLM 端点/模型配置（config.json 顶层 backup 段）。"""
     try:
         cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-        with open(cfg_path, 'r') as f:
+        # 缺陷D：显式 utf-8（原因同 `_load_llm_config`）；实机就因缺它导致备援配置
+        # 整段为空 —— 熔断器"备援端点数=0"，failover 从未真正生效。
+        with open(cfg_path, 'r', encoding='utf-8') as f:
             return json.load(f).get('backup', {}) or {}
-    except Exception:
+    except Exception as e:
+        # 不吞异常：加载失败要留痕，且仍按"无备援"降级（不阻断主链路）
+        logger.warning("备援配置加载失败: %s", e)
         return {}
 
 

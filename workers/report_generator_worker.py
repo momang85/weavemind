@@ -635,20 +635,14 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         - 没有附录级标题时不写与完整版重复的副本（report.md 本身就是主文）；
         - 主文超字数上限只 warning，不阻断（阈值是估算起点，按实机调优）；
         - 返回的 `length_warning` 随步骤结果带回编排器，进验收证据入库。
+
+        缺陷B（真机 E2E 复现）：本方法与交付管线/打包各写一份，口径分叉导致包内
+        `report.md` 与拆分件错版。现收敛到 `report_quality.write_report_files`
+        （唯一权威写入口，交付侧同一函数），方法只保留调用面；无附录标题时
+        权威写入口会清掉同名陈旧拆分件。
         """
-        from report_quality import body_length_warning, split_report_appendix
-        body, appendix = split_report_appendix(report)
-        (report_dir / "report.md").write_text(report, encoding="utf-8")
-        out = {"chars": len(report), "body_chars": len(body),
-               "appendix_chars": len(appendix)}
-        if appendix.strip():
-            (report_dir / "report_body.md").write_text(body, encoding="utf-8")
-            (report_dir / "report_appendix.md").write_text(appendix, encoding="utf-8")
-        warn = body_length_warning(body)
-        if warn:
-            logger.warning("主文超字数限制：%d 字符（目标≤%d）", warn["chars"], warn["limit"])
-            out["length_warning"] = warn
-        return out
+        from report_quality import write_report_files
+        return write_report_files(report_dir, report)
 
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"

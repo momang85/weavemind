@@ -1347,7 +1347,7 @@ def _publish_restart_alert(name: str, old_pid: int | None, new_pid: int,
         socket_connect_timeout=1.0, socket_timeout=1.0,
         retry=_Retry(_NoBackoff(), 0),
     )
-    client.publish("orchestrator:alert", {
+    payload = {
         "type": "process_restarted",
         "message": (f"supervise 重启关键进程 {name}"
                     f"（旧 pid={old_pid} 新 pid={new_pid}，连续第 {attempt} 次）"),
@@ -1356,7 +1356,12 @@ def _publish_restart_alert(name: str, old_pid: int | None, new_pid: int,
         "target": name,
         "old_pid": old_pid,
         "new_pid": new_pid,
-    })
+    }
+    # 缺陷A（真机 E2E 复现）：redis-py 只接受 bytes/str/memoryview，直接丢 dict 会
+    # TypeError("Invalid input of type: 'dict'")，告警一条都发不出去（审计与
+    # logger.error 仍在，所以缺陷静默）。序列化口径与 `common.Messaging._serialize` /
+    # guardian._alert 一致：JSON 字符串，中文不转义。
+    client.publish("orchestrator:alert", json.dumps(payload, ensure_ascii=False))
 
 
 def _supervise_once(

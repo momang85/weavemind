@@ -555,9 +555,34 @@ _SINGLETON_MTIME: float | None = None
 _SINGLETON_LOCK = threading.Lock()
 
 
+def warn_backup_model_same_as_primary(cfg: dict | None = None) -> list[str]:
+    """启动校验（缺陷C）：备援端点用了与主端点**同名**的模型 → 只 warning，不阻断。
+
+    真机现场：`backup.model` 填的是备援端点上并不存在的旧模型名（failover 时 HTTP 404
+    `model_not_found`），切换形同虚设。同名是同类问题的另一种形态：切过去**能力没换**
+    （不同供应商同名模型的版本/能力未必一致），排障时容易被当成"备援已生效"。
+    架构师指定：非阻断启动校验日志。返回命中同名的备援端点名列表（供测试/审计）。
+    """
+    warned: list[str] = []
+    try:
+        cfg = load_config() if cfg is None else cfg
+        primary_model = str(load_primary(cfg).get("model") or "").strip()
+        if not primary_model:
+            return warned
+        for ep in load_backups(cfg):
+            if str(ep.get("model") or "").strip() == primary_model:
+                warned.append(str(ep.get("name") or "backup"))
+                logger.warning("备援模型名与主端点相同，failover后模型能力不变")
+    except Exception as exc:                            # noqa: BLE001 - 校验不得影响启动
+        logger.warning("备援模型名校验跳过：%s", str(exc)[:120])
+    return warned
+
+
 def build_breaker(cfg: dict | None = None, **kwargs) -> LLMCircuitBreaker:
     """按当前配置构造一个熔断器（测试直接用它，不碰单例）。"""
     cfg = load_config() if cfg is None else cfg
+    # 缺陷C：配置体检（只记日志，不改构造结果/不抛错）
+    warn_backup_model_same_as_primary(cfg)
     kwargs.setdefault("service", _SERVICE_NAME)
     # 阈值/窗口允许配置覆盖（架构师指定的默认值 5 / 60，不配置即为它）
     system = cfg.get("system") if isinstance(cfg.get("system"), dict) else {}

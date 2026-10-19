@@ -19,7 +19,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # 未完成痕迹（占位/待补），越少越好
 _PLACEHOLDER_PATTERNS = (
@@ -405,13 +408,15 @@ BODY_CHAR_LIMIT = 3600
 def split_report_appendix(report: str) -> tuple[str, str]:
     """报告 → `(主文, 附录)`；没有附录级标题时返回 `(整篇, "")`。
 
-    只按标题切分，不改动任何正文（不重排、不删除），因此两段拼回等于原文。
+    只按标题切分，不改动任何正文（不重排、不删除），因此两段拼回**逐字节**等于原文。
+    缺陷B（真机 E2E 复现）：此前主文末尾做 `rstrip()`，拼回会丢一个换行，交付侧
+    因此无法用"两段拼回 = 完整版"校验同源；现按原样切分，写入方据此保证三件同源。
     """
     text = str(report or "")
     m = APPENDIX_HEADING_RE.search(text)
     if not m:
         return text, ""
-    return text[: m.start()].rstrip() + "\n", text[m.start():]
+    return text[: m.start()], text[m.start():]
 
 
 def body_length_warning(body: str, *, limit: int = BODY_CHAR_LIMIT) -> dict | None:
@@ -421,4 +426,49 @@ def body_length_warning(body: str, *, limit: int = BODY_CHAR_LIMIT) -> dict | No
         return None
     return {"chars": chars, "limit": int(limit),
             "note": f"主文 {chars} 字符，超过目标上限 {int(limit)}（只提示，不影响验收结论）"}
+
+
+def write_report_files(report_dir, report: str) -> dict:
+    """报告正文 → 三件同源落盘（缺陷B 修复 / 任务22）：唯一权威写入口。
+
+    - `report.md`：完整版（正文原样写出，不改动）；
+    - `report_body.md` / `report_appendix.md`：**同一份正文**经 `split_report_appendix`
+      得到的两段，只在有附录级标题时写（完整版即主文时不写重复副本）。
+
+    缺陷B（真机 E2E 复现）：报告 worker 的落盘、交付管线冻结/重打包各写一份，口径分叉，
+    包内 `report.md` 与拆分件错版（16:17 成稿的 body/appendix + 16:56 重打包的 report.md）。
+    收敛到本函数后，任何写入方拿到的三件都来自同一份文本，`body + appendix == report.md`
+    恒成立。
+
+    返回 `{chars, body_chars, appendix_chars[, length_warning]}`（字段与任务22一致）；
+    主文超限只 `logger.warning`，不阻断落盘与验收。
+    """
+    from pathlib import Path as _P
+
+    out_dir = _P(report_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    text = str(report or "")
+    body, appendix = split_report_appendix(text)
+    # 一律 write_bytes：`write_text` 在 Windows 会把 \n 翻成 \r\n（平台相关），
+    # 交付侧按字节记 hash（清单/自检/快照 drift），翻译过的字节会与冻结正文不一致。
+    (out_dir / "report.md").write_bytes(text.encode("utf-8"))
+    out = {"chars": len(text), "body_chars": len(body),
+           "appendix_chars": len(appendix)}
+    if appendix.strip():
+        (out_dir / "report_body.md").write_bytes(body.encode("utf-8"))
+        (out_dir / "report_appendix.md").write_bytes(appendix.encode("utf-8"))
+    else:
+        # 无附录级标题：完整版即主文。同名陈旧拆分件必须清掉——否则上一版的主文/
+        # 附录会被交付侧当成"本次拆分结果"打包（缺陷B 的错版正是这么进包的）。
+        for stale in ("report_body.md", "report_appendix.md"):
+            try:
+                (out_dir / stale).unlink(missing_ok=True)
+            except OSError as exc:               # noqa: BLE001 - 删不掉不阻断落盘
+                logger.warning("清理陈旧拆分件失败 %s：%s", stale, str(exc)[:80])
+    warning = body_length_warning(body)
+    if warning:
+        logger.warning("主文超字数限制：%d 字符（目标≤%d）",
+                       warning["chars"], warning["limit"])
+        out["length_warning"] = warning
+    return out
 

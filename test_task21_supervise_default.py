@@ -238,8 +238,9 @@ class TestRestartAuditAndAlert(unittest.TestCase):
         fake_client = mock.MagicMock()
         with mock.patch("redis.Redis", return_value=fake_client) as redis_cls:
             launcher._publish_restart_alert("orchestrator", 222, 333, 1)
-        channel, payload = fake_client.publish.call_args.args
+        channel, raw = fake_client.publish.call_args.args
         self.assertEqual(channel, "orchestrator:alert")
+        payload = json.loads(raw)  # 不抛 = 合法 JSON（缺陷A：修复前直接发 dict）
         self.assertEqual(payload["type"], "process_restarted")
         self.assertEqual(payload["service"], "launcher")
         self.assertEqual(payload["target"], "orchestrator")
@@ -249,6 +250,25 @@ class TestRestartAuditAndAlert(unittest.TestCase):
                       "全仓守卫：不传 retry 的 redis.Redis 会在 Redis 不可达时挂死巡检线程")
         self.assertLessEqual(kwargs["socket_connect_timeout"], 2.0)
         self.assertLessEqual(kwargs["socket_timeout"], 2.0)
+
+    def test_alert_payload_is_valid_json(self):
+        """缺陷A（真机 E2E 复现）：dict 直接交给 redis.publish 会 TypeError
+        （"Invalid input of type: 'dict'"），告警从未到达 orchestrator:alert；
+        修复后必须发 JSON 字符串，与 guardian._alert / web_ui 的同通道口径一致。"""
+        import launcher
+        fake_client = mock.MagicMock()
+        with mock.patch("redis.Redis", return_value=fake_client):
+            launcher._publish_restart_alert("critic", 111, 222, 2)
+        channel, raw = fake_client.publish.call_args.args
+        self.assertEqual(channel, "orchestrator:alert")
+        self.assertIsInstance(raw, str, "发布载荷必须是字符串（redis-py 不收 dict）")
+        payload = json.loads(raw)  # 不抛 = 合法 JSON
+        self.assertEqual(payload["type"], "process_restarted")
+        self.assertEqual(payload["service"], "launcher")
+        self.assertEqual(payload["target"], "critic")
+        self.assertEqual(payload["old_pid"], 111)
+        self.assertEqual(payload["new_pid"], 222)
+        self.assertIn("timestamp", payload)
 
 
 class TestFirstPollRestartsWithinVerifyWait(unittest.TestCase):

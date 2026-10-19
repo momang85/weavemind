@@ -44,6 +44,13 @@ def _goal_wants_data(goal: str) -> bool:
     return any(k in g for k in _DATA_DELIVERABLE_HINTS)
 
 
+def _report_dir_for(task: dict) -> Path:
+    """本次任务的报告目录：有工作区用工作区，否则退回共享目录。"""
+    if task and task.get("workspace"):
+        return Path(str(task["workspace"])) / "reports"
+    return REPORT_DIR
+
+
 class PackagingWorker(AsyncWorkerBase):
     """打包交付 Worker：将项目工作区中的新产物打成 ZIP。"""
 
@@ -129,9 +136,7 @@ class PackagingWorker(AsyncWorkerBase):
                 continue
             files.append((p, rel))
         # 报告文件独立存放，若新鲜则一并纳入（放在 reports/ 前缀下）
-        report_dir = REPORT_DIR
-        if task and task.get("workspace"):
-            report_dir = Path(str(task["workspace"])) / "reports"
+        report_dir = _report_dir_for(task)
         if report_dir.exists():
             for p in sorted(report_dir.glob("*.md")):
                 try:
@@ -181,9 +186,37 @@ class PackagingWorker(AsyncWorkerBase):
                     "schema": "weavemind.package/2", "files": {}}
         return dp.package_manifest(tid, ws, files)
 
+    @staticmethod
+    def _heal_report_split(task: dict) -> None:
+        """入包前按当前 `reports/report.md` 重算主文/附录拆分件（缺陷B）。
+
+        真机 E2E 复现：包的 `reports/report.md` 是**重打包那一刻**的正文，而同目录的
+        `report_body.md` / `report_appendix.md` 还是**成稿时**写的旧版（16:17 稿 vs
+        16:56 重打包），一份交付里出现两个版本的正文。这里不读缓存、不按时间戳猜，
+        只按当前 `report.md` 用 `report_quality.write_report_files`（唯一权威写入口，
+        与报告 worker/交付管线同一函数）重算一次；无附录标题时它会清掉陈旧拆分件，
+        于是包内不可能再出现"完整版 + 上一版主文/附录"。失败不阻断打包（只 warning）。
+        """
+        report_dir = _report_dir_for(task)
+        md_path = report_dir / "report.md"
+        if not md_path.is_file():
+            return
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except Exception as exc:                 # noqa: BLE001 - 读不出就不动拆分件
+            logger.warning("打包：report.md 读取失败，拆分件保持原样：%s", str(exc)[:100])
+            return
+        try:
+            from report_quality import write_report_files
+            write_report_files(report_dir, text)
+        except Exception as exc:                 # noqa: BLE001 - 重算失败不阻断打包
+            logger.warning("打包：主文/附录拆分件重算失败：%s", str(exc)[:100])
+
     def _package(self, proj_path: Path, task: dict) -> str:
         if not proj_path.is_dir():
             raise RuntimeError(f"Project path not found: {proj_path}")
+        # 缺陷B：拆分件与完整版同源（在选文件之前落定，避免选到陈旧拆分件）
+        self._heal_report_split(task)
         files = self._fresh_files(proj_path, task)
         if not files:
             raise RuntimeError(

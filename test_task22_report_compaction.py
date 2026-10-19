@@ -134,12 +134,17 @@ class TestWorkerWritesBodyAndAppendix(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="wm_t22_worker_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         handler = _ListHandler()
-        logger = logging.getLogger("workers.report_generator_worker")
-        logger.addHandler(handler)
+        # 缺陷B 后落盘收敛到 report_quality.write_report_files（唯一权威写入口），
+        # 因此字数告警从 report_quality 记录器发出；两个记录器都挂，断言不依赖实现位置。
+        loggers = [logging.getLogger("workers.report_generator_worker"),
+                   logging.getLogger("report_quality")]
+        for lg in loggers:
+            lg.addHandler(handler)
         try:
             info = ReportGeneratorWorker._write_report_files(tmp, report)
         finally:
-            logger.removeHandler(handler)
+            for lg in loggers:
+                lg.removeHandler(handler)
         return tmp, info, handler.messages
 
     def test_three_files_written_and_appendix_not_in_body(self):
@@ -179,6 +184,163 @@ class TestWorkerWritesBodyAndAppendix(unittest.TestCase):
         self.assertTrue(any("主文超字数限制" in line for line in cm),
                         "超字数必须 logger.warning（只警告不阻断）")
         self.assertTrue((tmp / "report.md").exists(), "超字数不阻断交付")
+
+
+class TestReportFilesInvariant(unittest.TestCase):
+    """③ 缺陷B（真机 E2E 复现）：三件必须同源——body + appendix == report.md。
+
+    真机交付包（deliverables_20261019_163107.zip）里 report.md 是 16:56 重写版，
+    report_body.md/report_appendix.md 还是 16:17 成稿版，一份交付两个版本。
+    收敛到 report_quality.write_report_files 唯一写入口后逐字节恒等。
+    """
+
+    def _tmp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_t22_invariant_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def test_worker_output_body_plus_appendix_equals_full(self):
+        """ prescribed invariant：report_body + report_appendix == report.md。"""
+        for appendix in (True, False):
+            tmp = self._tmp()
+            report = _report(body_chars=900, appendix=appendix)
+            ReportGeneratorWorker._write_report_files(tmp, report)
+            full = (tmp / "report.md").read_text(encoding="utf-8")
+            if appendix:
+                body = (tmp / "report_body.md").read_text(encoding="utf-8")
+                app = (tmp / "report_appendix.md").read_text(encoding="utf-8")
+                self.assertEqual(body + app, full)
+            else:
+                self.assertFalse((tmp / "report_body.md").exists())
+                self.assertFalse((tmp / "report_appendix.md").exists())
+
+    def test_shared_writer_roundtrip_bytes_equal(self):
+        """权威写入口本身：切分零改写，两段拼回与完整版逐字节相等。"""
+        tmp = self._tmp()
+        for text in (_report(appendix=True), _report(appendix=False),
+                     "# T\n\n主文结尾无换行\n## 附录：明细\n\n行1\n"):
+            rq.write_report_files(tmp, text)
+            full = (tmp / "report.md").read_text(encoding="utf-8")
+            self.assertEqual(full, text)
+            body_p, app_p = tmp / "report_body.md", tmp / "report_appendix.md"
+            if rq.APPENDIX_HEADING_RE.search(text):
+                self.assertEqual(
+                    body_p.read_text(encoding="utf-8")
+                    + app_p.read_text(encoding="utf-8"), full)
+            else:
+                self.assertFalse(body_p.exists())
+                self.assertFalse(app_p.exists())
+
+    def test_rewrite_without_appendix_removes_stale_split_files(self):
+        """回归：报告改写后不再带附录 → 上次的拆分件必须被清掉。"""
+        tmp = self._tmp()
+        rq.write_report_files(tmp, _report(appendix=True))   # 第一版：带附录
+        self.assertTrue((tmp / "report_body.md").exists())
+        rq.write_report_files(tmp, _report(appendix=False))  # 改写：无附录
+        self.assertFalse((tmp / "report_body.md").exists(),
+                         "陈旧 report_body.md 不得残留")
+        self.assertFalse((tmp / "report_appendix.md").exists(),
+                         "陈旧 report_appendix.md 不得残留")
+
+    def test_rewrite_replaces_split_files_with_new_version(self):
+        """回归（真机错版形态）：report.md 被重写后，拆分件跟到新版。"""
+        tmp = self._tmp()
+        rq.write_report_files(tmp, _report(body_chars=900, appendix=True))
+        old_body = (tmp / "report_body.md").read_text(encoding="utf-8")
+        new_report = _report(body_chars=1800, appendix=True)
+        rq.write_report_files(tmp, new_report)
+        full = (tmp / "report.md").read_text(encoding="utf-8")
+        body = (tmp / "report_body.md").read_text(encoding="utf-8")
+        app = (tmp / "report_appendix.md").read_text(encoding="utf-8")
+        self.assertEqual(body + app, full)
+        self.assertNotEqual(body, old_body, "拆分件必须跟到最新版")
+
+    def test_split_is_lossless_for_every_doc_case(self):
+        """切分不改写：任何输入下 body + appendix == 原文（此前主文被 rstrip 改写）。"""
+        cases = [
+            "# T\n\n主文\n\n## 参考来源\n\n1. [a](https://e.com)\n",
+            "# T\n\n主文结尾无换行\n## 数据来源\n\n明细\n",
+            "纯文本无标题",
+            "",
+        ]
+        for text in cases:
+            body, appendix = rq.split_report_appendix(text)
+            self.assertEqual(body + appendix, text)
+
+    def test_zip_never_pairs_stale_split_with_report(self):
+        """回归（真机 zip 形态）：重打包前拆分件按当前 report.md 重算，包内同源。
+
+        真机 deliverables_20261019_163107.zip：report.md 是 16:56 重写版（无附录），
+        report_body.md/report_appendix.md 还是 16:17 成稿版——三个文件都"新鲜"，
+        时间戳判不出来。现在入包前按当前 report.md 重算（write_report_files 唯一口径）。
+        """
+        import time as _t
+        from workers.packaging_worker import PackagingWorker
+        ws = self._tmp()
+        (ws / "project").mkdir(parents=True, exist_ok=True)
+        (ws / "project" / "analysis.py").write_text("print(1)\n", encoding="utf-8")
+        reports = ws / "reports"
+        old = _report(body_chars=900, appendix=True)
+        rq.write_report_files(reports, old)                       # 16:17 成稿：三件同源
+        stale_body = (reports / "report_body.md").read_text(encoding="utf-8")
+        new = _report(body_chars=1800, appendix=True)             # 16:56 重写完整版
+        (reports / "report.md").write_text(new, encoding="utf-8")  # 只换完整版（真机形态）
+        now = _t.time()
+        for p in reports.glob("*.md"):
+            os.utime(p, (now, now))                               # 都新鲜，时间戳判不出
+        w = PackagingWorker.__new__(PackagingWorker)
+        task = {"task_id": "t-22-zip", "workspace": str(ws),
+                "task_start_ts": now - 60, "goal": "研究交付"}
+        w._package(ws / "project", task)
+        zips = sorted(ws.glob("deliverables_*.zip"))
+        self.assertEqual(len(zips), 1, zips)
+        with zipfile.ZipFile(zips[0]) as zf:
+            names = zf.namelist()
+            self.assertIn("reports/report.md", names)
+            md = zf.read("reports/report.md").decode("utf-8")
+            self.assertEqual(md, new, "包内完整版必须是重写后的正文")
+            self.assertIn("reports/report_body.md", names)
+            body = zf.read("reports/report_body.md").decode("utf-8")
+            app = (zf.read("reports/report_appendix.md").decode("utf-8")
+                   if "reports/report_appendix.md" in names else "")
+            self.assertEqual(body + app, md,
+                             "包内主文/附录必须与完整版同源（缺陷B）")
+            self.assertNotEqual(body, stale_body, "不得把成稿旧版主文装进包里")
+            manifest = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+            self.assertEqual(manifest.get("delivered_md"), "reports/report.md")
+
+    def test_repack_snapshot_heals_workspace_split_files(self):
+        """回归（快照重打包路，真机 16:56 现场）：工作区拆分件跟到冻结版。"""
+        import hashlib as _h
+        from report_version import VersionStore
+        ws = self._tmp()
+        tid = "t-22-snap-heal"
+        store = VersionStore(ws, tid)
+        old = _report(body_chars=900, appendix=True)
+        ver = store.record(old, sources_fingerprint="fp-old",
+                           rules_version="2026.09.10")
+        store.adopt(ver, reason="成稿")
+        delivered = _report(body_chars=1800, appendix=True)   # 交付版（与成稿不同版）
+        payload = {
+            "reports/report.md": delivered.encode("utf-8"),
+            "reports/report_body.md": dp._delivered_body_md(delivered.encode("utf-8")),
+        }
+        snap = {
+            "report_version_id": store.adopted().identity_id(),
+            "body_sha256": str(getattr(store.adopted(), "version_id", "") or ""),
+            "payload": payload,
+            "frozen": {a: _h.sha256(b).hexdigest() for a, b in payload.items()},
+        }
+        res = dp.repack_adopted(tid, ws_dir=ws, snapshot=snap)
+        self.assertTrue(res.get("package"), res)
+        reports = ws / "reports"
+        full = (reports / "report.md").read_text(encoding="utf-8")
+        self.assertEqual(full, delivered, "工作区 report.md 与包内同源")
+        body = (reports / "report_body.md").read_text(encoding="utf-8")
+        app = (reports / "report_appendix.md").read_text(encoding="utf-8")
+        self.assertEqual(body + app, full, "拆分件必须跟到冻结版（缺陷B）")
+        self.assertNotEqual(body, rq.split_report_appendix(old)[0],
+                            "不得残留成稿版的旧主文")
 
 
 class TestDeliveryPackageCarriesBody(unittest.TestCase):

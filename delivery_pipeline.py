@@ -1211,21 +1211,36 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
             frozen["reports/report.md"] = bytes(md_bytes)
         if pdf_bytes and not frozen.get("reports/report.pdf"):
             frozen["reports/report.pdf"] = bytes(pdf_bytes)
-        # 工作区副本仍写出（页面下载读它），但**包内内容只认快照字节**
-        (reports / "report.md").write_bytes(frozen["reports/report.md"])
+        # 工作区副本仍写出（页面下载读它），但**包内内容只认快照字节**。
+        # 缺陷B（真机 E2E 复现）：此前只回写 report.md，工作区 report_body.md/
+        # report_appendix.md 仍是成稿时的旧版 → 拆分件与完整版错版（16:17 稿
+        # vs 16:56 重打包）。三件都由 write_report_files 从**同一份冻结正文**写出。
+        try:
+            from report_quality import write_report_files
+            write_report_files(reports,
+                               frozen["reports/report.md"].decode("utf-8"))
+        except Exception as exc:                 # noqa: BLE001 - 拆不出就只留完整版
+            logger.warning("快照：主文/附录拆分落盘失败：%s", str(exc)[:120])
+            (reports / "report.md").write_bytes(frozen["reports/report.md"])
         if frozen.get("reports/report.pdf"):
             (reports / "report.pdf").write_bytes(frozen["reports/report.pdf"])
         manifest = _manifest_from_frozen(frozen, snap=snap, ws=ws)
         members: list[tuple[str, bytes]] = list(frozen.items())
     else:
         mdb = bytes(md_bytes)
-        (reports / "report.md").write_bytes(mdb)
         files: list[tuple[_P, str]] = [(reports / "report.md", "reports/report.md")]
-        # 任务22：交付包同时带**主文**（附录前），下载/阅读优先看它；没有附录
-        # 级标题（= 完整版本身就是主文）时不进包，避免同一份内容两个成员。
-        _body_bytes = _delivered_body_md(mdb)
-        if _body_bytes is not None:
-            (reports / "report_body.md").write_bytes(_body_bytes)
+        # 任务22 / 缺陷B（真机 E2E 复现）：report.md 与主文/附录拆分件由**同一份交付
+        # 正文**经 report_quality.write_report_files 一次写出，不再各写一份（口径分叉）。
+        # 没有附录级标题（= 完整版本身就是主文）时拆分件不写也不进包，
+        # 避免同一份内容两个成员。
+        try:
+            from report_quality import write_report_files
+            _split = write_report_files(reports, mdb.decode("utf-8"))
+        except Exception as exc:                 # noqa: BLE001 - 拆不出就保完整版
+            logger.warning("交付主文拆分落盘失败（按无附录处理）：%s", str(exc)[:120])
+            (reports / "report.md").write_bytes(mdb)
+            _split = {}
+        if _split.get("appendix_chars") and _split.get("body_chars"):
             files.append((reports / "report_body.md", "reports/report_body.md"))
         pdf_name = ""
         if pdf_bytes:

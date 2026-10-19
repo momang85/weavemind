@@ -191,6 +191,92 @@ class TestConfigLoading(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 缺陷C（真机 E2E 复现）：备援模型名体检（非阻断）
+# ---------------------------------------------------------------------------
+
+class TestBackupModelStartupCheck(unittest.TestCase):
+    """真机现场：`backup.model` 填了备援端点上不存在的 `DeepSeek-V4.1-Flash`
+    （failover 时 HTTP 404 model_not_found），切换形同虚设。两类体检：
+    ① 示例配置不得落这个坑；② 备援与主端点**同名**模型 → 启动时告警（能力没换），
+    只记日志不阻断。"""
+
+    def test_example_config_backup_model_is_real(self):
+        cfg = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
+        backup = cfg.get("backup") or {}
+        self.assertTrue(str(backup.get("model") or "").strip(),
+                        "示例配置的备援模型名不得为空")
+        self.assertNotEqual(str(backup.get("model")), "DeepSeek-V4.1-Flash",
+                            "备援模型名不得是端点上不存在的旧名")
+
+    def test_same_model_name_warns_and_is_non_blocking(self):
+        cfg = {"llm": {"base_url": "https://p/v1", "api_key": "k", "model": "m1"},
+               "backup_endpoints": [
+                   {"base_url": "https://b1/v1", "api_key": "k", "model": "m1"},
+                   {"base_url": "https://b2/v1", "api_key": "k", "model": "m2"},
+               ]}
+        with self.assertLogs("llm_circuit_breaker", level="WARNING") as cm:
+            warned = lcb.warn_backup_model_same_as_primary(cfg)
+        self.assertEqual(warned, ["backup_1"])
+        self.assertTrue(
+            any("备援模型名与主端点相同，failover后模型能力不变" in line
+                for line in cm.output))
+        # 非阻断：告警只记日志，构造结果与行为不变（同名备援仍在列表里，按序切换）
+        b = _breaker(cfg)
+        self.assertEqual([e["model"] for e in b._backups], ["m1", "m2"])
+
+    def test_different_model_name_stays_silent(self):
+        cfg = {"llm": {"base_url": "https://p/v1", "api_key": "k", "model": "m1"},
+               "backup_endpoints": [
+                   {"base_url": "https://b1/v1", "api_key": "k", "model": "m2"},
+               ]}
+        with self.assertNoLogs("llm_circuit_breaker", level="WARNING"):
+            self.assertEqual(lcb.warn_backup_model_same_as_primary(cfg), [])
+
+
+# ---------------------------------------------------------------------------
+# 缺陷D（真机 E2E 复现）：config.json 读取编码与失败留痕
+# ---------------------------------------------------------------------------
+
+class TestLlmClientConfigLoadingRobustness(unittest.TestCase):
+    """真机现场：config.json 用默认编码（Windows cp936）读 → 中文内容
+    UnicodeDecodeError → 裸 except 静默吞掉 → `_BACKUP_CFG` 为空，
+    熔断器"备援端点数=0"，failover 从未生效。修复：显式 utf-8 + 失败留痕。"""
+
+    _UD_ERR = UnicodeDecodeError("utf-8", b"\x80", 0, 1, "invalid start byte")
+
+    def test_open_call_sites_all_declare_utf8(self):
+        """源码守卫：llm_client.py 每个 `open(` 调用都必须显式 encoding。"""
+        src = Path("llm_client.py").read_text(encoding="utf-8")
+        found = 0
+        for i, line in enumerate(src.splitlines(), start=1):
+            if line.strip().startswith("#"):
+                continue
+            # \bopen\( 不命中 _budget_open( 这类**函数名**（只认真正的内建 open 调用）
+            if re.search(r"\bopen\(", line):
+                found += 1
+                self.assertIn("encoding=", line,
+                              f"llm_client.py:{i} 的 open 缺 encoding")
+        self.assertGreaterEqual(found, 4, "llm_client.py 的 open( 调用点应全部覆盖")
+
+    def test_backup_config_logs_and_falls_back_to_empty_on_unicode_error(self):
+        import llm_client as lc
+        with mock.patch("builtins.open", side_effect=self._UD_ERR), \
+             self.assertLogs("llm_client", level="WARNING") as cm:
+            got = lc._load_backup_config()
+        self.assertEqual(got, {}, "读失败按'无备援'降级，不得抛出阻断主链路")
+        self.assertTrue(any("备援配置加载失败" in line for line in cm.output),
+                        "失败必须留痕，不得静默吞掉")
+
+    def test_llm_config_logs_and_falls_back_to_empty_on_unicode_error(self):
+        import llm_client as lc
+        with mock.patch("builtins.open", side_effect=self._UD_ERR), \
+             self.assertLogs("llm_client", level="WARNING") as cm:
+            got = lc._load_llm_config()
+        self.assertEqual(got, {})
+        self.assertTrue(any("LLM 配置加载失败" in line for line in cm.output))
+
+
+# ---------------------------------------------------------------------------
 # ① 三态状态机
 # ---------------------------------------------------------------------------
 
