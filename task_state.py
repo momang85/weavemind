@@ -850,6 +850,37 @@ def set_phase(task_id: str, phase: str, db_path: str | None = None) -> bool:
         return False
 
 
+def mark_resumed(task_id: str, db_path: str | None = None) -> bool:
+    """任务26（断点续跑）：把**可恢复终态 FAILED/CRASHED** 的任务原子翻回 RUNNING。
+
+    返回值 = 真实受影响行数 > 0：两个恢复入口（页面按钮/消息重放）竞争时，
+    只有翻成功的一方赢得重新接管权，另一方拿到 False 不得再起执行线程——
+    与 `mark_running` 同一条裁决语义。
+
+    CRASHED 不是状态机常态产出的状态（无对应常量），但恢复入口与既有的
+    stale-RUNNING 看护都可能写入它，恢复谓词与入口门槛保持一致（IN 查询）。
+    SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED 是**不可逆终态**：用户明确拿到的
+    结论不得被静默改写。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            cur = con.execute(
+                "UPDATE task_history SET status=?, phase=?, completed_at=NULL,"
+                " updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=? AND status IN (?, 'CRASHED')",
+                (RUNNING, "恢复执行", task_id, FAILED),
+            )
+            won = int(cur.rowcount or 0) > 0
+            con.commit()
+            return won
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("任务 %s 恢复标记失败：%s", task_id, str(exc)[:200])
+        return False
+
+
 def update_report(task_id: str, report: str, db_path: str | None = None) -> bool:
     """只改**交付正文**（人工复核修订用）：状态/步骤/日志/验收一律不动。
 

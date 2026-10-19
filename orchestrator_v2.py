@@ -510,7 +510,13 @@ _REPORT_FORMAT_REQUIREMENTS = (
     "③ '基于模型知识，未在本次检索中验证'。"
     "禁止把正文短语、指标名、行业术语、观点片段当来源名"
     "（如'指出'、'主要挑战'、'能量密度提升空间有限'这类不是来源）；"
-    "数据无对应检索来源时，必须写形式③，禁止编造任何来源名。"
+    "数据无对应检索来源时，必须写形式③，禁止编造任何来源名。\n"
+    "6. 免责声明（合规红线，强制）：报告必须包含 '## 免责声明' 章节，"
+    "并写明**本报告由 AI 生成**、不构成任何投资建议，基线文案："
+    "'本报告由 AI 生成，不构成任何投资建议；数据来源于公开披露，"
+    "可能存在时效性差异和获取误差'。"
+    "缺少免责声明时系统会自动补入标准文案（已有免责声明则原样保留、不重复添加），"
+    "但报告自己写全（含 AI 生成标识）才算合规。"
 )
 
 # 报告**内容**要求（与上面的格式要求分开）：研究类报告不能只有"口径自证 + 来源清单"，
@@ -3022,25 +3028,191 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return self._dead_fetch_urls.setdefault(str(task_id or ""), set())
 
     def _forget_dead_urls(self, task_id: str) -> None:
-        """任务起始清空**本任务**的死链缓存：下一次运行（重跑/续跑）重新有机会抓。"""
+        """任务起始清空**本任务**的死链缓存：下一次运行（重跑/续跑）重新有机会抓。
+
+        死链原因（任务24 的并行字典）同步清掉，避免删掉的 URL 留下孤儿原因；
+        **不动** Redis 侧的 `dead_fetch:{task_id}`——续跑/重启恢复要读它，
+        终态清理走 `_delete_dead_fetch`。
+        """
+        task = str(task_id or "")
         store = getattr(self, "_dead_fetch_urls", None)
         if isinstance(store, dict):
-            store.pop(str(task_id or ""), None)
+            store.pop(task, None)
+        reasons = getattr(self, "_dead_fetch_reasons", None)
+        if isinstance(reasons, dict):
+            reasons.pop(task, None)
 
     def _is_dead_fetch_url(self, task_id: str, url: str) -> bool:
         return bool(url) and url in self._dead_urls_of(task_id)
 
     def _mark_dead_fetch_url(self, task_id: str, url: str, reason: str = "") -> bool:
-        """把 URL 记入本任务死链；返回是否**首次**记账（调用方据此决定是否重复记日志）。"""
+        """把 URL 记入本任务死链；返回是否**首次**记账（调用方据此决定是否重复记日志）。
+
+        任务24：**原因**同步记入 `_dead_fetch_reasons`（并行字典——`_dead_fetch_urls`
+        必须保持 dict[task_id, set[str]] 形状，`test_task15_dead_url_cache.py` 依赖），
+        供 `dead_sources.json` 落盘与验收对账；任务26：记账即持久化到
+        Redis `dead_fetch:{task_id}`，编排器重启/续跑后可恢复，不再重抓已判死 URL。
+        """
         if not url:
             return False
         urls = self._dead_urls_of(task_id)
         if url in urls:
             return False
         urls.add(url)
+        store = getattr(self, "_dead_fetch_reasons", None)
+        if not isinstance(store, dict):
+            store = self._dead_fetch_reasons = {}
+        store.setdefault(str(task_id or ""), {})[url] = str(reason or "抓取失败")
         logger.info("抓取死链记账 task=%s url=%s 原因=%s",
                     task_id, str(url)[:120], str(reason or "")[:120])
+        # 任务26：进程内集合随崩溃丢失 → Redis 持久化（静默降级，Redis 不在也照常跑）
+        self._persist_dead_fetch(task_id)
         return True
+
+    # ── 任务24：失效来源落盘 ＋ 任务26：死链 Redis 持久化/恢复 ─────────────
+    DEAD_SOURCES_FILE = "dead_sources.json"
+    DEAD_FETCH_KEY_PREFIX = "dead_fetch:"
+
+    def dead_sources_records(self, task_id: str) -> list:
+        """本任务死链 → [{"url","reason"}]（按 URL 排序，落盘稳定可对账）。"""
+        task = str(task_id or "")
+        urls = set(self._dead_urls_of(task))
+        reasons = getattr(self, "_dead_fetch_reasons", None)
+        reason_map = reasons.get(task, {}) if isinstance(reasons, dict) else {}
+        return [
+            {"url": u, "reason": str(reason_map.get(u) or "抓取失败")}
+            for u in sorted(urls)
+        ]
+
+    def _write_dead_sources_file(self, task_id: str) -> str:
+        """任务24：报告步骤派发前，把本任务死链清单写进工作区 `dead_sources.json`。
+
+        为什么必须在派发**前**落盘：报告生成器在报告生成时就按这份清单标注
+        "⚠️ 链接已失效"，而报告生成是编排器内同步调用——进程内集合此刻最新；
+        任务终态/重启后集合即丢失，文件是唯一能在报告里落到实处的通道。
+        每次都**整体覆写**（含空数组）：重跑任务不再带着上一轮的陈旧死链。
+        `write_bytes` 落 UTF-8：不做平台换行翻译（对账与哈希都要字节稳定）。
+        """
+        try:
+            recs = self.dead_sources_records(task_id)
+            ws = task_workspace(task_id)
+            ws.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(recs, ensure_ascii=False, indent=1)
+            (ws / self.DEAD_SOURCES_FILE).write_bytes(payload.encode("utf-8"))
+            logger.info("失效来源清单已落盘 task=%s 条数=%d", task_id, len(recs))
+            return str(ws / self.DEAD_SOURCES_FILE)
+        except Exception as exc:                # noqa: BLE001 - 辅助文件不阻断报告步骤
+            logger.warning("dead_sources.json 写入失败（task=%s）：%s",
+                           task_id, str(exc)[:120])
+            return ""
+
+    def _dead_fetch_redis(self):
+        """任务26：死链持久化专用 Redis 客户端（短超时快失败；离线环境静默降级）。
+
+        不复用 `self._redis`：那个连接按"pubsub 长读"配置（socket_timeout=None），
+        辅助持久化走短超时，避免一次异常挂住主流程。
+        """
+        import redis as _redis
+        return _redis.Redis(
+            host=os.environ.get("REDIS_HOST", "localhost"),
+            port=int(os.environ.get("REDIS_PORT", "6379")),
+            decode_responses=True,
+            socket_timeout=0.5,
+            socket_connect_timeout=0.5,
+            retry=_NO_REDIS_RETRY,
+        )
+
+    def _persist_dead_fetch(self, task_id: str) -> None:
+        """任务26：把本任务死链（含原因）写入 Redis `dead_fetch:{task_id}`（TTL 24h）。
+
+        根因：`_dead_fetch_urls` 纯内存，编排器重启后清零——续跑任务把已判死的
+        URL 再抓一遍（白花 6-8s/次），报告也丢标注。写失败静默降级（与
+        checkpointer 同哲学：辅助持久化绝不挡主流程）。
+        """
+        try:
+            r = self._dead_fetch_redis()
+            r.setex(f"{self.DEAD_FETCH_KEY_PREFIX}{str(task_id or '')}", 86400,
+                    json.dumps(self.dead_sources_records(task_id), ensure_ascii=False))
+        except Exception as exc:                # noqa: BLE001
+            logger.debug("dead_fetch 持久化失败（task=%s）：%s", task_id, str(exc)[:100])
+
+    def _delete_dead_fetch(self, task_id: str) -> None:
+        """任务26：任务终态清理持久化死链（避免下次启动恢复出陈旧清单）。"""
+        try:
+            self._dead_fetch_redis().delete(
+                f"{self.DEAD_FETCH_KEY_PREFIX}{str(task_id or '')}")
+        except Exception:                       # noqa: BLE001
+            pass
+
+    def _load_dead_fetch_records(self, task_id: str) -> list:
+        """任务26：读 Redis `dead_fetch:{task_id}` → [{"url","reason"}]；坏形状 → []。"""
+        try:
+            raw = self._dead_fetch_redis().get(
+                f"{self.DEAD_FETCH_KEY_PREFIX}{str(task_id or '')}")
+            if not raw:
+                return []
+            data = json.loads(raw)
+        except Exception:                       # noqa: BLE001 - 读不到/坏数据都按空处理
+            return []
+        out: list = []
+        if isinstance(data, list):
+            for it in data:
+                if isinstance(it, dict):
+                    url = str(it.get("url") or "").strip()
+                    if url:
+                        out.append({"url": url,
+                                    "reason": str(it.get("reason") or "")})
+                else:
+                    url = str(it or "").strip()
+                    if url:
+                        out.append({"url": url, "reason": ""})
+        return out
+
+    def _get_dead_fetch_urls(self, task_id: str) -> set:
+        """任务26：本任务持久化的死链 URL 集合（仅查询，不落内存）。"""
+        return {str(rec["url"]) for rec in self._load_dead_fetch_records(task_id)}
+
+    def _restore_dead_fetch(self, task_id: str) -> int:
+        """任务26：把持久化死链恢复进**本任务**的内存集合（续跑/重启后恢复时调用）。
+
+        恢复语义（必须**并入**而不是覆盖）：进程内在该任务可能已有本轮新判死的
+        URL；返回恢复条数（0 = Redis 无清单/恢复失败——离线环境静默降级）。
+        """
+        recs = self._load_dead_fetch_records(task_id)
+        if not recs:
+            return 0
+        task = str(task_id or "")
+        urls = self._dead_urls_of(task)
+        store = getattr(self, "_dead_fetch_reasons", None)
+        if not isinstance(store, dict):
+            store = self._dead_fetch_reasons = {}
+        reason_map = store.setdefault(task, {})
+        n = 0
+        for rec in recs:
+            u = str(rec.get("url") or "")
+            if u and u not in urls:
+                urls.add(u)
+                n += 1
+            reason_map.setdefault(u, str(rec.get("reason") or ""))
+        return n
+
+    def restore_dead_fetch_all(self) -> int:
+        """任务26：编排器**启动时**恢复全部持久化死链（scan `dead_fetch:*`）。
+
+        覆盖的窗口：编排器进程崩溃重启后，此前运行中任务的死链集合已在内存里丢失；
+        `run()` 起点的 `_forget_dead_urls` 只清"即将运行的任务"，恢复清单让续跑的
+        任务不用重新试探已判死的 URL。返回恢复到内存的任务数。
+        """
+        n = 0
+        try:
+            r = self._dead_fetch_redis()
+            for key in r.scan_iter(match=f"{self.DEAD_FETCH_KEY_PREFIX}*", count=200):
+                task = str(key)[len(self.DEAD_FETCH_KEY_PREFIX):]
+                if task and self._restore_dead_fetch(task):
+                    n += 1
+        except Exception as exc:                # noqa: BLE001 - 启动恢复不挡启动
+            logger.debug("dead_fetch 启动恢复失败：%s", str(exc)[:100])
+        return n
 
     @staticmethod
     def _step_fetch_url(step: dict) -> str:
@@ -6832,8 +7004,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def run(self, task_id: str, goal: str, context: str = "",
             auto_run: bool = True, template_steps: list | None = None,
             user_id: str = "", project: str | None = None,
-            report_confirm: bool = False) -> dict:
-        """Execute a full task lifecycle. Returns final status dict."""
+            report_confirm: bool = False, resume: bool = False) -> dict:
+        """Execute a full task lifecycle. Returns final status dict.
+
+        `resume=True`（任务26：人工恢复入口 `/api/task/<id>/resume` 传入）：
+        本次运行是**终态任务的重新接管**——按持久化的步骤状态跳过已成功步骤
+        （step_resumed）、恢复 Redis 持久化的死链清单、保留工作区已有产物。
+        """
         try:
             from llm_client import set_task_context, set_cancel_guard
             set_task_context(task_id)
@@ -6901,6 +7078,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._mark_task_running(task_id)
         # 新一轮任务开始前清掉可能残留的取消标志（同 id 复用/重跑时不被旧标志秒杀）
         self._clear_cancel(task_id)
+        # 任务26：本次运行是否"续跑"（两个入口任一成立）
+        # - V1.2 checkpointer 恢复（resumed is not None）；
+        # - 人工恢复（/api/task/<id>/resume → run_and_finalize(resume=True)）：
+        #   终态 FAILED 的任务重新接管，按持久化的步骤状态跳过已成功步骤。
+        _is_resume_run = bool(resume) or resumed is not None
+        _resume_steps_applied = False
+        if _is_resume_run:
+            # 任务26：恢复 Redis 持久化的死链（编排器重启/续跑后不再重抓已判死的 URL）。
+            # 位置必须在 `_forget_dead_urls` **之后**：全新运行要清空本任务缓存重新有机会抓，
+            # 续跑则把持久化清单并回来（`_forget_dead_urls` 不动 Redis 侧）。
+            try:
+                _restored = self._restore_dead_fetch(task_id)
+                if _restored:
+                    logger.info("Task %s 续跑：恢复 %d 条持久化死链", task_id, _restored)
+            except Exception as exc:                # noqa: BLE001 - 恢复失败不影响续跑
+                logger.warning("死链恢复失败（task=%s）：%s", task_id, str(exc)[:120])
         # 状态真源：进入执行写 RUNNING（提交时是 QUEUED），
         # 让历史/状态接口能区分"排队中"与"运行中"
         try:
@@ -6913,7 +7106,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 超阈值先告警（分级第一步；重试/终止仍由各阶段的既有逻辑负责）。
         _phase_stop = threading.Event()
         _phase_thread = self._start_phase_monitor(task_id, _phase_stop)
-        if resumed is None:
+        if not _is_resume_run:
             # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
             ensure_task_workspace(task_id, project)
             self._cleanup_project_workspace(task_id, project)
@@ -6928,10 +7121,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 恢复语义（显式化，避免"为什么这次没清工作区"成为疑问）：
             # 从 checkpoint 恢复时**保留**已有产物——已完成的步骤结果就靠这些文件，
             # 清掉会让恢复变成"从零重跑"。清理只发生在全新任务（resumed is None）。
+            # 任务26：人工恢复（/resume）同理必须保留——它按步骤状态跳过已成功的
+            # 抓取/计算步骤，清掉工作区会让这些被跳过的步骤"成果"凭空消失。
             logger.info(
                 "Task %s resumed from checkpoint: phase=%s pending_steps=%d"
                 "（保留工作区已有产物，不做清理）",
-                task_id, resumed.get("phase"), len(resumed.get("steps") or []),
+                task_id, (resumed or {}).get("phase"),
+                len((resumed or {}).get("steps") or []),
             )
 
         # 记忆注入：模板路由与 LLM 规划都先查历史经验（观众可见 memory 日志）
@@ -7238,7 +7434,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 return self._finish_cancelled(task_id, goal, last_steps)
             if not skip_execute:
                 self._announce_sandbox_before_code(task_id, steps)
-                iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
+                # 任务26：步骤级断点恢复**只在本轮运行的第一轮**生效——反思/修复轮
+                # 对同一 step_id 的重做不能被"上一次尝试里这些步骤曾 SUCCESS"跳过
+                # （那样反思重做会变成空转）。
+                _resume_this_round = _is_resume_run and not _resume_steps_applied
+                _resume_steps_applied = True
+                # 关键词只在确有断点要跳过时才传（语义与默认值 False 相同）：
+                # `_execute_steps` 的替身（测试里按 3 参打补丁）不受任务26
+                # 新增参数影响，非续跑调用面完全不变。
+                iter_results, iter_failed = self._execute_steps(
+                    steps, task_id, goal,
+                    **({"resume_completed": _resume_this_round}
+                       if _resume_this_round else {}))
                 # 执行途中被取消：立刻收尾，不再进入反思/重做（否则会继续花额度）
                 if self._cancel_requested(task_id):
                     _phase_stop.set()
@@ -7995,6 +8202,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 避免已完成任务被启动扫描误恢复
         clear_checkpoint(task_id)
         self._clear_task_running(task_id)
+        # 任务26：任务终态 → 清掉持久化的死链清单（下次重跑不该恢复出上一轮的
+        # 陈旧死链；`dead_sources.json` 工作区文件保留，供历史交付对账）。
+        self._delete_dead_fetch(task_id)
         ok_count = sum(1 for r in completed_all.values() if r.get("status") == "SUCCESS")
         # T7：终态附带任务耗时（metrics 延迟统计的数据源对齐；run 入口已记 _task_starts）
         _start_ts = (getattr(self, "_task_starts", {}) or {}).get(task_id)
@@ -8303,8 +8513,69 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             }
         return optional_ids
 
-    def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
-        """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
+    def _load_resumable_steps(self, task_id: str, steps: list[dict]) -> dict:
+        """任务26：读回**已持久化为 SUCCESS** 的步骤 → `{str(step_id): 结果}`。
+
+        根因：步骤级状态其实早就落库了（`task_state` 的 `steps_json`，终态由
+        `record_completion` 写入；运行中的实时态另有 Redis 快照），但
+        `_execute_steps` 从不读回——任务续跑/编排器重启后把全部步骤重跑一遍
+        （实机 `ui-1c42195dae` 计划 6 步、1133 秒全步重跑；已成功的抓取/计算
+        白花钱，重跑还可能产出与首轮不一致的正文）。
+
+        两个通道（DB 权威、快照更新，先 DB 后快照补齐）：
+        - `task_projection(task_id)["steps"]`（DB `steps_json`）；
+        - `task_state.read_snapshot(task_id)["steps"]`（Redis 快照，覆盖"跑到一半
+          编排器被杀、终态还没落库"的窗口）。
+
+        只认**当前计划**里的 `step_id`：计划变了（反思重做/修复轮）就不得沿用旧结论，
+        否则会把上一轮的步骤当成这一轮已完成而跳过。
+        """
+        wanted = {str(s.get("step_id")) for s in (steps or []) if s.get("step_id") is not None}
+        found: dict = {}
+        try:
+            import task_state as _ts
+        except Exception:                           # noqa: BLE001 - 读不到就按全量执行
+            return found
+        for getter in (lambda: (_ts.task_projection(task_id) or {}).get("steps"),
+                       lambda: (_ts.read_snapshot(task_id) or {}).get("steps")):
+            try:
+                entries = getter() or []
+            except Exception:                       # noqa: BLE001
+                entries = []
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                sid = str(entry.get("step_id") or "")
+                if not sid or sid not in wanted or sid in found:
+                    continue
+                inner = entry.get("result")
+                status = str(entry.get("status") or "")
+                if not status and isinstance(inner, dict):
+                    status = str(inner.get("status") or "")
+                if status != "SUCCESS":
+                    continue
+                if isinstance(inner, dict):
+                    text = str(inner.get("result") or "")
+                elif inner is None:
+                    text = ""
+                else:
+                    text = str(inner)
+                found[sid] = {
+                    "task_id": sid, "status": "SUCCESS",
+                    # 结果文本截断：续跑时它只用于下游指令注入/上下文，不是交付正文
+                    "result": text[:20000], "resumed": True,
+                }
+        return found
+
+    def _execute_steps(self, steps: list[dict], task_id: str, goal: str,
+                       *, resume_completed: bool = False) -> tuple[list[dict], bool]:
+        """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。
+
+        `resume_completed=True`（人工/重启续跑入口传入）：派发前读回已持久化为
+        SUCCESS 的步骤并跳过，只跑未完的步骤（任务26 步骤级断点续跑）。
+        """
         # 惰性初始化（兼容直接 __new__ 构造的实例/测试）
         if not hasattr(self, "_task_sources"):
             self._task_sources = {}
@@ -8316,6 +8587,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception:
             pass
         completed: dict = {}
+        # 任务26：续跑时先把"已成功"的步骤放进 completed（它们的依赖因此齐备），
+        # `pending` 自然只留未完成的步骤——不重复派发就不再重复付费。
+        if resume_completed:
+            try:
+                _resumed_map = self._load_resumable_steps(task_id, steps)
+            except Exception as exc:                # noqa: BLE001 - 恢复失败按全量执行
+                logger.warning("步骤断点恢复失败（按全量执行）：%s", str(exc)[:150])
+                _resumed_map = {}
+            for _s in steps:
+                _rec = _resumed_map.get(str(_s.get("step_id")))
+                if not _rec:
+                    continue
+                completed[_s.get("step_id")] = dict(_rec, task_id=_s.get("step_id"))
+            if _resumed_map:
+                logger.info("Task %s 断点续跑（step_resumed）：跳过 %d/%d 步",
+                            task_id, len(_resumed_map), len(steps))
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": (f"断点续跑（step_resumed）：跳过 "
+                                           f"{len(_resumed_map)}/{len(steps)} 个已完成步骤"
+                                           f"（{', '.join(sorted(_resumed_map))}）"),
+                               "timestamp": self._now_iso()})
         has_failure = False
         state = {"replan_used": 0}
         step_ids = {s.get("step_id") for s in steps}
@@ -8336,6 +8629,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
         def execute_step(step):
             step_start = time.time()
+            # 任务24（合规线）：报告步骤派发前，把本轮判定失效的来源 URL 落盘为
+            # 工作区 `dead_sources.json`——报告生成器据此在来源清单对应行标注
+            # "⚠️ 链接已失效"，验收把它并入证据（dead_source_count）。进程内死链
+            # 集合随任务终态/重启丢失，这份文件是报告里能落到实处的唯一通道。
+            if str(step.get("capability") or "") == "report_generator":
+                self._write_dead_sources_file(task_id)
             base_instr = self._inject_step_context(step, completed, lock, task_id)
             if step.get("capability") in ("report_generator", "content_summary"):
                 # 注入前序搜索的数据来源 URL（任务级累计，跨迭代生效），
@@ -10929,14 +11228,44 @@ def start_owner_lease_renewal(r, *, interval: float = 0.0) -> threading.Thread:
     return th
 
 
+def resume_takeover_allowed(orch, task_id: str, row: dict | None) -> tuple[bool, str]:
+    """任务26：人工恢复（`/api/task/<id>/resume` → `resume_task` 消息）的接管裁决。
+
+    返回 `(是否允许, 拒绝原因)`。抽成独立函数的原因：这是"重跑一次"与"不重跑"
+    的分界，必须能单测（此前写在消息循环的闭包里，只能靠源码字符串断言）。
+
+    **状态为什么允许 RUNNING**：入口已经先用 `task_state.mark_resumed` 把
+    FAILED/CRASHED 原子翻成 RUNNING（CAS：只有一个恢复赢家），编排器随后才收到
+    消息——所以这里读到的状态多半已是 RUNNING。首轮实现要求 `status == FAILED`，
+    结果是每一次合法恢复都被编排器自己拒掉（任务永远停在 RUNNING）。
+    "正在执行"的真正判据是 Redis 进行中标记（`_task_is_running`，含 pid 探活），
+    不是 DB 状态；不可逆终态（SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED）一律拒绝。
+    """
+    status = str((row or {}).get("status") or "").upper()
+    if not status:
+        return False, "任务记录缺失"
+    if status not in ("FAILED", "CRASHED", "RUNNING"):
+        return False, f"状态 {status} 不是可恢复终态"
+    try:
+        if orch._task_is_running(task_id):
+            return False, "任务仍标记为运行中"
+    except Exception as exc:                    # noqa: BLE001 - 判据不可用时不放行
+        return False, f"进行中判据不可用（{str(exc)[:80]}）"
+    return True, ""
+
+
 def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
                      auto_run: bool = True, template_steps=None, user_id: str = "",
-                     project: str = "default", report_confirm: bool = False) -> None:
+                     project: str = "default", report_confirm: bool = False,
+                     resume: bool = False) -> None:
     """跑一个任务并把结果兜底落库（消息路径与"启动恢复"路径共用同一实现）。
 
     兜底落库的必要性：`run()` 内有 6 个提前 return（余额不足/端点不可用/规划失败等），
     它们各自 push 了 task_complete 但未必走到主终态；这里是唯一能覆盖全部返回路径
     与异常路径的单点。
+
+    `resume=True`（任务26）：人工恢复入口传入——`run()` 按持久化的步骤状态跳过
+    已成功步骤（step_resumed），不把终态 FAILED 的任务从零重跑。
     """
     try:
         # C3/H3b 时间线：记"开始"（实例+代码版本），使 收到→持久化→发布→消费→开始
@@ -10958,6 +11287,7 @@ def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
         result = orch.run(
             tid, goal, context, auto_run=auto_run, template_steps=template_steps,
             user_id=user_id, project=project, report_confirm=report_confirm,
+            resume=resume,
         )
         result["project"] = project
         orch._finalize_task(
@@ -11259,6 +11589,14 @@ def main():
     logger.info("编排器实例归属：%s", _owner_why)
     # P0-b 租约续租：旧实现只在认领时写一次心跳，30 秒后 TTL 到期 → A 还活着 B 就能接管。
     start_owner_lease_renewal(r)
+    # 任务26：启动时恢复 Redis 持久化的死链清单（dead_fetch:*）——进程崩溃后
+    # 内存里的死链集合丢失，续跑任务不该把已判死的 URL 再抓一遍（每次白花 6-8s）。
+    try:
+        _dead_n = orch.restore_dead_fetch_all()
+        if _dead_n:
+            logger.warning("启动恢复：%d 个任务的死链清单已恢复（dead_fetch:*）", _dead_n)
+    except Exception as exc:                      # noqa: BLE001 - 恢复不挡启动
+        logger.warning("死链清单启动恢复失败（不挡启动）：%s", str(exc)[:150])
     # P0-c 有界周期恢复：崩溃可能发生在启动**之后**，一次性扫描覆盖不到；
     # 每轮每类最多 20 条，避免积压时一次拉起几百个任务把端点打爆。
     start_recovery_loop(orch)    # C3/H3b 启动恢复：把"已收执但从未被消费"的请求捡回来执行（pub/sub 的消息已丢，
@@ -11337,6 +11675,54 @@ def main():
                 logger.info("Task %s regenerate_candidate received", _tid)
                 threading.Thread(target=_run_candidate, args=(dict(data),),
                                  daemon=True).start()
+                continue
+            # 任务26（断点续跑）：人工恢复请求（POST /api/task/<id>/resume）。
+            # 与普通提交**分流**：终态任务的收执早已被 `promote_received` 消费，
+            # 走普通提交会命中 "already" 被当成重复提交跳过。接管裁决在
+            # `resume_takeover_allowed`（可单测）：入口已把可恢复终态原子翻成
+            # RUNNING（CAS 单赢家），这里按 DB 复核状态 + Redis 进行中标记，
+            # 再进 run_and_finalize(resume=True)。
+            if str(data.get("type") or "") == "resume_task":
+                _tid = str(data.get("task_id") or "")
+                if not _tid:
+                    continue
+
+                def _run_resume(_t=_tid):
+                    _row: dict = {}
+                    try:
+                        import task_state as _ts
+                        _row = _ts.read_task(_t) or {}
+                        ok, why = resume_takeover_allowed(orch, _t, _row)
+                        if not ok:
+                            logger.warning("Task %s 恢复被拒绝：%s", _t, why)
+                            try:
+                                push_progress(orch._messaging, _t, "log",
+                                              {"type": "info",
+                                               "agent": "orchestrator",
+                                               "message": f"恢复请求被拒绝：{why}",
+                                               "timestamp": orch._now_iso()})
+                            except Exception:   # noqa: BLE001 - 提示失败不影响裁决
+                                pass
+                            return
+                        _goal = str(_row.get("goal") or "")
+                        logger.info("Task %s 人工恢复：FAILED → 重新接管（resume）", _t)
+                        run_and_finalize(
+                            orch, _t, _goal, context="",
+                            user_id=str(_row.get("user_id") or ""),
+                            project=str(_row.get("project") or "default"),
+                            resume=True,
+                        )
+                    except Exception as e:       # noqa: BLE001 - 恢复异常也要落终态
+                        logger.error("Task %s 人工恢复失败：%s", _t, e)
+                        try:
+                            orchestrator_messaging_publish_failed(
+                                orch, _t, str(e),
+                                str(_row.get("project") or "default"))
+                        except Exception:        # noqa: BLE001
+                            pass
+
+                logger.info("Task %s resume_task received", _tid)
+                threading.Thread(target=_run_resume, args=(), daemon=True).start()
                 continue
             task_id = data.get("task_id", "")
             goal = data.get("goal", "")

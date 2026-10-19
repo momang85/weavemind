@@ -626,8 +626,74 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             return c[:max_chars]
         return body[:max_chars]
 
-    @staticmethod
-    def _write_report_files(report_dir: Path, report: str) -> dict:
+    # 任务25（合规红线）：标准免责声明模板——三要素齐备（`## 免责声明` 章节、
+    # "本报告由 AI 生成"、'不构成任何投资建议'），并由 `acceptance_checker`
+    # 的 AI 生成标识检查背书。只在报告完全没有"免责声明"字样时注入。
+    STANDARD_DISCLAIMER = (
+        "\n## 免责声明\n\n"
+        "本报告由 AI 生成，不构成任何投资建议；数据来源于公开披露，"
+        "可能存在时效性差异和获取误差。\n"
+    )
+
+    # 任务24（合规线）：失效来源标注。编排器在报告步骤派发前把本轮判定失效的
+    # URL 落盘为工作区 `dead_sources.json`，报告生成器据此在来源清单对应行追加标注。
+    SOURCE_LIST_HEADS = ("参考来源", "来源清单", "参考资料")
+
+    @classmethod
+    def _ensure_disclaimer(cls, report: str) -> str:
+        """任务25：报告缺"免责声明"字样时**自动补**标准免责声明。
+
+        - 只在完全没有"免责声明"字样时注入（已有内容一律不动，不覆盖、不重复）；
+        - 有 `## 附录` 时插在它**之前**（来源清单在附录里，声明不能被推到文末）；
+        - 无附录时追加到文末。注入是幂等的：第二次调用见到"免责声明"即原样返回。
+        """
+        text = str(report or "")
+        if "免责声明" in text:
+            return text
+        m = re.search(r"(?m)^##\s+附录\s*$", text)
+        if m:
+            head = text[: m.start()].rstrip("\n")
+            tail = text[m.start():]
+            return f"{head}\n{cls.STANDARD_DISCLAIMER}\n{tail}"
+        return text.rstrip("\n") + "\n" + cls.STANDARD_DISCLAIMER
+
+    @classmethod
+    def _annotate_dead_sources(cls, report: str, ws_dir=None) -> str:
+        """任务24：来源清单里命中失效 URL 的行尾追加「⚠️ 链接已失效」。
+
+        - 只标注来源清单章节（`## 参考来源`/`## 来源清单`/`## 参考资料`，到下一个
+          ≤2 级标题为止），正文行不动；
+        - 幂等：已带标注的行不重复追加；
+        - `dead_sources.json` 缺失/为空 → 原文返回；**没有来源清单章节就什么都不做**
+          （绝不新建章节——报告结构不因辅助文件改变）。
+        """
+        text = str(report or "")
+        if not text or ws_dir is None:
+            return text
+        try:
+            from acceptance_checker import dead_source_urls, DEAD_SOURCE_MARK
+            urls = [u for u in dead_source_urls(ws_dir) if u]
+        except Exception:                          # noqa: BLE001 - 标注失败不得影响成稿
+            return text
+        if not urls:
+            return text
+        heads = "|".join(cls.SOURCE_LIST_HEADS)
+        head_re = re.compile(rf"^##\s+(?:{heads})\s*$")
+        out: list[str] = []
+        in_list = False
+        for ln in str(text).splitlines():
+            if re.match(r"^#{1,2}\s+", ln):        # ≤2 级标题：进入/离开来源清单
+                in_list = bool(head_re.match(ln))
+                out.append(ln)
+                continue
+            if in_list and DEAD_SOURCE_MARK not in ln and any(u in ln for u in urls):
+                out.append(ln.rstrip() + " " + DEAD_SOURCE_MARK)
+                continue
+            out.append(ln)
+        return "\n".join(out)
+
+    @classmethod
+    def _write_report_files(cls, report_dir: Path, report: str, ws_dir=None) -> dict:
         """落盘 report.md（完整版，不变）+ 主文/附录拆分文件（任务22）。
 
         - `report_body.md`：附录前主文（执行摘要/关键数字表/分析/风险结论）；
@@ -640,14 +706,22 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         `report.md` 与拆分件错版。现收敛到 `report_quality.write_report_files`
         （唯一权威写入口，交付侧同一函数），方法只保留调用面；无附录标题时
         权威写入口会清掉同名陈旧拆分件。
+
+        任务24/25 在此统一落盘前收口（两条写路径共用，避免分叉）：
+        失效来源标注（`ws_dir` 有 `dead_sources.json` 时）＋ 免责声明自动注入。
         """
         from report_quality import write_report_files
+        report = cls._annotate_dead_sources(report, ws_dir)
+        report = cls._ensure_disclaimer(report)
         return write_report_files(report_dir, report)
 
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
         report_dir = REPORT_DIR
+        # 任务24：工作区目录（`dead_sources.json` 所在）——无工作区时保持 None，
+        # 落盘辅助（失效来源标注/免责声明注入）据此降级为"不标注"。
+        ws = None
         if task and task.get("workspace"):
             ws = Path(str(task["workspace"]))
             charts_dir = ws / "charts"
@@ -868,7 +942,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             report = self._strip_rejected_sources(report)
 
             rpath = report_dir / "report.md"
-            _info = self._write_report_files(report_dir, report)
+            _info = self._write_report_files(report_dir, report, ws_dir=ws)
             return json.dumps({
                 "status": "success",
                 "report_path": str(rpath),
@@ -942,7 +1016,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                         "fallback": True,
                         "kept_existing": True,
                     }, ensure_ascii=False)
-                _info = self._write_report_files(report_dir, report)
+                _info = self._write_report_files(report_dir, report, ws_dir=ws)
                 return json.dumps({
                     "status": "success",
                     "report_path": str(rpath),

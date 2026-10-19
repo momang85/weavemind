@@ -7565,6 +7565,65 @@ def _post_task_cancel(self, p, body, admin):
                        "note": "已请求停止；编排器会在下一个派发边界收尾"})
 
 
+def _post_task_resume(self, p, body, admin):
+    """POST /api/task/<task_id>/resume：人工恢复**终态 FAILED** 的任务（任务26）。
+
+    为什么需要这个入口：任务 FAILED 后旧路径只能整单重跑（再提交一个新任务）——
+    已成功的步骤（抓取/计算，可能花了 20 分钟）全部重来。这里把状态翻回 RUNNING
+    并通知编排器**重新接管**：编排器按持久化的步骤状态跳过已成功步骤
+    （step_resumed）、恢复 Redis 持久化的死链清单，只跑未完的步骤。
+
+    只认 FAILED/CRASHED：SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED 是不可逆终态，
+    不得被静默改写（复核红线：结论只能人工改，不能由接口改）。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/resume")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/resume", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    row = {}
+    try:
+        import task_state as _ts
+        row = _ts.read_task(tid) or {}
+    except Exception:
+        row = {}
+    status = str(row.get("status") or "").upper()
+    if status not in ("FAILED", "CRASHED"):
+        return self._json(
+            {"error": f"只有失败的任务可以恢复（当前 {status or '未知'}）"}, 409)
+    if not _redis_ready():
+        return self._json({"error": "Redis 未连接，无法恢复任务"}, 503)
+    # 翻转 FAILED → RUNNING（CAS：只有翻成功的一方赢得重新接管权；
+    # 两个恢复入口竞争时后者拿到 409，不会各自建线程执行两次）
+    try:
+        import task_state as _ts
+        won = _ts.mark_resumed(tid)
+    except Exception as exc:
+        return self._json({"error": f"恢复失败：{str(exc)[:120]}"}, 500)
+    if not won:
+        return self._json(
+            {"error": "任务已被另一个入口恢复或状态已变化，未重复接管"}, 409)
+    # 通知编排器重新接管（resume_task 消息与普通提交同通道但**分流**：
+    # 终态任务的收执早已消费过，走普通提交会被 promote_received 判 "already" 跳过）
+    try:
+        r = _new_redis()
+        r.publish("orchestrator:main", json.dumps({
+            "type": "resume_task", "task_id": tid,
+            "goal": str(row.get("goal") or ""),
+            "user_id": admin.get("user", ""),
+            "project": str(row.get("project") or "default"),
+        }, ensure_ascii=False))
+    except Exception:
+        return self._json({"error": "Redis 发布失败，未通知编排器"}, 503)
+    audit_log(admin.get("user", ""), self._client_ip(), "task.resume",
+              target=tid, result="ok")
+    return self._json({"status": "ok", "task_id": tid,
+                       "note": "已请求恢复；编排器将按持久化步骤状态续跑"
+                               "（跳过已成功步骤，只跑未完步骤）"})
+
+
 def _post_step_confirm(self, p, body, admin):
     if self.path == "/api/step/confirm":
         # 人机协作：确认/取消单个步骤（mode=human_in_loop）
@@ -9555,6 +9614,7 @@ _POST_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate"), _post_task_candidate),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/package"), _post_task_package),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/resume"), _post_task_resume),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
     (lambda self, p: self.path == "/api/step/confirm", _post_step_confirm),
     (lambda self, p: self.path == "/api/context/extract", _post_context_extract),

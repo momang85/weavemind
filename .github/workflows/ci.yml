@@ -82,6 +82,12 @@ jobs:
         run: python test_task22_report_compaction.py
       - name: "LLM circuit breaker: 5-strike OPEN, ordered backup failover, 60s probe, guardian alert (P1)"
         run: python test_task23_llm_failover.py
+      - name: "Dead-source annotation in report and fingerprint (compliance line)"
+        run: python test_task24_dead_source_annotation.py
+      - name: "Disclaimer enforcement: mandate, auto-inject, AI-marker weak gap (compliance red line)"
+        run: python test_task25_disclaimer_enforcement.py
+      - name: "Step checkpointer resume + dead-fetch persistence + resume API (cost/hygiene)"
+        run: python test_task26_checkpointer.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)

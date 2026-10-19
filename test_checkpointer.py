@@ -244,10 +244,14 @@ class TestRunResumePath(unittest.TestCase):
         ws_mod.configure_workspace_root(self._tmp)
         self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
         self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
-        # LLM 预检必须打桩：`run()` 开头会探端点可用性与**余额**，不打桩就是拿本机
-        # config.json 里的真实 key 去真端点问——实测余额耗尽时任务直接以
-        # "端点余额不足"被拒，用例看到的失败原因与本文件要验证的恢复语义无关
-        # （CI 上无 key 则表现为"端点不可用"，同样早退）。
+        # 任务26（步骤断点续跑）：`_execute_steps(resume_completed=True)` 现在会**读回**
+        # `task_state` 里已持久化为 SUCCESS 的步骤（DB `steps_json` + Redis 运行快照两条
+        # 通道）。本用例只验证 checkpoint 恢复语义，必须把这两条通道隔离到临时环境——
+        # 否则共享的 `agents.db` 里上一次运行留下的同 ID 终态行会把"步骤 2 已 SUCCESS"
+        # 当成事实，本轮连步骤 2 都不派发（实测 dispatched=[]），用例测的就不是
+        # checkpoint 而是陈旧账本了。
+        import task_state as ts_mod
+        self._db = os.path.join(self._tmp, "agents.db")
         for target, value in (
             ("llm_client.endpoints_available", lambda: (True, "stub")),
             ("llm_client.get_balance_status",
@@ -255,6 +259,12 @@ class TestRunResumePath(unittest.TestCase):
                            "backup": {"ok": True, "reason": "ok"}}),
         ):
             pat = mock.patch(target, value)
+            pat.start()
+            self.addCleanup(pat.stop)
+        for pat in (
+            mock.patch.object(ts_mod, "DB_PATH", self._db),
+            mock.patch.object(ts_mod, "read_snapshot", return_value={}),
+        ):
             pat.start()
             self.addCleanup(pat.stop)
 

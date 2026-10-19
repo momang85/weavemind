@@ -467,16 +467,38 @@ def sources_fingerprint(task_id: str, report_text: str = "") -> str:
 
     只取真正的来源通道与报告里的来源清单——不含账簿类文件（`report_versions.json` 等），
     否则同一正文在不同时刻算出的指纹不同，身份会漂移。
+
+    任务24：**失效来源不参与指纹**。工作区 `dead_sources.json` 列出的 URL 在计算前
+    从各来源通道与来源清单块里剔除——报告生成器会在这些行尾追加"⚠️ 链接已失效"，
+    标注动作本身不得改变版本身份（否则同一份稿子"标注前/标注后"指纹漂移，
+    采纳绑定与交付包身份判定全乱）。
     """
     try:
-        from acceptance_checker import _collect_sources
+        from acceptance_checker import _collect_sources, dead_source_urls
         parts: list[str] = []
         try:
-            src = _collect_sources(workspace.task_workspace(task_id)) or {}
+            _ws = workspace.task_workspace(task_id)
+        except Exception:
+            _ws = None
+        try:
+            _dead_urls = [u for u in dead_source_urls(_ws) if u] if _ws else []
+        except Exception:
+            _dead_urls = []
+
+        def _drop_dead(text: str) -> str:
+            """剔除命中失效 URL 的整行（标注只加在该行，去掉行即去掉标注）。"""
+            if not _dead_urls:
+                return text
+            kept = [ln for ln in str(text or "").splitlines()
+                    if not any(u in ln for u in _dead_urls)]
+            return "\n".join(kept)
+
+        try:
+            src = _collect_sources(_ws) or {} if _ws else {}
         except Exception:
             src = {}
         for name in sorted(src):
-            text = str(src.get(name) or "")
+            text = _drop_dead(str(src.get(name) or ""))
             parts.append(f"{name}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}")
         text = str(report_text or "")
         blocks = re.findall(
@@ -484,7 +506,7 @@ def sources_fingerprint(task_id: str, report_text: str = "") -> str:
             text)
         for b in blocks[:3]:
             parts.append("srclist:" + hashlib.sha256(
-                b.strip().encode("utf-8")).hexdigest()[:16])
+                _drop_dead(b).strip().encode("utf-8")).hexdigest()[:16])
         if not parts:
             return ""
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
@@ -2252,12 +2274,17 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
                             parts.append(f"{hint}（404/410）")
                         if unverified:
                             parts.append(f"当前访问不到（保留为未验证来源）: {len(unverified)} 条")
-                        result.setdefault("checks", {})["url_health"] = {
+                        # 任务24：**合并**而非整体覆盖——run_acceptance 已把
+                        # `dead_source_count`/`dead_source_urls`（dead_sources.json
+                        # 通道的证据）写进 url_health，这里覆盖写会把它们抹掉。
+                        _uh = dict(result.get("checks", {}).get("url_health") or {})
+                        _uh.update({
                             "pass": True, "hint": bool(gone),
                             "details": "；".join(parts) + "（仅提示，不影响验收结论）",
                             "dead_count": len(gone), "dead_urls": gone[:10],
                             "unverified_count": len(unverified),
-                        }
+                        })
+                        result.setdefault("checks", {})["url_health"] = _uh
                         if gone and hint not in result.get("gaps", []):
                             result.setdefault("gaps", []).append(hint)
         except Exception:

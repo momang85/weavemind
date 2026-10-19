@@ -32,12 +32,18 @@ from workers.report_generator_worker import ReportGeneratorWorker  # noqa: E402
 
 
 def _report(body_chars: int = 900, appendix: bool = True) -> str:
-    """与格式要求同构的报告样本：主文（≤1800 字）+ 附录（来源清单）。"""
+    """与格式要求同构的报告样本：主文（≤1800 字）+ 免责声明 + 附录（来源清单）。
+
+    任务25 后落盘报告必须带 `## 免责声明`（缺字样会被 `_ensure_disclaimer`
+    自动注入），fixture 与生产形态同构：声明放在参考来源之前。
+    """
     body = (
         "# 测试公司两期经营研究\n\n"
         "## 数据时效\n\n行情数据截至 2026-08-30 15:00 收盘。\n\n"
         "## 执行摘要\n\n" + ("经营平稳。" * (body_chars // 5)) + "\n\n"
-        "## 风险与结论\n\n结论：仅陈述水平与变化，不构成投资建议。\n"
+        "## 风险与结论\n\n结论：仅陈述水平与变化，不构成投资建议。\n\n"
+        "## 免责声明\n\n本报告由 AI 生成，不构成任何投资建议；"
+        "数据来源于公开披露，可能存在时效性差异和获取误差。\n"
     )
     if not appendix:
         return body

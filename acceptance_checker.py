@@ -1642,6 +1642,98 @@ def _collect_sources(workspace) -> dict[str, str]:
     return src
 
 
+# ── 任务24：失效来源标注（合规线）──────────────────────────────────────
+# 编排器在**报告步骤派发前**把本轮"抓取已判定失效"的 URL 落盘成工作区
+# `dead_sources.json`（[{"url","reason"}]）：进程内集合随任务终态/重启丢失，
+# 报告里的 `## 参考来源` 于是把死链与活链混在一起给用户看。报告生成器据此
+# 在对应行追加 `⚠️ 链接已失效`；验收侧把该清单并入证据（`dead_source_count`），
+# 并以**弱缺口**呈现——不翻转 `overall`（死链是抓取环境事实，不是报告缺陷），
+# 但必须可见，让复核的人一眼看到"来源里有失效链接"。
+DEAD_SOURCES_FILE = "dead_sources.json"
+DEAD_SOURCE_MARK = "⚠️ 链接已失效"
+
+
+def read_dead_sources(workspace) -> list:
+    """读工作区 `dead_sources.json` → [{"url": str, "reason": str}]。
+
+    容错优先（验收/交付链路不得因一个辅助文件异常而失败）：文件缺失、JSON 损坏、
+    形状不对 → 返回 `[]`。条目既认 `{"url","reason"}` 对象，也认纯字符串
+    （旧/手写形状），空 URL 跳过。
+    """
+    try:
+        path = Path(str(workspace)) / DEAD_SOURCES_FILE
+        if not path.exists():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:                            # noqa: BLE001 - 见 docstring
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list = []
+    for it in raw:
+        if isinstance(it, dict):
+            url = str(it.get("url") or "").strip()
+            reason = str(it.get("reason") or "").strip()
+        else:
+            url, reason = str(it or "").strip(), ""
+        if url:
+            out.append({"url": url, "reason": reason})
+    return out
+
+
+def dead_source_urls(workspace) -> list:
+    """失效来源 URL 列表（去重保序）：报告标注与 `sources_fingerprint` 共用。"""
+    urls: list = []
+    for rec in read_dead_sources(workspace):
+        url = str(rec.get("url") or "")
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def apply_dead_source_evidence(result: dict, workspace) -> dict:
+    """把失效来源清单并入验收证据（任务24）。
+
+    调用点必须在 `overall` 判定**之后**：`url_health` 检查补 `dead_source_count`
+    /`dead_source_urls` 证据（无该检查时建一个 `pass=True` 的壳，避免"没有证据"
+    被读成"没有问题"），并把一条弱缺口追加进 `result["gaps"]`——结论不变，
+    但缺口可见（与 `delivery_pipeline` 既有 url_health 提示同一先例）。
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        recs = read_dead_sources(workspace)
+    except Exception:                            # noqa: BLE001
+        recs = []
+    if not recs:
+        return result
+    urls = [str(r.get("url") or "") for r in recs if r.get("url")]
+    try:
+        checks = result.setdefault("checks", {})
+        health = dict(checks.get("url_health") or {})
+        merged = list(dict.fromkeys(
+            [str(u) for u in (health.get("dead_urls") or []) if u] + urls))
+        health.update({
+            "pass": True,
+            "counted": False,
+            "applicable": True,
+            "dead_count": len(merged),
+            "dead_source_count": len(merged),
+            "dead_source_urls": merged[:10],
+            "details": (f"参考来源含失效链接 {len(merged)} 条"
+                        f"（已在报告中标注「{DEAD_SOURCE_MARK}」，仅提示，不影响验收结论）"),
+        })
+        checks["url_health"] = health
+        gaps = result.setdefault("gaps", [])
+        gap = (f"参考来源含失效链接 {len(merged)} 条"
+               f"（已标注「{DEAD_SOURCE_MARK}」，待人工核查）")
+        if gap not in gaps:
+            gaps.append(gap)
+    except Exception as exc:                     # noqa: BLE001 - 证据补写不得拖垮验收
+        logger.warning("失效来源证据并入失败：%s", str(exc)[:150])
+    return result
+
+
 def _traceable_in_clean(num: dict, clean_text: str) -> bool:
     """在 clean_chart_data.json 中按数值+单位精确比对。"""
     try:
@@ -5352,25 +5444,43 @@ def check_freshness_block(report: str, goal: str = "",
 
 
 def check_disclaimer(report: str) -> dict:
-    """免责声明 + AI 标识检查：financial 域报告必须含'免责声明'与'不构成投资建议'。"""
+    """免责声明 + AI 标识检查：financial 域报告必须含'免责声明'与'不构成投资建议'。
+
+    任务25（合规红线）补 **AI 生成标识**检测（`AI 生成 / AI自动生成 /
+    人工智能生成` 任一）。两项基础要素缺失时维持原有判负路径；基础要素齐但
+    缺 AI 标识时，检查记 `fail`（`ai_marker_missing=True`），由 `run_acceptance`
+    降级为**弱缺口**——历史合规措辞的存量报告（"不构成任何投资建议"但没写
+    AI 标识）不因新增要素而翻红，但缺口必须可见。
+    """
     t = str(report or "")
     has_disclaimer = "免责声明" in t
     # 兼容官方模板"不构成任何投资建议"与简写"不构成投资建议"
     has_advice_note = re.search(r"不构成(?:任何)?投资建议", t) is not None
+    # AI 生成标识（任务25）：兼容 "AI 生成/AI生成/AI自动生成/AI 自动生成/人工智能生成"。
+    # 注意 `自动?` 只把"动"变可选（"自"仍必需），必须用 (?:自动)? 整体可选——
+    # 否则 "AI 生成"（无"自动"）永远不命中（首轮 task25 用例实测）。
+    has_ai_marker = re.search(r"(?:AI|人工智能)\s*(?:自动)?生成", t, re.I) is not None
     passed = has_disclaimer and has_advice_note
+    ai_marker_missing = bool(passed and not has_ai_marker)
     return {
-        "pass": passed,
+        "pass": passed and not ai_marker_missing,
         "details": (
             f"免责声明/AI 标识：{'包含' if has_disclaimer else '缺失'}，"
-            f"'不构成投资建议'：{'包含' if has_advice_note else '缺失'}"
-            + ("，通过" if passed else "，缺失")
+            f"'不构成投资建议'：{'包含' if has_advice_note else '缺失'}，"
+            f"AI 生成标识：{'包含' if has_ai_marker else '缺失'}"
+            + ("，通过" if passed and not ai_marker_missing else "，缺失")
         ),
         "has_disclaimer": has_disclaimer,
         "has_advice_note": has_advice_note,
+        "has_ai_marker": has_ai_marker,
+        "ai_marker_missing": ai_marker_missing,
         "gaps": (
             []
-            if passed
-            else ["报告缺少'免责声明'与'不构成投资建议'（AI 生成标识）"]
+            if passed and not ai_marker_missing
+            else (["缺少 AI 生成标识：免责声明需写明本报告由 AI 生成"
+                   "（「AI 自动生成」「人工智能生成」亦可）"]
+                  if ai_marker_missing
+                  else ["报告缺少'免责声明'与'不构成投资建议'（AI 生成标识）"])
         ),
         "enabled": True,
     }
@@ -5570,6 +5680,13 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
                 _c["details"] = (
                     f"不适用于 {profile} 类任务（无报告来源/时效/免责声明要求）"
                 )
+        # 任务25：免责声明**只缺 AI 生成标识**（"不构成投资建议"都在）→ 降级为
+        # 弱缺口（不计入 overall）：存量合规措辞的免责声明没有 AI 标识，新增要素
+        # 不得让它们翻红；但缺口要可见（gaps 追加 + `ai_marker_missing` 证据）。
+        if (_key == "disclaimer" and _c.get("ai_marker_missing")):
+            _c["raw_pass"] = _c.get("pass")
+            _c["pass"] = True
+            _c["counted"] = False
         if _c["pass"] or not _c.get("counted", True):
             continue
         # 优先给出检查项自己的**可操作缺口**（如"目标要求给出营业收入…"），
@@ -5592,13 +5709,20 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         _st = str(_req.get("status") or "")
         if _st in ("partial", "unknown"):
             overall = _st
+    # 任务25：弱缺口在 `overall` 判定**之后**追加（不翻转结论，但必须可见）
+    for _weak_key in ("disclaimer",):
+        _weak = checks.get(_weak_key) or {}
+        if _weak.get("ai_marker_missing"):
+            for m in (_weak.get("gaps") or []):
+                if m not in gaps:
+                    gaps.append(str(m))
     # A2：汇总各检查项的域名媒体补录建议，供 GET /api/acceptance/suggestions 读取
     suggestions: list[str] = []
     for c in checks.values():
         for s in (c.get("suggestions") or []):
             if s not in suggestions:
                 suggestions.append(s)
-    return {
+    result = {
         "report_id": str(task_id),
         "goal": str(goal or "")[:120],
         "checks": checks,
@@ -5618,3 +5742,6 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
             str(report_text or "").encode("utf-8")).hexdigest()[:16],
         "evaluated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    # 任务24：失效来源证据并入（弱缺口，不翻转 overall；须在结论落定之后）
+    apply_dead_source_evidence(result, workspace)
+    return result
