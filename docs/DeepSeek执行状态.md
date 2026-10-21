@@ -1,6 +1,98 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-10-12 · **C5 批：经营判断 × 市场反应（内部研究通路）**，基线 `c85371e`；2026-10-13 已推送 PR #1）
+> ## 当前账（2026-10-21 · **新用户闭环批次完成，停下交审**，基线 `19054dd`，**未 commit / 未 push / 未新建分支**）
+>
+> **工单**：标签「新用户闭环」全新工单——全新账号+全新任务走一个真实新用户视角的端到端闭环；不得重做/复用 U90-A→D 与 R1→R4 证据（旧证据只作背景）。证据目录 `docs/evidence/20261021-new-user-loop/`（索引与快速复核命令见其 `README.md`，逐步报告见其 `report.md`）。
+> **A 新用户开局（达成）**：真实浏览器新建账号 `u90new21`（密码仅会话内存）→ 首登为只读 viewer（提交被挡）→ 页内角色入口提为管理员（**blocker：新账号默认 viewer，无法提交任务，新用户必须知道**）→ 表单提交全新任务 `ui-d59152ebb9`（洋河股份 002304.SZ，2023–2024 合并报表，投研视角，资料截至 2025-04-30，参考资料留空）。截图 01–09。
+> **B 全链（达成）**：材料准入（官方发现自动准入 1 份年报 f42e747c73850b59，raw.bin 复算哈希一致；页面「正文引用 2 条…另有 0 条候选材料未采用」）→ 确定性复算（新运行）→ 生成候选 → 预览比较（前后对比全 0 元差）→ 采纳（**第一次被绑定守卫 409 拒绝并回滚**「采纳正文里找不到所选运行 519c5db160f8（选了新运行，正文却还是旧稿）」；换选正文绑定运行 f478645b6722 第二次成立）→ 导出当前包 `deliverables_20261021_152053_9ab4b5.zip`（页面「当前包：…（与采纳稿同版才可下载）」，identity_ok=true）→ 页面下载 MD/PDF/ZIP（浏览器落盘位置本会话不可观测，以服务字节哈希+字节副本留证）。截图 10–17。
+> **R2 同版核验（通过）**：采纳身份 `9751ef20b489…` == 包内 `PACKAGE_MANIFEST.json.report_version_id` == 包内+工作区 `analysis/selection.json.adopted_identity`（selection_binding: present/consistent/already_bound）；包内 25 个冻结成员 sha256 逐一复算全对；PDF 经 `/files/…/reports/report.pdf` 真开 Chrome 查看器，逐页截图 3 页（哈希互异，7 页文本与正文一致）；页面当前包指 current、两个早先包标注 historical（identity 各自可查）。**实机观察（如实）**：页面「下载PDF」为按需重生成字节（同版不同字节序列，X-Report-Version-Id 头=采纳身份）。
+> **R4 声明核验（通过）**：交付正文免责声明含「**本次外部检索降级运行（检索步由非检索执行者代做），报告来源以实际采用的来源清单为准**」；数据来源摘要（检索步 1/有效覆盖率 0%/降级步 1/零来源步 0）与实际来源（东方财富结构化数据 + 已准入官方年报）并排一致；「搜索 0 结果」≠「未引用材料」成立。
+> **R1 断点复用正例（未验+原因）**：新任务全部步骤跑完终态 SUCCESS_WITH_ISSUES，无 FAILED/CRASHED → 无恢复入口可测。不可行原因（逐字级）：本会话令牌无法观察/终止原栈进程（`Stop-Process -Id 5160`→「找不到进程」、`taskkill`→「Access denied」，netstat+Redis 租约证明存活；杀共享 Redis 属破坏环境且本会话无安全重启路径）；页面无中断入口（cancel→CANCELLED 无恢复）；检索缺口是设计内非失败；先确认计划超时→FAILED 但 M=0 且耗一次运行；授权真实运行 1/2 次，「制造失败+续跑」需 2 次。桩不经过 `_load_resumable_steps` 三重校验、不产生页面标签，不能替代。
+> **R3 恢复路径（未验+原因；采纳流实机类比已记录不冒充）**：同页失败→重试成功的真实观察取自采纳流（409 `adopt_not_bound` 回滚→修正→「已采纳：报告身份 9751ef20b489」），非 resume.ts 路径；②挂起/③双击未测，如实记未测。
+> **旧包/历史任务保护（通过）**：前后指纹 diff——17 个旧 zip、34 个旧 PDF 逐文件 sha256 全部一致；task_history 565→566 行（+1 即新任务），其余行 updated_at 全部早于前快照。
+> **⚠️ 事故披露（已清理）**：本批早前验证存活时误跑 `python launcher.py up`，因进程探活被拒误判 0/16 而拉起第二套完整栈（8081、pids.json 改写、supervisor 崩溃循环）；清理杀不掉原栈进程（Access denied）且 stop_services 删了 `.weavemind/pids.json`；最终 `Stop-Process -Force` 逐个结束第二栈本会话子进程。原栈未被波及（租约拒绝所有重复实例、8080 正常、11 智能体心跳连续）；遗留：pids.json 丢失、runtime_ports.json 改写。详见 report.md §0。
+> **费用与调用**：LLM 调用 **38 次**（failed 9，多为 thinking_budget 重试）；`config.json` 无价格表 → 费用**未测**；授权真实运行 **1/2 次**（仅 ui-d59152ebb9 提交，续跑 0）；采纳/复算/导出/下载全程 0 次 LLM 调用（llm_calls 恒 38）；运行后 `u90_inflight_check.py` = `{"inflight":0}`。
+> **剩余未验 4**：①R1 恢复正例（需可对编排器进程发信号的会话 + ≥2 次运行授权）；②R3 恢复路径四项（同上）；③「未进正文」运行的采纳预禁用是否要做（产品判断，本批未改代码）；④下载 PDF 字节与包内成员对齐与否（产品判断）。既有环境限制未动：code_sandbox/embedding 不可用；`report_brief` DatasetManifest 参数缺陷仍存。
+> **本批停在交审点**，等人工/架构师复核；改动仅新增证据目录与本文件，无代码改动、无 commit。
+> **Lead 侧独立复核（2026-10-21 16:37，见证据目录 `lead_verification_20261021.md`）**：51 个旧工件、25 个包成员、身份链三处一致、MD/ZIP 字节、38 次调用等逐项对字节复算**全相符**，R1/R3 维持未验。两处事实更正：① §0「第二栈全部清理」不成立——14:23 三代共 30 个孤儿 worker/critic/guardian/metrics 仍挂共享 Redis（blocked 33≈11×3 套），Lead 已按创建时间精确圈定 PID 清理并复验（python 46→16 仅剩原栈、Redis blocked 11、8080 200、inflight=0，原栈无损）；② `downloads/ui-d59152ebb9.pdf` 是冻结成员字节（35c66f80…），「下载PDF」按钮实际服务按需重生成字节（83a93ec4…，同版头）——两路径并存如 report.md §3 所述，无错版混同。另 task_history 复核时为 567 行：+1 行为产品自身 16:00 定时任务 `sched-f6e5440b8b`，非本批触碰，「565→566 仅 +1」口径仍成立。看板卡片停在 failed 列系一次 15 秒即错的执行尝试记录，实际会话已续跑完成——账实差异如实保留，未改动卡片。
+>
+> ## 历史账（2026-10-21 · **U90-R1→R4 补修完成（已由新用户闭环批次复核），停下交审**，基线 `19054dd`，**未 commit / 未 push / 未新建分支**）
+>
+> **⚠️ 架构师裁决（2026-10-20，`docs/evidence/20261020-u90/architect_review_20261020.md`）**：阶段性实现认可，但原自评「95/100、目标达成、硬门槛全过」退回；第 15 项（断点复用无身份/产物校验）与第 18 项（selection 身份与 manifest 不同版）证伪记 0，扣后上限 **85（非审定成绩）**。原报告与原证据保留不覆写。
+>
+> **本批已按裁决完成四项补修（零新增付费模型调用；证据与简报同目录追加，见 `u90_supplement_report.md`）**：
+> **R1 断点身份与产物校验**：`orchestrator_v2._load_resumable_steps` 补 `_RESUME_STEP_ARTIFACTS` + `_resume_step_identity_verdict`（同 ID 核能力/指令/契约与输入指纹/产物，无法证明有效不复用；后继联动；校验异常不复用）；架构师全部反例（空目录/缺产物/同 ID 换指令/上游变更）拒绝，合法复用真跳过；`test_task26_checkpointer` 38→55 OK、与 `test_orchestrator_v2` 联跑 156 OK。**真机"跳过 N/M 步"仍单列未验**（565 任务无一可复用样本）。
+> **R2 当前交付全链同版**：`export_snapshot`/`repack_adopted` 四路证据（正文 hash==采纳、交付登记、重渲染包含性、selection 身份）一次冻结；发布前复核采纳身份，变了抛错不静默混版；`financial_analysis/store.rebind_selection_identity` 回滚同步；旧包时间与标识一律不改。演练 30/30（临时副本新包 manifest==包内 selection==采纳、22/22 成员哈希、PDF 逐页目检）；**重启后真机页面口径实测**（`r2_live_page_state.json`）：三一 3 包/洋河 1 包全 `historical` 带原因行、`current=""`——无旧包冒充当前。**真机重导出未做**（三一缺可复算底稿，如实单列）。
+> **R3 恢复失败后的重试与挂起**：前端 `lib/resume.ts` 重写为状态层（`pending|ok|failed|timeout`；失败保留原因但可重试；POST 12s 超时；超时后先核任务真实状态防重复接管），三页面统一接线；后端 `_post_task_resume` 响应体带 `status/retryable`，publish 失败回写 `mark_resume_undone`（CAS `RUNNING/恢复执行`→`FAILED/恢复未生效`）；`resume.test.mjs` 12 pass（503→重试可成功/挂起超时/双击去重/按任务状态防重，覆盖页面状态层）；真机腿 A 同页重试成功（`r3_ui_retry_after_503.png`）+ 腿 B CAS 回滚实测 + 腿 C 自动化。
+> **R4 来源声明与实际采用证据一致**：根因 `any(type=='third_party')` 把"只引用发行人披露"写成「未引用外部数据源」（真机反例：三一冻结结构 1 条 issuer_annual_report）；修法五文件（`disclaimer_clause` 按**实际来源类别**措辞+降级检索事实、`report_brief` 按材料**准入状态**登记+`_search_degraded_reason`、`bad_urls` 放行 `material://`、编排器第 6 条+新基准句、worker 兜底同步）；旧措辞只进新装配。单元 49+20 OK；声明层演练 12/12（真机结构改前/改后、材料直供+检索零命中、零来源如实）；**流程腿 12/12**：按生产「人工复核修订重装」同序产出新包 `deliverables_20261021_123221_c92525.zip`——`status=verified`、包内声明=「数据来自第三方平台/媒体公开信息…」、清单 `report_version_id`==采纳身份、成员哈希全对、旧包只读指纹未变。**页面旧交付按纪律未追改、真机无法重跑成稿器（0 准入材料、缺底稿），如实单列。**
+> **代码加载**：`inflight=0` → `launcher.py restart`（12:40:30，16/16 存活、HTTP 200）；dist 11:58（`frontend/dist/index.html` sha256 `4864fe6df40b…`）；容器隔离不可用为既有环境（docker 缺失）。
+> **补修后重评（自评，待架构师复核，不宣称达标）**：第 15 项 5（R1 反例全覆盖+正例；真机正例未现单列）、第 18 项 5（R2 演练+页面口径）、第 19 项 5（R4 声明层+流程腿；页面旧交付未追改单列）、第 16 项 5、其余 16 项沿用初版自评（架构师未独立验收）→ **自评 100**。硬门槛：无新旧版本混包 ✓（新包身份链同版、旧包标注 historical）、无越权/密钥泄漏 ✓、无代理代签人工复核 ✓；关键数字抽样回查仍是抽样（如实）。
+> **回归（补修后逐文件）**：`test_report_quality` 49、`test_task25_disclaimer_enforcement` 20、`test_task22_report_compaction` 28、`test_r0_boundaries` 48、`test_task26_checkpointer` 55、`test_frontend_guards` 69、`test_offline_delivery` 41、`test_delivery_chain` 422（全绿）；前端 `resume.test.mjs` 12 pass；`npm run build` ✓（dist 已同步）。
+> **过程量**：本批真实 UI 操作 4 次（R3 腿 A/B、R2 页面口径、包内核验）；模型调用 0 次、费用 0（全部缓存副本+确定性代码路径）；无新增服务/worker/DB/DSL。
+> **剩余未验/尚存 5**：①真机"跳过 N/M 步"复用未验；②真机重导出同版新包未做（缺底稿）；③过期/旧包仍可按精确 URL 下载（页面已标 historical，端点不拦）；④`/deliverables` 判决块 `current_*` 字段真机返回空（页面口径以 `package_statuses` 为准，正常）；⑤`report_brief` 直接法补充资料 `DatasetManifest` 参数缺陷（复现 5×，非本批范围）。
+> **本批停在交审点**，等架构师复核；改动集中在 `orchestrator_v2`（R1/R4）、`delivery_pipeline`/`financial_analysis/store`/`web_ui`（R2/R3）、`report_quality`/`report_brief`/`acceptance_checker`/`workers/report_generator_worker`（R4）、前端四文件（R3），均为可单点回退的小块。
+>
+> ## 历史账（2026-10-20 · **U90 A→B→C→D 初批（评分已被架构师退回）**，基线 `19054dd`）
+>
+> **任务书**：`docs/用户体验90分_执行任务书_20261020.md`（架构师派发，原样未动）｜**交审报告（初版，已被退回评分）** → `docs/evidence/20261020-u90/U90_交审报告_20261020.md`｜证据目录 `docs/evidence/20261020-u90/`（索引见其 `README.md`）。
+>
+> **U90-A 主流程贯通**：真实浏览器 `momang` 登录，三一重工 `ui-cc853cf86b` 走通「补材料→选运行/改假设→确定性复算→生成候选→预览比较→采纳→导出当前包→下载核验」；洋河 `ui-91677c7767`（10-18 演练真杀 Redis 拖死的 FAILED 任务）真实点击恢复到交付。
+> **U90-B 恢复入口与失败反馈**：`web_ui._resume_view`（L550）为恢复真源——仅 FAILED/CRASHED 有入口，终态/运行中只给原因；文案按真实步骤算「继续执行（跳过 N/M 步）」或「重新接管执行」；`POST /api/task/<id>/resume` CAS `mark_resumed`，重复请求 **409**；前端 `History.tsx`/`TaskConsole.tsx`/新 `lib/resume.ts` 接线并在途闸防重复点击。**修复静默空态**：`MaterialPanel.tsx`/`AnalysisWorkbenchPanel.tsx` 增 加载中／失败+原因／重试 三态与 12s `AbortController` 超时（真实浏览器验证「断线」「12 秒挂起」两路径）。~~`_load_resumable_steps` 的产物有效性守卫~~（**架构师复现证伪：只检查工作区目录存在，空目录仍复用、同 ID 换能力/指令/输入仍拿旧结果 → 已由 2026-10-21 的 R1 补修为真校验**）。
+> **U90-C 既有事实接主流程**：根因修复 `working_paper_export._paper_details`——官方材料分支此前缺 detail 行 → `chart_rows` 不 ok → 采纳静默不成立（旧正文被保留）；修后「采纳这版」→ 交付装配 `verified` → 结构投影按采纳正文重建 → 三图按当前选择重渲染，数字溯源率 **0%（0/51）→ 84%（334/398）**、金额溯源率 93%（224/240）达阈值。
+> **U90-D 三场景 + 恢复复验**：S1 三一完整材料营运研究、S2 同路径现金研究、S3 材料不足→如实缺口→补材料→继续。恢复运行 21:08:15→21:21:30 收 `SUCCESS_WITH_ISSUES`（6 步 5 SUCCESS、`steps_resumed=0`、一次出包 `deliverables_20261020_212027.zip`、准入 `admitted=False verified=False 原因=['终态不是成功（SUCCESS_WITH_ISSUES）']`，无假放行）；终止态行内恢复按钮消失、缺口原文可见。下载 MD/PDF/ZIP 逐项核身份与哈希、PDF 20 页 pypdf 可读。
+> **评分（原自评，已被架构师退回，仅供追溯）**：~~20 项 **95/100**~~（裁决：第 15、18 项证伪记 0，自评上限 **85**，非审定成绩；硬门槛「无新旧版本混包」未通过）。第 19 项记 0 并单列：三一交付 MD（v1/v2）免责声明「本报告未引用外部数据源，结论仅为模型知识」与包内事实相悖（实际引用 2 条已准入官方材料、溯源率 84%；判据取"检索步来源"而非"正文引用"）→ **已由 2026-10-21 的 R4 修复**；死链标注在本批包内无适用对象。~~原文所列「硬门槛全过」不成立。~~
+> **未验单列（初批）**：真实运行的「跳过 N/M 步」复用（历史失败任务工作区均已被清理，无可复用样本）；死链标注包内未复现；三一运行费用（账本已过期→未测）。
+> **剩余阻塞（初批，本批 R2/R4 已处理其中两项）**：①静默失败类只在补材料/分析工作台两个面板修复，其余面板未逐一排查；~~②过期/旧交付包被页面当当前包~~（R2 后页面口径如实判 `historical`，端点仍不拦下载）；~~③免责声明分支判据用错、新包 `analysis/selection.json` 的 `adopted_identity` 仍指旧身份 `d290ab01…`~~（R2/R4 已修）；`report_brief` 直接法补充资料 `DatasetManifest.__init__() missing 2 required positional arguments` 仍未修。
+> **运行环境事件（如实，按裁决收敛）**：初批取证后期 16 服务全部停止（`webui.log` 末条 21:26:07、无崩溃栈）；**停止原因未确定**（无崩溃栈不能证明是外部终止），当时无在飞用户任务；`python launcher.py up` 恢复 16/16 + HTTP 200 后继续下载核验；未杀任何在飞任务。
+> **过程量（初批）**：真实 UI 操作 19 次；恢复运行耗时 13 分 15 秒；模型调用落账 25 次（prompt 82,666 + completion 76,997 tokens，账本 **$0.2367**；`config.json` 无单价表，三一费用未测）；另有**不记账**真调用（webui `stream_fallback` 当日累计 33 次、orchestrator 2 条）；授权付费运行 2/≤2，候选正文为确定性装配（`paid=false model_called=false`）零付费。
+> **回归（初批）**：`test_financial_analysis` 259、`test_delivery_chain` 418、`test_frontend_guards` 68、`test_working_paper` 61、`test_task26_checkpointer` 38、`test_review_edit_api` 37、`test_task22_report_compaction` 28、`test_task19_search_coverage` 26、`test_task24_dead_source_annotation` 19（全绿）；前端 `node --test` 66 pass / 0 fail；`npm run build` ✓。
+>
+> ## 历史账（2026-10-19 · **Phase-4 任务21→22→23（严格顺序）**，基线 `e46dc1c`）
+>
+> **交付形态**：三个提交 `455e46c`（`launcher.py supervise` 默认启动＋重启审计告警）→ `97edf9f`（报告正文 1800 字压缩＋正文/附录拆分＋交付包带正文）→ `dff5baf`（LLM 端点熔断，见下）。**全部只 commit 本地，不 push，等架构师验收。**逐条偏差写进各提交体与 `docs/evidence/20261019-phase4-task21-23/README.md`，**未擅改架构师设计文档**（`docs/arch_phase4_task21/22/23.md` 原样未动）。
+>
+> ### 任务23（LLM 熔断）提交与实现要点
+> 新模块 `llm_circuit_breaker.py`（进程内单例三态状态机）＋ 三处最小接线：
+> - 状态机：CLOSED →（主端点连续 5 次**端点类**失败）→ OPEN，按备援列表顺序切换；60s 后下一次真实调用打回主端点探测（HALF_OPEN），成功 → CLOSED、失败 → 重新计时回 OPEN。`model_ctx`/`model_deny`/`cancelled`/`budget_exhausted` 不计入（请求问题，换端点也没用）。
+> - 端点切换：`llm_client` 每次调用前读 `os.environ` 的 `LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`（实测 `call_llm_async` L2692+ 与 `LLMClient.call` L1810+），故 `activate_for_call()` 把这三个变量指向活跃端点；CLOSED 且从未切过 → 一个字不写；未配备援 → 全程零影响。幂等判定带**漂移自愈**：`_ensure_cfg_fresh()` 在 config mtime 变化时会把 env 重写回主端点（优先级高于切换），被改过就按活跃端点重写一次，否则 OPEN 期间被打回主端点后熔断器还以为"已切换"。
+> - 模型名：备援期间把该备援配置的模型名作为 `model_override` 传给 `call_llm_stream/call_llm_async`（`get_model_for_usage()` 里 `llm.model_roles[用途]` 优先于 `LLM_MODEL`，只改 env 换不掉模型名；与 `llm_client._async_call_backup` 的 `b_payload["model"]=_BACKUP_CFG["model"]` 同口径）——实机曾见备援以主端点模型名请求而 http_404。
+> - 接线：`async_worker_base._call_llm` 变薄壳（激活/成功/失败记账），原实现改名 `_call_llm_transport`（实例替换语义保留）；`worker_guardian` 心跳新增 `_check_llm_circuit()`（最坏状态聚合、指纹去重、恢复告警 `llm_circuit_recovered`）；`web_ui._get_health` 增 `llm: {state, active_endpoint, consecutive_failures, backups_configured}`（无地址无密钥）。
+> - 跨进程可见：worker 进程在状态**变化**时 best-effort 镜像快照到 Redis `llm:circuit:{service}`（TTL 300s，进程死了自动过期；Redis 只做观测镜像不是真源，不写 DB）。
+> - 测试 `test_task23_llm_failover.py` 58 用例全绿；`.github/workflows/ci.yml` 已注册（既有行只增不减）。
+>
+> ### 任务23 对架构师文档的偏差（逐条，已如实上报待裁决）
+> 1. 文档假设 `config.json` 已有 `backup_endpoints` 列表——实际只有**单个** `backup` 对象（O-29 健康路由在用）。`load_backups()` 两处都认：列表优先，`backup` 退化为单元素列表，否则本任务在这个仓库是死代码。
+> 2. 文档说备援端点"从未被实际触发"——不准确：`llm_client` 的 O-29 健康路由（`_call_backup`/`_async_call_backup`，失败 2 次即切）**已经**在调备援。本任务的增量是"连续失败计数 + 三态状态机 + guardian/健康页可见性"，不是"第一次让备援可用"。
+> 3. 文档步骤 2 指定在 `worker_base.py` 的 `retry_with_policy` 里集成——`retry_with_policy` 实际只包 Redis `pop_task`（worker_base.py:508-512），不包 LLM 调用；且 SearchAgent 链自己不调模型（worker_base.py:650-652 注释明言"模型调用在上游"）。**10 个现役 worker 全是 `AsyncWorkerBase` 子类**，集成落在 `async_worker_base._call_llm`；`worker_base.py` 一行未动。
+> 4. 文档第 15 行把 `model_deny` 列入触发类，与第 56 行"model_deny 不计入熔断"自相矛盾——**按第 56 行（架构约束）执行**。
+> 5. 文档步骤 3 的 `_alert("llm_circuit_open", {...dict})`——现役 `_alert(event_type, message)` 签名不动（最小 diff），`active_endpoint`/`failures` 进消息文本；另加了恢复告警 `llm_circuit_recovered`（沿用 `redis_recovered` 先例）。
+> 6. 文档"成功后恢复探测"未指定探测方式——**不发合成探测请求**（省一次付费调用、不新增请求站点）：60s 窗口一过，下一次真实调用即探测。
+> 7. 记账粒度：熔断按"**一次 `_call_llm` 的最终结果**"计数（内部 `max_attempts=3` 重试耗尽才算 1 次），不是按每次 HTTP 尝试——口径为调用层连续失败，避免一次坏窗口被内部重试放大。
+> 8. 文档未提模型名切换：备援期间额外用 `model_override` 传备援自己的模型名，理由见上（`model_roles` 优先于 `LLM_MODEL`；实机已见备援 404）。**属超出文档的补做项**，如架构师认为越界可单点回退（去掉 `_call_llm` 里 `active_model_override()` 那两行即可，其余不受影响）。
+>
+> ### 任务21/22 偏差（同批上报，详见证据 README 与各提交体）
+> - 任务21：告警以 best-effort `publish` 到 guardian 频道 `orchestrator:alert`＋`audit_log`＋`logger.error` 落地；`supervise_services` 增单例守卫/自 pid 记录/先 poll 后 sleep；`stop_services` 先杀 supervisor；`test_p0.test_start_respects_supervise_env` 语义随默认值翻转。
+> - 任务22：拆分同时识别 `## 数据来源`/`## 核查细节`；正文/附录文件仅在有附录时写盘；交付正文取自**同一份**交付字节（不重读盘）；`research_report_adapter.py` PDF 渲染路径未动。
+>
+> ### 回归（Phase-4 后逐文件复跑，全绿）
+> `test_p0.py` 437、`test_delivery_chain.py` 418、`test_startup_readiness.py` 77、`test_frontend_guards.py` 64、`test_offline_delivery.py` 41、`test_deploy_manifest.py` 41、`test_task20_redis_degradation.py` 40、`test_task16_retryable_flag.py` 37、`test_actionable_state.py` 35、`test_review_edit_api.py` 33、`test_task14_dispatch_routing.py` 28、`test_task19_search_coverage.py` 26、`test_settings_requirements.py` 26、`test_task_projection.py` 24、`test_task21_supervise_default.py` 23、`test_task22_report_compaction.py` 21、`test_task23_llm_failover.py` 58、`test_report_version.py` 18、`test_task18_acceptance_evidence.py` 17、`test_task17_routing_metrics.py` 16、`test_task6_watchdog.py` 15、`test_task_state.py` 11、`test_sandbox_isolation.py`、`test_task_context.py`、`test_llm_thinking_escape.py`、`test_auth_audit.py`、`test_r0_boundaries.py`。
+>
+> ## 历史账（2026-10-18 · **Phase-3 任务18→19→20（严格顺序）＋端到端真机演练**，基线 `5b55d97`）
+>
+> **交付形态**：任务18/19/20 三个提交 `6008db7`（验收证据持久化）→ `da30643`（检索覆盖率可见化）→ `e46dc1c`（Redis 优雅降级）；
+> **已于 2026-10-18 按用户指示推送**（`git -c http.proxy= -c https.proxy= push origin c5-market-comparison`，`5b55d97..e46dc1c` 直连成功——全局 7897 代理会挂）。至此 **Phase-3 六个提交全部在 `origin/c5-market-comparison`**（前三个 `f56f7cf`/`2f76f10`/`5b55d97` 早前已推）。逐条偏差写在提交体里，**未擅改架构师设计文档**。
+>
+> **端到端演练（用户要求，账号 `momang` 真机登录，口令不落盘/不入仓）**：`python launcher.py up` 起 16/16 服务（运行包 `git:e46dc1c`），三次真实任务——
+> **E2E-1** `ui-1e959ed373`（茅台 2024）**SUCCESS_WITH_ISSUES/完成**（29 分钟、49 次调用、$0.5282）：任务18 `/api/task/<id>/acceptance` 带 `checks`（落库 13 条逐规则检查、`overall pass`、`report_sha256 c61121990e7d…`），
+> 任务19 `report.md` 出 `## 数据来源摘要`（检索步 1 / 有效覆盖 0% / 降级 1 / 零来源 0）＋`❌ 检索质量严重不足` 告警，投影 `search_coverage` 同步；
+> **E2E-2** `ui-91677c7767`（洋河 2024）途中 `14:34:57` 杀掉 Redis：`/api/health` **4.37s** 返 `{available:false, degraded_mode:true, latency_ms:null}`、`/api/status` **41.6s** 返全量降级快照＋`dependencies[]`/`health.items[]` unavailable（**无 6379/127.0.0.1 泄漏**），
+> guardian `14:35:34` 打 `Redis 不可用（…）→ 进入降级模式…恢复后自动解除（无需重启）`，告警因 Redis 已死**投递失败**（与偏差 e 一致）；
+> **真机暴露两点**：① 编排器与 critic 两个监听进程**被拖死**（11 worker/webui/guardian/metrics 存活），webui `崩溃兜底` 于 `14:38:33` 翻 `FAILED/崩溃`（**无假成功**）⇒ `steps_json` 为空，逐步 `redis_degraded` 标记与派发拒绝门**只有单元测试覆盖、缺真机证据**；② 本机无 supervise，**不会自动复活**，恢复需显式重启；
+> **E2E-3** 原地只重启 Redis（pid 29676）后**约 5 秒活 guardian 自愈**（`Redis 降级模式解除…连接已恢复` / `Redis 已恢复（延迟 14.8ms）`），`/api/health` 0.36s 回健康、`/api/status` 回到 **2.07s**；`launcher.py restart` → 16/16，`ui-cc73de7ab8`（伊利 2024）**9 分钟 SUCCESS_WITH_ISSUES/完成**（任务18 落 12 条具名检查并在终态写后保留、任务19 页脚复现）。
+>
+> 证据与逐条偏差：`docs/evidence/20261018-phase3-e2e/README.md`。**已按用户指示推送（见上）；不再动码。**
+>
+> ## 历史账（2026-10-12 · **C5 批：经营判断 × 市场反应（内部研究通路）**，基线 `c85371e`；2026-10-13 已推送 PR #1）
 >
 > **架构师裁决（约束性）**：C4「公开求值／内容身份／保存重开＋真实历史材料回放」**有限认可**、**用户闭环暂不通过**（真实登录本项目 8091 后在 ⑧「取研究主体」被 entity 要求挡住，未走到求值/保存）
 > → 唯一当前 C5：80% 做**可用新功能**（经营判断×市场反应），≤20% 必要**入口/选版接缝**；**不另开 Bug 阶段、不再加离线样品**。
@@ -26,13 +118,18 @@
 > 前端 ⑧ 区新增「市场对照」（三窗口＋并列经营状态＋下一观察）与「沿冻结原判/历史重建」选版；`tsc -b`、`vite build` 通过，`dist/index.html` 改指 `index-C1Nyvpnb.js`／`ResearchStudy-BMnOnlmw.js`（旧 tracked 资产原样保留，纯加法）。
 > 唯一在管的 8091 测试实例已重启加载新码（会话存 SQLite、重启不掉登录）：`/` 200、新 bundle 200、无会话 API 401；未动 8080 或其它任务。
 >
-> **⑦ 如实未达/未验**：**GUI 实机点击复核仍未做**——用户真实浏览器里 `127.0.0.1:8091` 现为**登录页**（`c5_gui_8091_login.png`；DOM 探测 `hasPassword=true, hasPanel=false`），本轮**不代填口令、不索要口令、不借他人会话**；
-> 已在该浏览器打开该页（标签组「C5 研究实验台复核」，由用户决定何时关闭），登录后按 ⑧「取研究主体 → 选主体/run →（可选）市场对照 → 求值/保存」走闭环，届时补记。另：C5 判据修订后**用新口径只读重放旧产物会出现有意差异**（现金卡文案、库存口径），**旧冻结 JSON 未被改写**（`8176dca4ade57ed0…` 不变）。
+> **⑦ 如实未达/未验**：~~GUI 实机点击复核仍未做~~ **已于 10-13 走通（见下）**；C5 判据修订后**用新口径只读重放旧产物会出现有意差异**（现金卡文案、库存口径），**旧冻结 JSON 未被改写**（`8176dca4ade57ed0…` 不变）。
 > 本批必要文件：`web_ui.py`、`financial_analysis/research_experiment.py`、`financial_analysis/continuation.py`、`delivery_pipeline.py`、`research_report_adapter.py`、`frontend/src/pages/ResearchStudy.tsx`、`frontend/dist/*`、
 > `tmp/research-studies/0af20919e6245b88/experiments/80693f9870e8337f394fcf49.{json,md}`、`docs/evidence/20261012-c5-review/`；
 > **已提交并推送（2026-10-13）**：分支 `c5-market-comparison`、commit `19b6654`（110 文件，+19523/−781）→ draft PR [#1](https://github.com/momang85/weavemind/pull/1)（base `main`；PR 合并面 361 文件＝本批 ＋ 此前 25 个未推提交，推送前已向用户说明）。推送走本机 7897 代理（`github.com:443` 直连被重置、SSH 公钥未登记）。
 > 未入库（按确认范围）：`tmp/`、`evals/**/materials/**`、`_trial_*`、`probe_batchA.py`、`trial_tasks.json`、`agents.db`、35 个未跟踪 `docs/*.md`、`webui.*.log`。
 > **10-13 环境实情**：本机临时行情缓存（`%TEMP%\agent_workspace\market_history`）被系统清理 ⇒ `c5_market`/`c5_update` 探针**如实停在 exit 2**（不重算、不覆盖已记录 63/63、39/39）；探针已按此加固并改记**相对路径**；`c5_entry` 在实例重启后复跑仍 **10/10**；8091 实例已重启（单实例）。C4 账见下。
+>
+> **10-13 GUI 真机闭环（用户实验账号登录后走完，证据 `docs/evidence/20261012-c5-review/c5_gui_closure_20261013.json` + 两张截图）**：
+> 登录（HttpOnly 会话 TTL 24h，10-12 那次已过期 ⇒ 401；重登 200）→ ⑦ 选定洋河研究 `0af20919…` → ⑧ 取主体（**C5-1 真机过**：返 `002304.SZ`/`600031.SH`，不再报需要 entity）→ 选 run `370dba92a40e…` → 求值（0/50/100%＝−7.6304/15.1616/37.9536 亿，λ\*=16.7392%）→ 沿冻结原判 `245bcd5e…` 更新（**C5-3 真机过**：披露更新页明写「较早侧照抄冻结页、不由本次重放重建」）→ 保存 → 新实验 `965aee9b5d716d31458695ed`（149,958 B）→ 盘面核对：`based_on.baseline_experiment.experiment_id=245bcd5e…`、**5/5 卡判据 sha256 与冻结基线逐字相同**、三态 `research_draft/unreviewed/外部交付 false` → 重开读回（「已按内容身份读回：245bcd5e56ef…（正文哈希一致 true）」）。
+> 市场对照（C5-2）真机为**如实 pending**：行情集下拉为空（数据集目录被清理），UI 写明「没有选行情数据集…不隐式取数、不拿别的数据集顶替」；三市场窗本轮无法在真机产出。
+> 环境条件（非应用缺陷）：后台标签被 Chrome 冻结（1.5s 定时器 95.9s 未触发、同步 DOM 正常、服务端 curl 直连 0.01s）；窗口切前台后闭环即走通。
+> **新发现（未修，待裁定）**：`GET /api/research-study/studies` 的 20 个研究记录 `subjects` 全空 ⇒ ④「生成 <code> 公司报告」按钮不渲染 ⇒ **GUI 层出内部 ZIP 的入口仍缺**（C4 遗留「实际选版 ZIP 未验证」在 GUI 层成立；adapter 层已由探针 28/28 覆盖）。
 >
 > ## 历史账（2026-10-11 · **C4 批：普通研究页「选研究→挑战判断→新披露更新→保存行动」**，基线 `c85371e`）
 >

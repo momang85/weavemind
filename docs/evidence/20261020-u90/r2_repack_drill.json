@@ -1,0 +1,180 @@
+{
+ "task_a": {
+  "task_id": "ui-cc853cf86b",
+  "adopted_identity": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+  "old_packages": {
+   "deliverables_20261020_184232.zip": "1b8ef9893d4cf8d61cc950661e0160567a2f7f3f8d7cb6900356f3c30cb4b957",
+   "deliverables_20261020_201859_478d5a.zip": "5d7f7bb4035840c8b224639abd4c91ceee49c77a6726ae9b9b3f38f38138206e",
+   "deliverables_20261020_204948_375af7.zip": "c8005aaaa7ca1eaf657c37679ba9bab31b3e02e0edbc818a273f0ad485dfb8e9"
+  },
+  "new_package": "deliverables_20261021_114831_f859f8.zip",
+  "selection_binding": {
+   "present": true,
+   "changed": true,
+   "consistent": true,
+   "from": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9",
+   "to": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+   "verified_by": "run_id_in_body",
+   "reason": "导出快照按当前采纳版本回绑选择身份"
+  }
+ },
+ "task_b": {
+  "task_id": "ui-91677c7767",
+  "adopted_identity": "6d5e46552523d134f350e56e9c5c64f14b593d11986e804e08976facff26a084",
+  "page_md_sha_prefix": "3a0a3163",
+  "export_binding_evidence": "same_as_adopted_body"
+ },
+ "results": [
+  {
+   "check": "A.copy-adopted-identity",
+   "ok": true,
+   "detail": "23b61beeb37a"
+  },
+  {
+   "check": "A.copy-selection-stale-before",
+   "ok": true,
+   "detail": "selection.adopted_identity=d290ab012e54"
+  },
+  {
+   "check": "A.old-zips-present",
+   "ok": true,
+   "detail": "3 个旧包"
+  },
+  {
+   "check": "A.counterexample-visible-in-old-package",
+   "ok": true,
+   "detail": "manifest=23b61beeb37a inner-selection=d290ab012e54"
+  },
+  {
+   "check": "A.stale-selection-package-not-current",
+   "ok": true,
+   "detail": "current='' note=没有任何包与当前采纳稿同版（需重新导出）"
+  },
+  {
+   "check": "A.snapshot-binding-verified",
+   "ok": true,
+   "detail": "evidence=delivery_registry goal='研究三一重工 2023 与 2024 两个年度的营业收入、归母净利润、经' delivered=26207字符"
+  },
+  {
+   "check": "A.export-rebind-changed",
+   "ok": true,
+   "detail": "{\"present\": true, \"changed\": true, \"consistent\": true, \"from\": \"d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9\", \"to\": \"23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a92"
+  },
+  {
+   "check": "A.export-rebind-to-adopted",
+   "ok": true,
+   "detail": "to=23b61beeb37a adopted=23b61beeb37a"
+  },
+  {
+   "check": "A.export-rebind-verified-by",
+   "ok": true,
+   "detail": "run_id_in_body"
+  },
+  {
+   "check": "A.new-package-created",
+   "ok": true,
+   "detail": "['deliverables_20261021_114831_f859f8.zip']"
+  },
+  {
+   "check": "A.manifest-identity-eq-adopted",
+   "ok": true,
+   "detail": "23b61beeb37a vs 23b61beeb37a"
+  },
+  {
+   "check": "A.manifest-selection-eq-adopted",
+   "ok": true,
+   "detail": "23b61beeb37a"
+  },
+  {
+   "check": "A.inner-selection-eq-adopted",
+   "ok": true,
+   "detail": "23b61beeb37a"
+  },
+  {
+   "check": "A.manifest-carries-binding-verdict",
+   "ok": true,
+   "detail": "{\"present\": true, \"changed\": true, \"consistent\": true, \"from\": \"d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9\", \"to\": \"23b61beeb37a719b4b13ff"
+  },
+  {
+   "check": "A.per-member-hash-eq-manifest",
+   "ok": true,
+   "detail": "22 成员一致；异常=[]"
+  },
+  {
+   "check": "A.inner-md-eq-frozen-body",
+   "ok": true,
+   "detail": "56700B"
+  },
+  {
+   "check": "A.pdf-member-present",
+   "ok": true,
+   "detail": "['reports/report.pdf'] pdf_sha256=bab6a95982d0"
+  },
+  {
+   "check": "A.new-package-current",
+   "ok": true,
+   "detail": "current"
+  },
+  {
+   "check": "A.old-counterexample-package-now-historical",
+   "ok": true,
+   "detail": "deliverables_20261020_204948_375af7.zip: historical —— manifest 同版但包内 selection 旧，不再当当前包"
+  },
+  {
+   "check": "A.no-unknown-packages",
+   "ok": true,
+   "detail": "{'deliverables_20261020_184232.zip': 'historical', 'deliverables_20261020_201859_478d5a.zip': 'historical', 'deliverables_20261020_204948_375af7.zip': 'historical', 'deliverables_20261021_114831_f859f8.zip': 'current'}"
+  },
+  {
+   "check": "A.old-zips-byte-identical",
+   "ok": true,
+   "detail": "3 个旧包逐一对比（含演练后新增包，无一删除/改写）"
+  },
+  {
+   "check": "A.page-current-not-lagging",
+   "ok": true,
+   "detail": "current=deliverables_20261021_114831_f859f8.zip"
+  },
+  {
+   "check": "B.copy-adopted-identity",
+   "ok": true,
+   "detail": "6d5e46552523"
+  },
+  {
+   "check": "B.page-md-differs-from-adopted",
+   "ok": true,
+   "detail": "实测反例：页面下载 MD 与采纳版正文不同源（包内旧 MD=磁盘 f11adbec… 也不等于采纳版）"
+  },
+  {
+   "check": "B.restore-adopts-version-store-body",
+   "ok": true,
+   "detail": "out=6620B"
+  },
+  {
+   "check": "B.projection-eq-adopted-body",
+   "ok": true,
+   "detail": "proj=6620B adopted=6620B"
+  },
+  {
+   "check": "B.projection-status-still-failed",
+   "ok": true,
+   "detail": "status=FAILED"
+  },
+  {
+   "check": "B.export-binding-verified",
+   "ok": true,
+   "detail": "页面正文=采纳版正文 → 受保护读取通过"
+  },
+  {
+   "check": "B.repack-current-after-restore",
+   "ok": true,
+   "detail": "current=['deliverables_20261021_114833_093936.zip'] all={'deliverables_20261020_212027.zip': 'historical', 'deliverables_20261021_114833_093936.zip': 'current'}（旧包 historical，恢复后的采纳正文可直接导出成同版包）"
+  },
+  {
+   "check": "B.old-packages-untouched",
+   "ok": true,
+   "detail": "2 个旧包逐一对比（无一删除/改写）"
+  }
+ ],
+ "tmp": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\wm_r2_repack_ilhab9kz"
+}

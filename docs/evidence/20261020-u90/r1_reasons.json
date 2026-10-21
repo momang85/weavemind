@@ -1,0 +1,178 @@
+{
+ "ui-cc853cf86b": {
+  "plan_source": "stored",
+  "row_status": "SUCCESS_WITH_ISSUES",
+  "steps": [
+   {
+    "step_id": "1",
+    "capability": "web_search",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "指令与当前计划不一致",
+    "stored_instruction_head": "[检索查询] 三一重工（600031.SH） 2023年年度报告 营业收入 归母净利润 经营活动现金流净额\n[检索查询] 三一重工（600031.SH） 2024年年度报告 营业收入 归母净利润 经营活动现金流净额\n检索",
+    "plan_instruction_head": "[检索查询] 三一重工（600031.SH） 2023年年度报告 营业收入 归母净利润 经营活动现金流净额\n[检索查询] 三一重工（600031.SH） 2024年年度报告 营业收入 归母净利润 经营活动现金流净额\n检索",
+    "stored_contract_fp": "744601b58b7fbffc",
+    "current_contract_fp": "744601b58b7fbffc",
+    "stored_depends_on": [],
+    "plan_depends_on": []
+   },
+   {
+    "step_id": "2",
+    "capability": "web_fetch",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "执行契约指纹不一致（或落库步骤没有契约身份）",
+    "stored_instruction_head": "任务目标：研究三一重工 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。阅读重点：投研视角",
+    "plan_instruction_head": "从上游搜索结果中选取与 三一重工（600031.SH） 契约期间匹配的**发行人年度报告/公告正文页**（经营情况讨论与分析、管理层讨论、经营回顾），抓取完整正文并保留小节标题、原始 URL 与全部数字（年份、金额、币种",
+    "stored_contract_fp": "",
+    "current_contract_fp": "744601b58b7fbffc",
+    "stored_depends_on": [
+     "1"
+    ],
+    "plan_depends_on": [
+     "1"
+    ]
+   },
+   {
+    "step_id": "3",
+    "capability": "content_summary",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "指令与当前计划不一致",
+    "stored_instruction_head": "任务目标：研究三一重工 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。阅读重点：投研视角",
+    "plan_instruction_head": "只解释本次**已选定的事实**：按注入的[已选事实]块逐项说明指标含义、期间变化与同比，并给出盈利质量（净利率）与现金流质量（经营现金流对净利润的覆盖）的读数。块内列出的缺口要如实写出来源不足的部分，不得引入块外数字，不",
+    "stored_contract_fp": "744601b58b7fbffc",
+    "current_contract_fp": "744601b58b7fbffc",
+    "stored_depends_on": [
+     "1",
+     "2",
+     "2b",
+     "3a"
+    ],
+    "plan_depends_on": [
+     "1",
+     "2",
+     "2b",
+     "3a"
+    ]
+   },
+   {
+    "step_id": "3a",
+    "capability": "data_analyzer",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "指令与当前计划不一致",
+    "stored_instruction_head": "任务目标：研究三一重工 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。阅读重点：投研视角",
+    "plan_instruction_head": "对 三一重工（600031.SH） 的已选定事实做**注册模型分析**（冻结数据集→适用模型→分析卡）：利润桥、现金质量、营运资金、条件情景；模型不适用或缺输入必须如实标注理由，不得凑数、不得引入事实块外的数字。研究契约",
+    "stored_contract_fp": "744601b58b7fbffc",
+    "current_contract_fp": "744601b58b7fbffc",
+    "stored_depends_on": [
+     "1",
+     "2",
+     "2b"
+    ],
+    "plan_depends_on": [
+     "1",
+     "2",
+     "2b"
+    ]
+   },
+   {
+    "step_id": "4",
+    "capability": "report_generator",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "指令与当前计划不一致",
+    "stored_instruction_head": "任务目标：研究三一重工 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。阅读重点：投研视角",
+    "plan_instruction_head": "生成 三一重工 研究报告，按[报告内容要求]的骨架写全：①关键数据一览表（指标×期间×同比×口径×来源，覆盖全部必需指标与系统给出的派生指标）；②逐项同比解读；③盈利质量（净利率/毛利率）；④现金流质量（经营现金流对净利",
+    "stored_contract_fp": "744601b58b7fbffc",
+    "current_contract_fp": "744601b58b7fbffc",
+    "stored_depends_on": [
+     "1",
+     "2",
+     "2b",
+     "3",
+     "3a"
+    ],
+    "plan_depends_on": [
+     "1",
+     "2",
+     "2b",
+     "3",
+     "3a"
+    ]
+   },
+   {
+    "step_id": "package-7",
+    "capability": "package",
+    "in_current_plan": false
+   }
+  ]
+ },
+ "ui-91677c7767": {
+  "plan_source": "stored",
+  "row_status": "SUCCESS_WITH_ISSUES",
+  "steps": [
+   {
+    "step_id": "1",
+    "capability": "web_search",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "执行契约指纹不一致（或落库步骤没有契约身份）",
+    "stored_instruction_head": "任务目标：研究洋河股份2024年度营业收入与归母净利润（合并报表口径，数据截至2025-04-30）。每个数字标注来源与采集时间；缺证据如实标缺口。投研视角。\n\n用户目标：研究洋河股份2024年度营业收入与归母净利润（合",
+    "plan_instruction_head": "[检索查询] 洋河股份（002304.SZ） 2024年年度报告 营业收入 归母净利润 经营活动现金流净额\n检索 洋河股份（002304.SZ） 的年度报告与财务数据的权威来源（优先公司公告/交易所/官方年报）；至少一条",
+    "stored_contract_fp": "",
+    "current_contract_fp": "0dbfcc387a3e27d5",
+    "stored_depends_on": [],
+    "plan_depends_on": []
+   },
+   {
+    "step_id": "2",
+    "capability": "file_io",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "执行契约指纹不一致（或落库步骤没有契约身份）",
+    "stored_instruction_head": "任务目标：研究洋河股份2024年度营业收入与归母净利润（合并报表口径，数据截至2025-04-30）。每个数字标注来源与采集时间；缺证据如实标缺口。投研视角。\n\n用户目标：研究洋河股份2024年度营业收入与归母净利润（合",
+    "plan_instruction_head": "从上游搜索结果中选取与 洋河股份（002304.SZ） 契约期间匹配的**发行人年度报告/公告正文页**（经营情况讨论与分析、管理层讨论、经营回顾），抓取完整正文并保留小节标题、原始 URL 与全部数字（年份、金额、币种",
+    "stored_contract_fp": "",
+    "current_contract_fp": "0dbfcc387a3e27d5",
+    "stored_depends_on": [],
+    "plan_depends_on": [
+     "1"
+    ]
+   },
+   {
+    "step_id": "4",
+    "capability": "content_summary",
+    "in_current_plan": true,
+    "identity_ok": false,
+    "identity_why": "执行契约指纹不一致（或落库步骤没有契约身份）",
+    "stored_instruction_head": "任务目标：研究洋河股份2024年度营业收入与归母净利润（合并报表口径，数据截至2025-04-30）。每个数字标注来源与采集时间；缺证据如实标缺口。投研视角。\n\n用户目标：研究洋河股份2024年度营业收入与归母净利润（合",
+    "plan_instruction_head": "生成 洋河股份 研究报告，按[报告内容要求]的骨架写全：①关键数据一览表（指标×期间×同比×口径×来源，覆盖全部必需指标与系统给出的派生指标）；②逐项同比解读；③盈利质量（净利率/毛利率）；④现金流质量（经营现金流对净利",
+    "stored_contract_fp": "",
+    "current_contract_fp": "0dbfcc387a3e27d5",
+    "stored_depends_on": [
+     "2",
+     "3"
+    ],
+    "plan_depends_on": [
+     "1",
+     "2",
+     "2b",
+     "3",
+     "3a"
+    ]
+   },
+   {
+    "step_id": "5",
+    "capability": "report_generator",
+    "in_current_plan": false
+   },
+   {
+    "step_id": "package-6",
+    "capability": "package",
+    "in_current_plan": false
+   }
+  ]
+ }
+}

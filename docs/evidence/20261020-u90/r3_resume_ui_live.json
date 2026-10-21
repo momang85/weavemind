@@ -1,0 +1,74 @@
+{
+  "batch": "U90-R3",
+  "title": "恢复失败后的重试和挂起：真实页面证据（同一标签页，不重开）",
+  "date": "2026-10-21",
+  "session": "u90-usability",
+  "tab": "http://localhost:8080/history （同一标签页内完成全部点击，未重开标签页）",
+  "build_under_test": {
+    "web_ui.py": "本机源码（手工 `python web_ui.py` 启动，加载 R3 后代码）",
+    "frontend_dist": "frontend/dist（npm run build 后，History-Cjoi_kr3.js / resume-Dvei4s5v.js 为 R3 产物）"
+  },
+  "legs": [
+    {
+      "name": "A. 503 失败 → 说明可见 → 同一页面再点即重发（失败可再次操作）",
+      "task": "sched-54e282621b（daily-report，FAILED，历史任务）",
+      "redis": "down（未启动）",
+      "observed": {
+        "click_1": "POST /api/task/sched-54e282621b/resume → 503",
+        "response_body": {"error": "Redis 未连接，无法恢复任务；稍后可再试", "status": "FAILED", "retryable": true},
+        "button_after_failure": {"text": "重试继续执行", "disabled": false},
+        "note_visible": "Redis 未连接，无法恢复任务；稍后可再试",
+        "click_2": "POST /api/task/sched-54e282621b/resume → 503（确实第二次发出请求）",
+        "network_evidence": [
+          {"requestId": "34280.68", "method": "POST", "url": "/api/task/sched-54e282621b/resume", "status": 503},
+          {"requestId": "34280.69", "method": "POST", "url": "/api/task/sched-54e282621b/resume", "status": 503}
+        ],
+        "verdict": "PASS——旧实现把失败文案写进 resumeNote 并 `disabled={!!resumeNote[tid]}`，失败后按钮永久失效；现在失败可见且可再点"
+      },
+      "screenshot": "r3_ui_retry_after_503.png"
+    },
+    {
+      "name": "B. 成功回执（真实网页、真实 200、无新增付费调用）",
+      "task": "ui-r3-live（本次为验证**新建**的合成 FAILED 任务，验证后已删除）",
+      "setup": {
+        "redis": "本机便携 Redis（launcher._start_own_redis(6379)）",
+        "orchestrator": "未启动（停止状态：本批要求零新增付费模型调用，恢复只验证到「收到 200 回执 + 状态翻转」为止）",
+        "webui": "手工 `python web_ui.py`（8080）"
+      },
+      "observed": {
+        "click": "POST /api/task/ui-r3-live/resume → 200",
+        "response_body": {"status": "ok", "task_id": "ui-r3-live", "note": "已请求恢复；编排器将按持久化步骤状态续跑（跳过已成功步骤，只跑未完步骤）"},
+        "db_after": {"status": "RUNNING", "phase": "恢复执行"},
+        "ui_after": "该行刷新后不再显示恢复按钮（resume.available=false，RUNNING 不是可恢复态）",
+        "cleanup": "task_state.mark_resume_undone('ui-r3-live') → FAILED（phase=恢复未生效），随后删除该合成行（剩余 0 行）",
+        "verdict": "PASS——真实页面拿到 200 回执与状态翻转；旧任务与包未被改动"
+      }
+    },
+    {
+      "name": "C. 挂起超时 → 先查真实任务状态再裁决（页面状态层 + 后端）",
+      "kind": "自动化（前端页面调用状态层 frontend/tests/resume.test.mjs 6 例 + 后端 test_task26_checkpointer 4 例）",
+      "observed": {
+        "frontend": [
+          "POST 有界超时（AbortController，默认 10s）后先 GET /task/<id> 查询真实状态：RUNNING → 按成功回执（不会重复恢复）；仍 FAILED → 明确「可重试」；查不到 → 如实「未能确认」且仍可重试"
+        ],
+        "backend": [
+          "resume 发布失败时回滚 RUNNING → FAILED（CAS 只回滚本次恢复写的 phase='恢复执行'），回执 retryable=true，用户可再点；若已接管则拒绝回滚并提示先刷新",
+          "409/503 回执带 status/retryable/resumed，页面据此决定按钮可用性"
+        ]
+      },
+      "verdict": "PASS（超时+发布失败路径为受控替身验证；未在真实页面制造挂起，故未在真机复现超时提示）"
+    }
+  ],
+  "files_changed": [
+    "frontend/src/lib/resume.ts",
+    "frontend/src/pages/History.tsx",
+    "frontend/src/pages/TaskConsole.tsx",
+    "frontend/src/components/console/ConsoleSideTabs.tsx",
+    "web_ui.py",
+    "task_state.py",
+    "frontend/tests/resume.test.mjs",
+    "test_task26_checkpointer.py",
+    "test_frontend_guards.py"
+  ],
+  "cost": "0（本腿无任何模型调用；未启动编排器/worker）"
+}

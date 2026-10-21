@@ -1,0 +1,320 @@
+{
+ "label": "开工前基线",
+ "at": "2026-10-21 13:32:13",
+ "zip_count": 17,
+ "pdf_count": 34,
+ "task_count": 565,
+ "task_table_sha256": "06a4c685b6a541258fb8a0360e750f62543e6d28c975b49843f034012e6d4807",
+ "zips": [
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-10ea37599d\\deliverables_20261020_180828_e1871e.zip",
+   "bytes": 5742597,
+   "mtime": "2026-10-20 18:08:28",
+   "sha256": "323ef1de68d82a535d1c9fd71f6148e7689c1c0c700f11341d45962d73872840"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-1c42195dae\\deliverables_20261019_163107.zip",
+   "bytes": 400940,
+   "mtime": "2026-10-19 16:31:07",
+   "sha256": "9d055ccae2ed20bba78009c0dce3333941f3252860b6039d2e3ced6822d843c7"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-1c42195dae\\deliverables_20261019_165652_98b2cf.zip",
+   "bytes": 5302956,
+   "mtime": "2026-10-19 16:56:52",
+   "sha256": "c9530b5db6d4bebe30f78dfdc7ae3a50a71dac0fd68b0f53d0b4b13adfa24381"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-1e959ed373\\deliverables_20261018_142501.zip",
+   "bytes": 3237345,
+   "mtime": "2026-10-18 14:25:01",
+   "sha256": "6afb39837b6faa66129f2834fc66d9704aee2d3ae459a73d7c344c6a62721776"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-91677c7767\\deliverables_20261020_212027.zip",
+   "bytes": 483290,
+   "mtime": "2026-10-20 21:20:28",
+   "sha256": "cedec8fb0af0263a6a2745c27b293ee0dad778b6545afaadeca8506be70acc2c"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b\\deliverables_20261020_184232.zip",
+   "bytes": 140297,
+   "mtime": "2026-10-20 18:42:32",
+   "sha256": "1b8ef9893d4cf8d61cc950661e0160567a2f7f3f8d7cb6900356f3c30cb4b957"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b\\deliverables_20261020_201859_478d5a.zip",
+   "bytes": 5545517,
+   "mtime": "2026-10-20 20:18:59",
+   "sha256": "5d7f7bb4035840c8b224639abd4c91ceee49c77a6726ae9b9b3f38f38138206e"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b\\deliverables_20261020_204948_375af7.zip",
+   "bytes": 5717706,
+   "mtime": "2026-10-20 20:49:48",
+   "sha256": "c8005aaaa7ca1eaf657c37679ba9bab31b3e02e0edbc818a273f0ad485dfb8e9"
+  },
+  {
+   "path": "docs\\evidence\\20261006-sany-replication\\package\\deliverables_20261006_220840_11c5e2.zip",
+   "bytes": 5637983,
+   "mtime": "2026-10-06 22:08:40",
+   "sha256": "555ac6a72e3347693507535ab23100905cd4af273f69d8edefadac77942eaea8"
+  },
+  {
+   "path": "docs\\evidence\\20261007-sany-direction\\package\\deliverables_20261007_010456_17def8.zip",
+   "bytes": 5638614,
+   "mtime": "2026-10-07 01:04:56",
+   "sha256": "02eeaf139957ee2275635d3a6ee7c6bfde9a23aa8c6062c936f98b0feade300e"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\deliverables_20261020_180828_e1871e.zip",
+   "bytes": 5742597,
+   "mtime": "2026-10-20 18:15:21",
+   "sha256": "323ef1de68d82a535d1c9fd71f6148e7689c1c0c700f11341d45962d73872840"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\deliverables_20261020_201859_478d5a.zip",
+   "bytes": 5545517,
+   "mtime": "2026-10-20 20:27:36",
+   "sha256": "5d7f7bb4035840c8b224639abd4c91ceee49c77a6726ae9b9b3f38f38138206e"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\pack-2069a73b.zip",
+   "bytes": 5717706,
+   "mtime": "2026-10-20 20:55:55",
+   "sha256": "c8005aaaa7ca1eaf657c37679ba9bab31b3e02e0edbc818a273f0ad485dfb8e9"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\ui-91677c7767-resumed.zip",
+   "bytes": 483290,
+   "mtime": "2026-10-20 22:10:23",
+   "sha256": "cedec8fb0af0263a6a2745c27b293ee0dad778b6545afaadeca8506be70acc2c"
+  },
+  {
+   "path": "docs\\evidence\\v0_yanghe_normal_task\\package\\deliverables_20261001_234124_f898a8.zip",
+   "bytes": 5648508,
+   "mtime": "2026-10-01 23:41:24",
+   "sha256": "766d908ac70ecb9e5c6978aab6500d3515a13b6ca8361dbdbc62a5ecb1094904"
+  },
+  {
+   "path": "docs\\evidence\\x0_sany_normal_task\\package\\deliverables_20261001_234139_303998.zip",
+   "bytes": 5626429,
+   "mtime": "2026-10-01 23:41:39",
+   "sha256": "d340ab6041ce119a9fe5880afcc64443ddd3a9d9c42e02601f4bb62060c58cfa"
+  },
+  {
+   "path": "docs\\evidence\\x1_yanghe_continuation_task\\package\\deliverables_20261001_234042_639f88.zip",
+   "bytes": 5654231,
+   "mtime": "2026-10-01 23:40:42",
+   "sha256": "c33b58616127fc9d07f63dc6ef53bffd631135cc010f3b658e8e266990b82a6c"
+  }
+ ],
+ "pdfs": [
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-10ea37599d\\reports\\report.pdf",
+   "bytes": 5511377,
+   "mtime": "2026-10-20 18:08:28",
+   "sha256": "80ea23f197b5041bc524d567b1435d66caaefdb1fe7a297a2e4de75ca13fe94a"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-1c42195dae\\reports\\report.pdf",
+   "bytes": 5378577,
+   "mtime": "2026-10-19 16:56:52",
+   "sha256": "7690bfcd989d21218548e09f387bd66af6bd34778cd49bd92d0400d6cf6b17d1"
+  },
+  {
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b\\reports\\report.pdf",
+   "bytes": 5579127,
+   "mtime": "2026-10-20 20:49:48",
+   "sha256": "bab6a95982d0b7581693e3ccba070a0809bc851fb68e6d3632f3ef7567815988"
+  },
+  {
+   "path": "docs\\evidence\\20260915_live\\task-C-export.pdf",
+   "bytes": 5274162,
+   "mtime": "2026-09-15 19:24:51",
+   "sha256": "319d8ec1b83436d2295c2bfef176f21db056c5a8610cd524b87e5bb7a00ebadf"
+  },
+  {
+   "path": "docs\\evidence\\20261002-e2e-current-package-report.pdf",
+   "bytes": 5424558,
+   "mtime": "2026-10-02 00:20:24",
+   "sha256": "dcf65f89ca88ba87fcada8f854e0b90015f4d70ade3f5b71e5831509e3f9cce0"
+  },
+  {
+   "path": "docs\\evidence\\20261006-normal-entry\\deliverables_20261006_231822_08a4e6.pdf",
+   "bytes": 5536907,
+   "mtime": "2026-10-06 23:24:16",
+   "sha256": "e648bab61bacad81c1b898b113510b5f8eaa367df855c4038e12e15ef7e94644"
+  },
+  {
+   "path": "docs\\evidence\\20261006-sany-replication\\report.pdf",
+   "bytes": 5519713,
+   "mtime": "2026-10-06 22:08:40",
+   "sha256": "3a2191aee25878b6ceaffbff53b39939f517612fb3c306803e815199f95950ec"
+  },
+  {
+   "path": "docs\\evidence\\20261007-followup-review\\report.pdf",
+   "bytes": 5543828,
+   "mtime": "2026-10-07 09:06:47",
+   "sha256": "ee52ec1a4d16e3a2d3e9574ff7210a3f775b3dc07825cc4c8357ae47612c464c"
+  },
+  {
+   "path": "docs\\evidence\\20261007-sany-direction\\report.pdf",
+   "bytes": 5521382,
+   "mtime": "2026-10-07 01:04:55",
+   "sha256": "9860ffd473224be6c4898a7b29cd26c02ba4c0aa5f405517aa929bb22c0e7d56"
+  },
+  {
+   "path": "docs\\evidence\\20261007-stage-next-review\\report.pdf",
+   "bytes": 5529394,
+   "mtime": "2026-10-07 21:39:41",
+   "sha256": "dd422cdbbfd968f9797e13b65922781e4467ad2059930a2c5b78b2bf55428e9b"
+  },
+  {
+   "path": "docs\\evidence\\20261007b-sample\\report.pdf",
+   "bytes": 5550668,
+   "mtime": "2026-10-07 09:54:24",
+   "sha256": "1fc91d4412e405545f2c8cadeca6352c23dfdae7960db7a2584373f0ec32ce42"
+  },
+  {
+   "path": "docs\\evidence\\20261007c-sample\\report.pdf",
+   "bytes": 5529394,
+   "mtime": "2026-10-07 11:18:32",
+   "sha256": "dd422cdbbfd968f9797e13b65922781e4467ad2059930a2c5b78b2bf55428e9b"
+  },
+  {
+   "path": "docs\\evidence\\20261008-architect-next-stage\\report.pdf",
+   "bytes": 5536686,
+   "mtime": "2026-10-08 10:10:03",
+   "sha256": "44e9a6996513de5d96e47900b6f857914619a3940bbcbdccdcc1e998252b8a76"
+  },
+  {
+   "path": "docs\\evidence\\20261008-continuous-research\\report.pdf",
+   "bytes": 5536686,
+   "mtime": "2026-10-07 22:52:17",
+   "sha256": "44e9a6996513de5d96e47900b6f857914619a3940bbcbdccdcc1e998252b8a76"
+  },
+  {
+   "path": "docs\\evidence\\20261008-resilience-cash-pressure\\report.pdf",
+   "bytes": 5544314,
+   "mtime": "2026-10-08 12:24:20",
+   "sha256": "ce1104dda57171df4930ad06d22e22f7f5828ef907ba14ed12b472db1f3a199b"
+  },
+  {
+   "path": "docs\\evidence\\20261011-b4-c3-review\\c3_action_page.pdf",
+   "bytes": 5311261,
+   "mtime": "2026-10-11 18:42:03",
+   "sha256": "96901cb64e265b113b1c40c84ee60c64acaeece5fa821f99e2b8b51b94130b5c"
+  },
+  {
+   "path": "docs\\evidence\\20261011-c2c-accept\\downloaded-report.pdf",
+   "bytes": 5364562,
+   "mtime": "2026-10-11 14:43:48",
+   "sha256": "7dea30b4eed91c84ed298ff74c3bb7a05a0d5b499119d71175906354c38efceb"
+  },
+  {
+   "path": "docs\\evidence\\20261011-c2d-accept\\reviewed-report.pdf",
+   "bytes": 5375414,
+   "mtime": "2026-10-11 16:40:07",
+   "sha256": "94c5632e9759905e5aa99ef34eac090a6ad4de96b9c290f19dc3404e42478181"
+  },
+  {
+   "path": "docs\\evidence\\20261011-c2e-accept\\sany-report.pdf",
+   "bytes": 5332597,
+   "mtime": "2026-10-11 17:50:20",
+   "sha256": "14b8b7e1497e8b1266fe51678304782f2382358287c048a267943a500a3e6f39"
+  },
+  {
+   "path": "docs\\evidence\\20261011-c2e-accept\\yanghe-report.pdf",
+   "bytes": 5376744,
+   "mtime": "2026-10-11 17:50:20",
+   "sha256": "6161ae176d36eecbd2d857b74eef87e56815e2ee51a155241aa5e62241a42c02"
+  },
+  {
+   "path": "docs\\evidence\\20261011-c3-accept\\sany-report.pdf",
+   "bytes": 5344991,
+   "mtime": "2026-10-11 19:19:03",
+   "sha256": "107a846b2791599ce83ef00dae2a6059b55c28954e1339077771116ff20c7628"
+  },
+  {
+   "path": "docs\\evidence\\20261011-c3-accept\\yanghe-report.pdf",
+   "bytes": 5428111,
+   "mtime": "2026-10-11 19:19:30",
+   "sha256": "feaac8eedafafd62e14ae66cc7e1463fe0f0dde5c547d04f94a373eb01f06622"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\ui-10ea37599d.pdf",
+   "bytes": 5519744,
+   "mtime": "2026-10-20 18:15:21",
+   "sha256": "e42f39398be92512d7dd33cdc3af298d246f0b97fb3bd14fc18cdab6b213e9de"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\ui-91677c7767-resumed.pdf",
+   "bytes": 5472086,
+   "mtime": "2026-10-20 22:10:30",
+   "sha256": "732c1cee0faf32ea8d20cb686f22ad48f4fb8c19ab7a0fae9f97e2c77d342078"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\ui-cc853cf86b-v2.pdf",
+   "bytes": 5625071,
+   "mtime": "2026-10-20 20:55:44",
+   "sha256": "10501cb4264581cfec1ea6e40cb14a9a6fab06b6746c1d1087824a970a76ac35"
+  },
+  {
+   "path": "docs\\evidence\\20261020-u90\\downloads\\ui-cc853cf86b.pdf",
+   "bytes": 5375952,
+   "mtime": "2026-10-20 20:27:36",
+   "sha256": "7381825aef6e69c05e6bf5c09cdc3d5af460fef099e7ce2f758586952c4ebfce"
+  },
+  {
+   "path": "docs\\evidence\\v0_yanghe_normal_task\\report.pdf",
+   "bytes": 5610322,
+   "mtime": "2026-10-01 23:41:23",
+   "sha256": "8cecdadc4913fcf379c7708ebfa69f9d1ba3c9a65f561ac7e484ea3fe7eb9071"
+  },
+  {
+   "path": "docs\\evidence\\v2_page_export\\report.pdf",
+   "bytes": 5362777,
+   "mtime": "2026-10-01 18:50:25",
+   "sha256": "2d1560367645723c6af57361d4a593cc500d1a1f38d2b107419cff33c98c1ad8"
+  },
+  {
+   "path": "docs\\evidence\\w1_two_scenarios\\report_A.pdf",
+   "bytes": 5412250,
+   "mtime": "2026-10-01 20:26:45",
+   "sha256": "ddb09a8e8f6d2af978c74d8ce04eecc597c84f5fb3203823939b4097c24ea6f6"
+  },
+  {
+   "path": "docs\\evidence\\w1_two_scenarios\\report_B.pdf",
+   "bytes": 5412326,
+   "mtime": "2026-10-01 20:26:51",
+   "sha256": "85bedbbbd3a097e8be3ed310870d18882aedd3a28be1ecf501bb6cc2a390539d"
+  },
+  {
+   "path": "docs\\evidence\\x0_sany_normal_task\\report.pdf",
+   "bytes": 5583448,
+   "mtime": "2026-10-01 23:41:39",
+   "sha256": "358da731a1f8634a5a1f145a7a150dfb589a0aacb180572b1c615e21a5f90d57"
+  },
+  {
+   "path": "docs\\evidence\\x1_yanghe_continuation_task\\report.pdf",
+   "bytes": 5623257,
+   "mtime": "2026-10-01 23:40:42",
+   "sha256": "f57e0d3559c07d06510b8c0322c29c16ab8abfa0ead46da16ed07fd866eac00e"
+  },
+  {
+   "path": "docs\\evidence\\y2_main_body_compaction_e2e_report_page.pdf",
+   "bytes": 880848,
+   "mtime": "2026-10-06 16:07:03",
+   "sha256": "0bdd211822a24b742f1224a2c003a3092e7dbd879de2f33cc10cab0c88acf019"
+  },
+  {
+   "path": "docs\\evidence\\y2_main_body_compaction_e2e_results_page.pdf",
+   "bytes": 834642,
+   "mtime": "2026-10-06 16:06:11",
+   "sha256": "b4afdbb1eeae41d8e9ca4819a1e5f0bccc6fdeb74cba26358e47be2a1370883c"
+  }
+ ],
+ "zips_sha256": "3ca5645e067dc4e6bf1a603633e8d3485e4c6a07417482e5bb1db42be572252f",
+ "pdfs_sha256": "66f8600c5f0269a7653ed8f49a2c40d6f751efbc6baa8b40f93a37b90303977b"
+}

@@ -1,0 +1,235 @@
+{
+ "delivery_source_statement_tail": "参考来源\n1. [东方财富数据中心（A股）](https://datacenter-web.eastmoney.com/api/data/v1/get?sortColumns=REPORT_DATE&sortTypes=-1&pageSize=200&pageNumber=1&reportName=RPT_F10_FINANCE_MAINFINADATA&columns=ALL&filter=%28SECURITY_CODE%3D%22002304%22%29)\n   - 来源类型：第三方数据/媒体\n   - 用于：财务事实、正文引用\n2. [2024年年度报告](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF)\n   - 来源类型：发行人年报/官方披露\n   - 用于：业务背景、变化解释、财务附注、风险因素、",
+ "materials_index": [
+  {
+   "material_id": "f42e747c73850b59",
+   "channel": "web_link",
+   "channel_label": "网页提交的披露直链（由服务取件）",
+   "kind": "pdf",
+   "kind_label": "PDF",
+   "title": "2024年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+   "filename": "",
+   "bytes": 4699879,
+   "raw_sha256": "436928c6acaac79332794412514d191c7e60451e2c093e91a954aebfbde379a2",
+   "text_sha256": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0",
+   "status": "admitted",
+   "reason": "",
+   "source_class": "official_disclosure",
+   "provenance": "official_discovery",
+   "provenance_label": "官方公告发现（自动，参数契约可查）",
+   "rules_version": "adm-2/f3a-1",
+   "retrieved_at": "2026-10-21T14:42:07",
+   "created_at": "2026-10-21T14:42:01",
+   "updated_at": "2026-10-21T14:42:07",
+   "attached": false,
+   "period": "2024",
+   "doc_type": "年度报告",
+   "disclosure_date": "2025-04-29",
+   "date_precision": "day",
+   "date_basis": "source_url_format",
+   "metric_states": {
+    "revenue": {
+     "state": "present_in_scope",
+     "label": "材料范围内已定位到承载小节",
+     "matched": "",
+     "section_count": 12
+    },
+    "net_profit": {
+     "state": "present_in_scope",
+     "label": "材料范围内已定位到承载小节",
+     "matched": "",
+     "section_count": 17
+    },
+    "operating_cashflow": {
+     "state": "present_in_scope",
+     "label": "材料范围内已定位到承载小节",
+     "matched": "",
+     "section_count": 24
+    }
+   },
+   "read_scope": {
+    "text_chars": 177582,
+    "parsed_ranges": [
+     [
+      112,
+      2927
+     ],
+     [
+      44248,
+      45682
+     ],
+     [
+      71117,
+      73671
+     ],
+     [
+      144896,
+      145463
+     ]
+    ],
+    "unparsed_ranges": [
+     [
+      0,
+      112
+     ],
+     [
+      2927,
+      44248
+     ],
+     [
+      45682,
+      71117
+     ],
+     [
+      73671,
+      144896
+     ],
+     [
+      145463,
+      177582
+     ]
+    ],
+    "truncated": false,
+    "truncation_reason": ""
+   },
+   "evidence_count": 8,
+   "section_count": 1151,
+   "parse": {
+    "parser": "pypdf",
+    "kind": "pdf",
+    "location_kind": "page",
+    "pages": 173,
+    "truncated": false,
+    "truncation_reason": "",
+    "chars": 179511,
+    "content_type": "application/pdf"
+   }
+  }
+ ],
+ "material_meta": {
+  "material_id": "f42e747c73850b59",
+  "kind": "pdf",
+  "status": "admitted",
+  "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+  "title": "2024年年度报告",
+  "raw_sha256": "436928c6acaac79332794412514d191c7e60451e2c093e91a954aebfbde379a2",
+  "bytes": 4699879,
+  "periods": [
+   2023,
+   2024
+  ]
+ },
+ "official_discovery": {
+  "status": "admitted",
+  "reason_code": "",
+  "reason": "",
+  "next_steps": [],
+  "contract": {
+   "company": "洋河股份",
+   "company_code": "002304.SZ",
+   "periods": [
+    2023,
+    2024
+   ],
+   "as_of": "2025-04-30",
+   "source": "stored"
+  },
+  "candidates": [
+   {
+    "title": "2024年年度报告",
+    "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+    "period": "2024",
+    "version": "original",
+    "is_summary": false,
+    "disclosed_at": "2025-04-29",
+    "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；正文"
+   },
+   {
+    "title": "2024年年度报告摘要",
+    "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370541.PDF",
+    "period": "2024",
+    "version": "original",
+    "is_summary": true,
+    "disclosed_at": "2025-04-29",
+    "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；摘要（正文另有文件）"
+   },
+   {
+    "title": "2023年年度报告",
+    "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+    "period": "2023",
+    "version": "original",
+    "is_summary": false,
+    "disclosed_at": "2024-04-27",
+    "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；正文"
+   },
+   {
+    "title": "2023年年度报告摘要",
+    "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873250.PDF",
+    "period": "2023",
+    "version": "original",
+    "is_summary": true,
+    "disclosed_at": "2024-04-27",
+    "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；摘要（正文另有文件）"
+   }
+  ],
+  "material": {
+   "ok": true,
+   "material_id": "f42e747c73850b59",
+   "duplicate": false,
+   "error": ""
+  },
+  "admit": {
+   "ok": true,
+   "status": "admitted",
+   "reason": "",
+   "detail": "",
+   "cutoff": {
+    "disclosed_at": "2025-04-29",
+    "precision": "day",
+    "basis": "source_url_format",
+    "as_of": "2025-04-30",
+    "verdict": "within"
+   },
+   "provenance": "official_discovery",
+   "source_class": "",
+   "text_hash": "a71287d53c7f62c8126aad548354616f",
+   "metric_states": {}
+  },
+  "located": 13,
+  "budget": {
+   "seconds": 240.0,
+   "elapsed": 6.669,
+   "remaining": 233.331,
+   "fetches": 2,
+   "max_fetches": 2,
+   "bytes": 599767,
+   "refused": [],
+   "exhausted": false
+  },
+  "params": {
+   "pageNum": "1",
+   "pageSize": "30",
+   "column": "szse",
+   "tabName": "fulltext",
+   "plate": "",
+   "stock": "002304,9900008689",
+   "searchkey": "",
+   "secid": "",
+   "category": "category_ndbg_szsh",
+   "trade": "",
+   "seDate": "2022-01-01~2025-04-30",
+   "sortName": "",
+   "sortType": "",
+   "isHLtitle": "true"
+  },
+  "probe": {
+   "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query",
+   "status": 200,
+   "bytes": 6986
+  },
+  "authority": "official_disclosure",
+  "upstream_family": "cninfo",
+  "access_method": "http_post_form"
+ }
+}

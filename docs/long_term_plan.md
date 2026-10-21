@@ -1,4 +1,4 @@
-﻿# 织光 WeaveMind 长期目标与执行计划
+# 织光 WeaveMind 长期目标与执行计划
 
 > 版本：2026-10-19 ｜ 架构师制定 ｜ 依据：README 路线图 + 竞品调研（21产品）+ Phase 1-4 真机验证 + E2E 验收缺口
 
@@ -107,15 +107,15 @@ Phase 8/9可以并行推进。Phase 10是最后的工程化。
 
 ---
 
-### Phase 5 — 信任底线（当前执行中）
+### Phase 5 — 信任底线（任务24/25/26 已交付 `19054dd`；2026-10-20 U90 用户主流程复验 95/100，见 `docs/evidence/20261020-u90/U90_交审报告_20261020.md`）
 
 **目标**：现有pipeline产出的每一份报告都是诚实的、可追溯的、崩溃可恢复的。
 
 | 任务 | 内容 | 状态 |
 |------|------|------|
-| 24 死链标注入报告 | _dead_fetch_urls持久化到workspace，报告##参考来源标注失效URL，验收evidence加dead_source_count | 执行中 |
-| 25 免责声明强制入报告 | _REPORT_FORMAT_REQUIREMENTS追加免责声明要求，report_generator自动补缺，验收检查AI生成标识 | 执行中 |
-| 26 断点续跑+账目清理 | _execute_steps读steps_json跳过SUCCESS步骤，_dead_fetch_urls持久化到Redis，POST /resume端点，AGENTS.md 47→79 | 执行中 |
+| 24 死链标注入报告 | _dead_fetch_urls持久化到workspace，报告##参考来源标注失效URL，验收evidence加dead_source_count | 已交付（`19054dd`；U90 复跑 `test_task24_dead_source_annotation` 19 用例全绿；本批交付包内无失效 URL，标注未在包内复现） |
+| 25 免责声明强制入报告 | _REPORT_FORMAT_REQUIREMENTS追加免责声明要求，report_generator自动补缺，验收检查AI生成标识 | 已交付（`19054dd`；U90 发现静态文案「本报告未引用外部数据源」与包内实际引用相悖，待修） |
+| 26 断点续跑+账目清理 | _execute_steps读steps_json跳过SUCCESS步骤，_dead_fetch_urls持久化到Redis，POST /resume端点，AGENTS.md 47→79 | 已交付（`19054dd`）；U90-B 增网页恢复入口（历史页真实点击已验、重复恢复 409）+ 产物有效性守卫；真实运行「跳过 N/M 步」因历史失败任务工作区已被清理而**未验**，仅有隔离演练证据 |
 
 **验收标准**：
 - 报告中死链有明确标注

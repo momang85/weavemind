@@ -1,0 +1,69 @@
+{
+ "task_id": "ui-cc853cf86b",
+ "at": "2026-10-20T20:27:23",
+ "artifacts": {
+  "markdown": {
+   "status": 200,
+   "ms": 5007,
+   "bytes": 15172,
+   "sha256": "8c7fea879c55f331a9cb8da6e8a6e1f701ca256f24126dddf6c1fd4bfa88c256",
+   "version_id": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9",
+   "research_body_sha256": "fd0514364e5b7df2f166caa856b174ea509fb79bacf4c22d3df5a7cc8986fa8c",
+   "draft": "0",
+   "has_scenario_word": true
+  },
+  "pdf": {
+   "status": 200,
+   "ms": 7640,
+   "bytes": 5375952,
+   "sha256": "7381825aef6e69c05e6bf5c09cdc3d5af460fef099e7ce2f758586952c4ebfce",
+   "version_id": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9",
+   "research_body_sha256": "fd0514364e5b7df2f166caa856b174ea509fb79bacf4c22d3df5a7cc8986fa8c",
+   "draft": "0",
+   "magic": "%PDF-",
+   "pages_hint": 7
+  },
+  "zip": {
+   "status": 200,
+   "ms": 32,
+   "bytes": 5545517,
+   "sha256": "5d7f7bb4035840c8b224639abd4c91ceee49c77a6726ae9b9b3f38f38138206e",
+   "members": 21,
+   "names": [
+    "reports/report.md",
+    "reports/report_body.md",
+    "reports/report.pdf",
+    "working_paper.json",
+    "working_paper.csv",
+    "charts/chart_1.png",
+    "charts/chart_2.png",
+    "charts/chart_3.png",
+    "audit/model_report_full_09890bcb1fae94a6.md",
+    "audit/model_report_full_34057b7d18e290b0.md",
+    "audit/model_report_full_50bd199bebbcccd6.md",
+    "evidence/citation_evidence.json",
+    "analysis/analysis_runs.json",
+    "analysis/dataset.json",
+    "analysis/plan.json",
+    "analysis/context.json",
+    "analysis/selection.json",
+    "analysis/analysis_cards.md",
+    "analysis/analysis_detail.md",
+    "analysis/resilience_card.md",
+    "PACKAGE_MANIFEST.json"
+   ],
+   "inside": {
+    "reports/report.md": {
+     "bytes": 15172,
+     "sha256": "8c7fea879c55f331a9cb8da6e8a6e1f701ca256f24126dddf6c1fd4bfa88c256"
+    },
+    "analysis/analysis_detail.md": {
+     "bytes": 52802,
+     "sha256": "032faf21c10332b50e23daaa8ccbf5e398c61e2de429d41018a3be0b7a1c4140"
+    }
+   }
+  }
+ },
+ "adopted_identity": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9",
+ "current_package": "deliverables_20261020_201859_478d5a.zip"
+}

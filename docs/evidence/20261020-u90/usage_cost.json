@@ -1,0 +1,20 @@
+{
+ "ui-cc853cf86b": {
+  "calls": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "cost_usd": 0.0
+ },
+ "ui-91677c7767": {
+  "calls": 25,
+  "prompt_tokens": 82666,
+  "completion_tokens": 76997,
+  "cost_usd": 0.2367
+ },
+ "ui-10ea37599d": {
+  "calls": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "cost_usd": 0.0
+ }
+}
