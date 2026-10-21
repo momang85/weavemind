@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { TaskNode } from '../stores/types'
 import { X, ChevronDown, ChevronUp } from 'lucide-react'
 import { stepStatusMeta } from '../lib/statusMeta'
+import { gateSkipReason, isGateSkipDisplay, GATE_SKIP_LABEL } from '../lib/stepSkip'
 
 const roleColors: Record<string, string> = {
   planner: '#38bdf8', critic: '#c084fc', worker: '#6ee7b7',
@@ -17,6 +18,8 @@ const RESULT_LABELS: Record<string, string> = {
   url: '链接', urls: '链接', duration_ms: '耗时（毫秒）', tokens: 'token 数',
   cost_usd: '成本（美元）', replanned: '已重规划', ok: '是否成功', stage: '阶段',
   notes: '备注', warnings: '告警', capabilities: '能力', agent_id: '执行体',
+  // S1 门禁跳过（资料缺口）的结果字段：此前会把 gate_skipped 原样当英文键名展示
+  gate_skipped: '资料缺口跳过', result: '结果说明', elapsed_sec: '耗时（秒）',
 }
 
 /** 本机路径脱敏：交付与排查都不需要暴露发件机器的目录结构。保留末两段（仍可定位文件）。 */
@@ -131,7 +134,15 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
         )}
         <div>
           <div className="text-gray-400">状态</div>
-          <div className={`font-mono text-sm font-semibold ${statusColor(node.status)}`}>{stepStatusMeta(node.status).label}</div>
+          <div className={`font-mono text-sm font-semibold ${statusColor(node.status)}`}>
+            {isGateSkipDisplay(node.status, node) ? GATE_SKIP_LABEL : stepStatusMeta(node.status).label}
+          </div>
+          {/* 资料缺口的说明：与“上游失败”跳过区分开（后端：不派发、登记 optional、不判红） */}
+          {isGateSkipDisplay(node.status, node) && (
+            <div className="text-amber-300/90 text-xs mt-1 leading-relaxed">
+              {gateSkipReason(node)}
+            </div>
+          )}
         </div>
         {(node.instruction || (node.name && node.id !== 'root')) && (
           <div>

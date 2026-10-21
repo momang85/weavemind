@@ -182,6 +182,66 @@ def _mark_engine(name: str, ok: bool) -> None:
                 h["cooldown_until"] = time.time() + _ENGINE_COOLDOWN
 
 
+def search_ledger_limits() -> tuple[int, float]:
+    """任务级检索上限：默认 6 次 provider 调用 / 60 秒（指令明确不放宽）。
+
+    模块级唯一口径：`BaseWorker._search_ledger_limits` 与编排器（重试前查余量）
+    读的是同一份值——否则会出现"worker 按 6 次配额发请求、编排器按别的数重试"。
+    """
+    from adapters.search_runner import (
+        DEFAULT_DEADLINE_SECONDS, DEFAULT_MAX_CALLS)
+    try:
+        total_calls = int(os.environ.get("WM_SEARCH_MAX_CALLS", "")
+                          or DEFAULT_MAX_CALLS)
+    except Exception:
+        total_calls = DEFAULT_MAX_CALLS
+    try:
+        total_secs = float(os.environ.get("WM_SEARCH_DEADLINE_SECONDS", "")
+                           or DEFAULT_DEADLINE_SECONDS)
+    except Exception:
+        total_secs = DEFAULT_DEADLINE_SECONDS
+    return max(1, total_calls), max(1.0, total_secs)
+
+
+def search_ledger_remaining(redis_conn, root_task_id: str):
+    """任务级检索预算**余量**（只读）：`(剩余调用次数, 剩余秒)`；读不到返回 None。
+
+    给编排器的只读视图（2026-10-21 实测 ui-d59152ebb9 / sched-f6e5440b8b）：一个检索步
+    被重试 3 次、每次各要一份额度，6 次的**任务级**预算在前两次就用光，第三次派发拿到
+    `refused_budget` 空数组（0 次真实请求）——而这一步前两次都已真取到候选。编排器在
+    重试前看余量，余额为 0 就停手并保留已得候选。
+
+    读不到（Redis 异常/无身份）返回 None：调用方按"允许重试"处理（与旧行为一致；
+    真发不出去时 worker 侧仍会按台账拒绝）。
+    """
+    task_id = str(root_task_id or "")
+    if not task_id:
+        return None
+    try:
+        raw = redis_conn.hgetall(f"search_ledger:{task_id}") or {}
+    except Exception as exc:                         # noqa: BLE001
+        logger.warning("检索台账余量读取失败（按可重试处理）：%s", str(exc)[:120])
+        return None
+    used, started = 0, 0.0
+    for k, v in (raw.items() if isinstance(raw, dict) else ()):
+        name = k.decode() if isinstance(k, bytes) else str(k)
+        try:
+            if name.endswith("used"):
+                used = int(v)
+            elif name.endswith("started"):
+                started = float(v)
+        except (TypeError, ValueError):
+            continue
+    try:
+        total_calls, total_secs = search_ledger_limits()
+    except Exception:                                # noqa: BLE001
+        return None
+    left_calls = max(0, total_calls - max(0, used))
+    left_secs = (max(0.0, total_secs - max(0.0, time.time() - started))
+                 if started > 0 else total_secs)
+    return left_calls, left_secs
+
+
 def get_engine_health() -> dict:
     with _ENGINE_LOCK:
         return {k: dict(v) for k, v in _ENGINE_HEALTH.items()}
@@ -1210,19 +1270,7 @@ class SearchAgent(BaseWorker):
 
     def _search_ledger_limits(self) -> tuple[int, float]:
         """任务级上限：默认 6 次 provider 调用 / 60 秒（指令明确不放宽）。"""
-        from adapters.search_runner import (
-            DEFAULT_DEADLINE_SECONDS, DEFAULT_MAX_CALLS)
-        try:
-            total_calls = int(os.environ.get("WM_SEARCH_MAX_CALLS", "")
-                              or DEFAULT_MAX_CALLS)
-        except Exception:
-            total_calls = DEFAULT_MAX_CALLS
-        try:
-            total_secs = float(os.environ.get("WM_SEARCH_DEADLINE_SECONDS", "")
-                               or DEFAULT_DEADLINE_SECONDS)
-        except Exception:
-            total_secs = DEFAULT_DEADLINE_SECONDS
-        return max(1, total_calls), max(1.0, total_secs)
+        return search_ledger_limits()
 
     def _ddg_backend(self) -> tuple:
         """`(ddgs 备后端名, 依据)`：registry=已核实可用；policy=注册表读不到（未核实）；
@@ -1270,10 +1318,19 @@ class SearchAgent(BaseWorker):
         seen: set = set()
         uniq: list = []
         for it in collected:
-            u = str((it or {}).get("url") or "").strip()
-            if u and u not in seen:
-                seen.add(u)
-                uniq.append(it)
+            if not isinstance(it, dict):
+                continue
+            u = str(it.get("url") or "").strip()
+            # 契约要求候选同时具备非空 url 与 title（`tool_contracts.validate_result`
+            # 对前 5 条逐条校验）：空标题条目此前照发，编排器判"列表元素缺少 title"
+            # → 重试 → 三次派发吃光任务级检索预算，最后连已得候选一起丢
+            # （实测 2026-10-21 ui-d59152ebb9）。ddgs 分支一直是这个门槛，这里补齐。
+            if not u or not str(it.get("title") or "").strip():
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            uniq.append(it)
         strict = self._filter_results(instruction, uniq)
         if strict:
             return json.dumps(strict[:10], ensure_ascii=False, indent=2)
@@ -1685,8 +1742,15 @@ class SearchAgent(BaseWorker):
                         target = urllib.parse.unquote(target)
                 if target.startswith("http"):
                     url = target
+            _title = strip(m_title.group(1) if m_title else "")
+            if not _title or not str(url).startswith("http"):
+                # 契约要求每条候选都有非空 title/url（tool_contracts.validate_result
+                # 对前 5 条逐条校验）：无 <h2> 但有 <a href> 的块此前产出空标题条目，
+                # 编排器判"列表元素缺少 title"→ 重试 → 三次派发吃光任务级检索预算
+                # （实测 2026-10-21）。ddgs 分支一直是这个门槛，这里对齐。
+                continue
             results.append({
-                "title": strip(m_title.group(1) if m_title else ""),
+                "title": _title,
                 "url": url,
                 "snippet": strip(m_snip.group(1) if m_snip else ""),
             })

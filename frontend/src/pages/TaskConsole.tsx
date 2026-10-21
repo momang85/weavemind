@@ -11,6 +11,7 @@ import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/
 import { resolveSubmissionKey } from '../lib/submissionKey'
 import { requestResume } from '../lib/resume'
 import { actionIntent, actionableTone, shouldShowActionable } from '../lib/actionable'
+import { stepDisplayStatus } from '../lib/stepSkip'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
 
@@ -164,7 +165,8 @@ export default function TaskConsole() {
                 id: s.step_id || '', step_id: s.step_id || '',
                 iteration: s.iteration || 0, capability: s.capability || '',
                 name: s.instruction || s.name || 'Step',
-                status: (s.result?.status || 'pending').toLowerCase(),
+                // 与实时通道同一套显示状态（S1 门禁跳过 → skipped）
+                status: stepDisplayStatus(s),
                 children: [], agent_id: s.result?.agent_id || '',
                 result: s.result || null,
               })),

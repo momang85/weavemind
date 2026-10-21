@@ -10160,13 +10160,59 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception as exc:                 # noqa: BLE001 - 落盘失败不影响任务
             logger.warning("官方发现结论落盘失败（task=%s）：%s", task_id, str(exc)[:120])
 
+    @staticmethod
+    def _search_candidate_count(result: dict) -> int:
+        """结果里可抓取的候选 URL 条数（非 SUCCESS / 非法 JSON / 无 http url 都算 0）。
+
+        A-修复的判定基线：重试循环里"这一派发有没有真拿到候选"。抓取 URL 正是从
+        这一步的结果数组里挑的（`_inject_step_context` → `_pick_fetch_url`），
+        所以只有带 http 候选的结果才值得在预算耗尽后保留。
+        """
+        if not isinstance(result, dict) or str(result.get("status") or "") != "SUCCESS":
+            return 0
+        raw = result.get("result")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            return 0
+        if not isinstance(data, list):
+            return 0
+        return sum(1 for it in data if isinstance(it, dict)
+                   and str(it.get("url") or "").startswith("http"))
+
+    def _search_budget_left(self, task_id: str):
+        """任务级检索预算余量 `(剩余次数, 剩余秒)`；读不到返回 None（按可重试处理）。
+
+        只读视图（`worker_base.search_ledger_remaining`）：重试 web_search 前先看
+        余额，避免"第三次派发注定被拒、还把已得候选顶掉"的空转。
+        """
+        try:
+            from worker_base import search_ledger_remaining
+            r = getattr(self._messaging, "_redis", None) or getattr(
+                self._messaging, "redis", None)
+            if r is None:
+                return None
+            return search_ledger_remaining(r, task_id)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("检索预算余量读取失败（按可重试处理）：%s", str(exc)[:120])
+            return None
+
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
         """派发单步：失败自动重试，重试仍失败则尝试单步重规划。
         P1-4：重试/重规划结束后写结构化失败诊断（step_failure.json），
         替换步骤结果已知后再落盘，供反思精准补缺口。"""
         # 分析步的前置：底稿必须在它派发**之前**就已经在工作区里（见该函数注释）
         self._ensure_paper_for_analysis(goal, step, task_id)
+        # A-修复（2026-10-21）：本步**已取得的候选**不得因为后续派发被预算拒绝而丢失
+        # ——下游抓取的 URL 就取自这一步的结果数组，丢了它，web_fetch 只能以
+        # "无候选 URL"跳过（页面显示为红色失败，但 0 字节网络请求都没发过）。
+        best_search: dict | None = None
+        first_issue = ""
+        adopted_kept = False
         result = self._dispatch(step, task_id)
+        if (str(step.get("capability") or "") == "web_search"
+                and self._search_candidate_count(result)):
+            best_search = dict(result)
         # 任务15：**第一次尝试返回就记账**（策略拒绝/非 2xx 是确定性结果）。
         # 记账若只留在调用方（`_execute_steps` 的步骤返回点），下面的重试循环看不见它，
         # 同一坏 URL 仍会被重发 `_max_retry` 次。
@@ -10180,6 +10226,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # M0-c：取消导致的空/短结果不是"输出不合契约"，不能被改写成步骤失败
         issue = ("" if str(result.get("status")) == "CANCELLED"
                  else self._contract_issue(goal, step, result))
+        if issue and not first_issue:
+            first_issue = issue
         tried: list[str] = []
         # 本步已给出的结构化重试查询：重试之间不重复交同一批（专项 §5 补查重试的真正输入）
         retry_qs_seen: set = set()
@@ -10187,6 +10235,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 取消：不再重试/重规划（失败重试循环是实测最爱烧额度的地方）
             if self._cancel_requested(task_id):
                 break
+            # A-修复：任务级检索预算已耗尽时**不再派发检索重试**——余额为 0 的派发
+            # 只会拿到 `refused_budget` 空数组（0 次真实请求），却会顶掉本步此前已
+            # 取得的候选，再触发"重规划代做"让下游抓取全部没有 URL（实测
+            # ui-d59152ebb9 / sched-f6e5440b8b）。读不到台账则照旧重试（不改变旧行为）。
+            if str(step.get("capability") or "") == "web_search":
+                _left = self._search_budget_left(task_id)
+                if _left is not None and (_left[0] <= 0 or _left[1] <= 0):
+                    tried.append("停止重试（任务级检索预算已耗尽）")
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "info", "agent": "web_search",
+                                   "message": (f"Step {step.get('step_id')} 停止重试："
+                                               "任务级检索预算已耗尽，不再派发检索"),
+                                   "timestamp": self._now_iso()})
+                    break
             # 任务15：**确定性策略拒绝不再重试**。net_policy 的拒绝是纯函数级结论
             # （URL 无法解析 / 非公网地址 / 出口拒签…），重试只会再花 6-8s（DNS/连接）
             # 拿到同一句拒绝，再白等一次 sleep(2)。命中即跳出，按死链如实记 FAILED
@@ -10260,6 +10322,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 任务15：每次尝试返回都记账（下一次循环开头据此拦住死链）
             self._note_fetch_dead_url(amended, result, task_id)
             issue = self._contract_issue(goal, amended, result)
+            if issue and not first_issue:
+                first_issue = issue
+            if (str(step.get("capability") or "") == "web_search"
+                    and self._search_candidate_count(result)):
+                best_search = dict(result)
         # 契约在重试耗尽后仍不通过：不得把 SUCCESS 空转当成功，
         # 标记为失败让下方重规划路径接管（或如实返回 FAILED）。
         if issue and result.get("status") != "FAILED":
@@ -10272,6 +10339,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         alt = None
         alt_result = None
         fail_result = None
+        # A-修复：重试用尽仍是失败，但**本步此前已取得可用候选**时保留那份结果：
+        # 已得来源不随最后一次空派发一起丢，更不把检索步"重规划"给产不出 URL 的
+        # 执行者（代做步骤返回 0 链接，下游抓取随之全部跳过）。
+        # 如实标注：状态为成功、检索真值（search_status/候选数组）原样保留，但
+        # `search_quality_untrusted=True`，契约问题与最后一次失败原文留在
+        # `contract_issue_note` 与 step_failure 记录里——不删失败记录、不装没事。
+        if (str(step.get("capability") or "") == "web_search"
+                and best_search is not None
+                and self._search_candidate_count(best_search) > 0
+                and str(result.get("status")) == "FAILED"):
+            _kept = self._search_candidate_count(best_search)
+            fail_result = result
+            result = dict(best_search)
+            result["status"] = "SUCCESS"
+            result["search_quality_untrusted"] = True
+            result["kept_candidates"] = _kept
+            result["contract_issue_note"] = (
+                first_issue or issue or str(fail_result.get("result") or "")[:200])
+            adopted_kept = True
+            tried.append(f"保留已取得候选（{_kept} 条；检索质量存疑）")
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "web_search",
+                           "message": (f"Step {step.get('step_id')} 保留已取得候选 "
+                                       f"{_kept} 条（检索重试/预算耗尽，不再代做；"
+                                       "检索质量标注存疑）"),
+                           "timestamp": self._now_iso()})
         if (result.get("status") == "FAILED"
                 and state["replan_used"] < self._replan_depth
                 and not self._cancel_requested(task_id)):
@@ -10294,14 +10387,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # P1-4：发生过失败（重试或重规划）就落盘结构化诊断。
         # 搜索相关性失败（_contract_issue 判"结果与目标无关"）即使无重试/换步
         # 也要落盘——否则反思只看到"报告溯源率低"却不知根因在搜索质量（#6 传导）。
-        if attempt > 0 or alt is not None or (
-            issue and step.get("capability") == "web_search"
-            and ("相关" in issue or "无关" in issue or "未命中" in issue)
+        # 诊断用 first_issue（本步**第一次**契约问题的原文）：最后一次派发往往是
+        # 预算拒绝的空数组，问题文本为空，会把真实原因抹掉。
+        _diag_issue = first_issue or issue
+        if attempt > 0 or alt is not None or adopted_kept or (
+            _diag_issue and step.get("capability") == "web_search"
+            and ("相关" in _diag_issue or "无关" in _diag_issue or "未命中" in _diag_issue)
         ):
             try:
                 from step_diagnosis import write_step_failure
                 diag = self._build_step_diagnosis(
-                    step, fail_result or result, issue, tried, alt, alt_result, task_id,
+                    step, fail_result or result, _diag_issue, tried, alt, alt_result,
+                    task_id,
                 )
                 write_step_failure(task_id, diag)
             except Exception as exc:

@@ -5,6 +5,7 @@ import {
   ChevronRight, ChevronDown, RefreshCw, GripVertical
 } from 'lucide-react'
 import { stepStatusMeta } from '../lib/statusMeta'
+import { gateSkipReason, isGateSkipDisplay, GATE_SKIP_LABEL } from '../lib/stepSkip'
 
 // 步骤状态：颜色来自 lib/statusMeta（唯一实现），图标仍由本组件选择（图标是 UI 关注点）
 const statusConfig = {
@@ -102,6 +103,16 @@ const TreeNode = memo(function TreeNode({
         {(node.step_id?.startsWith('alt-')) && (
           <span className="text-xs font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded shrink-0">
             备选
+          </span>
+        )}
+
+        {/* S1 门禁跳过（资料缺口）：中性呈现，不是失败。原因悬停可看（后端原文）。 */}
+        {isGateSkipDisplay(node.status, node) && (
+          <span
+            className="text-xs font-mono text-amber-400 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded shrink-0"
+            title={gateSkipReason(node)}
+          >
+            {GATE_SKIP_LABEL}
           </span>
         )}
 

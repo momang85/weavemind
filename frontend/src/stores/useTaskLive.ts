@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useTaskStore } from './useTaskStore'
+import { stepDisplayStatus, stepLogStyle } from '../lib/stepSkip'
 
 /**
  * T11 双通道收敛：任务实时更新统一入口。
@@ -75,7 +76,8 @@ export function useTaskLive(taskId: string | null) {
         iteration: s.iteration || 0,
         capability: s.capability || '',
         name: s.instruction || s.name || 'Step',
-        status: (s.result?.status || 'pending').toLowerCase(),
+        // 显示状态：S1 门禁跳过（资料缺口）呈现为 skipped，真失败仍为 failed
+        status: stepDisplayStatus(s),
         children: [],
         agent_id: s.result?.agent_id || '',
         result: s.result || null,
@@ -120,12 +122,14 @@ export function useTaskLive(taskId: string | null) {
         if (seenLogs.current.has(logId)) return
         seenLogs.current.add(logId)
         const msg = (s.instruction || '').slice(0, 60)
+        // 门禁跳过不进红色 error 流（那是"失败"的颜色，与后端语义不符）
+        const style = stepLogStyle(s, st)
         addLog({
           id: logId,
           timestamp: new Date().toLocaleTimeString(),
-          type: st === 'success' ? 'dispatch' : 'error',
+          type: style.type,
           agent: s.capability || 'worker',
-          message: (st === 'success' ? 'Completed: ' : 'Failed: ') + msg,
+          message: style.prefix + msg,
         })
       })
 
@@ -142,7 +146,7 @@ export function useTaskLive(taskId: string | null) {
             successSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'success').length,
             failedSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'failed').length,
             duration: Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000)) },
-          steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: (s.result?.status||'pending').toLowerCase(), children: [] })),
+          steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: stepDisplayStatus(s), children: [] })),
           final_report: d.report || d.final_report || '',
           // 验收缺口：SUCCESS_WITH_ISSUES 任务的报告顶部展示
           acceptance: (d.acceptance && Array.isArray(d.acceptance.gaps))
