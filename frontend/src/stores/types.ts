@@ -5,6 +5,18 @@ export interface AgentInfo {
   last_heartbeat: string
 }
 
+/** U90-B：「能不能接着跑」的统一视图（web_ui._resume_view；FAILED/CRASHED 才 available）。 */
+export interface ResumeView {
+  available?: boolean
+  status?: string
+  total?: number
+  completed?: number
+  failed_step?: string
+  failure?: string
+  reason?: string
+  label?: string
+}
+
 export interface TaskSummary {
   task_id: string
   goal: string
@@ -17,6 +29,7 @@ export interface TaskSummary {
   parent_task_id?: string
   acceptance?: { overall?: string; gaps?: string[] }
   llm_degraded?: { switches?: number; reasons?: string[]; both_failed?: boolean }
+  resume?: ResumeView
 }
 
 export interface ConversationSummary {
@@ -37,6 +50,7 @@ export interface ConversationMessage {
   report?: string
   acceptance?: { overall?: string; gaps?: string[] }
   llm_degraded?: { switches?: number; reasons?: string[]; both_failed?: boolean }
+  resume?: ResumeView
 }
 
 export interface MemoryDoc {

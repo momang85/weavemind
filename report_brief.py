@@ -439,6 +439,10 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "unsupported_claims": unsupported,
         "risks": risks,
         "citations": citations,
+        # U90-R4：材料准入状态进结构对象——声明/页面据此判断"是否真的用了用户材料"，
+        # 不靠 goal 文本关键词，也不靠有没有跑检索步
+        "materials_state": {k: v for k, v in (audit.get("materials_state") or {}).items()
+                            if k != "admitted"},
         "charts": charts,
         "appendix": _appendix(task_id, rows, derived, citations, evidence,
                               source_url=str(data.get("source_url") or ""),
@@ -2526,7 +2530,7 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     known_urls = tuple(_project_sources(task_id, ws_dir=ws_dir))
 
     def _add(url: str, title: str, kind: str, used_by: str, *, entry: str,
-             **extra) -> None:
+             admission: str = "", **extra) -> None:
         u = str(url or "").strip()
         if not u:
             return
@@ -2537,9 +2541,10 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
                     if c["url"] == u and used_by not in c["used_by"]:
                         c["used_by"].append(used_by)
             return
-        if entry == "structured":
+        if entry == "structured" or admission == "admitted":
             # 结构化财务来源是**本次研究取数本身**（chart_rows ok 即证据），
-            # 不按网页规则判 unknown
+            # 不按网页规则判 unknown；已由材料准入通道（material_intake）判过准入的
+            # 材料同样不再按网页规则重判（U90-R4：准入状态是权威，不靠 URL 猜）
             adm = "admitted"
         else:
             adm = _admission(u, evidence=evidence, known=known_urls)
@@ -2598,16 +2603,54 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     # ③ 正文实际引用的检索来源（按正文出现顺序编号）
     for url, title in _body_sources(body):
         _add(url, title, _source_type(url), "正文引用", entry="body")
-    # ④ 用户材料（goal 文本）
-    if str(goal or "").strip() and any(k in str(goal) for k in ("材料", "附件", "上传")):
+    # ④ 用户材料：按**材料准入状态**（material_intake 已准入清单）登记，不再只看
+    # goal 文本关键词——直供材料即使 goal 没写"材料/附件/上传"也真的被采用了，
+    # 声明不能因此掉进"未引用外部数据源，仅为模型知识"（U90-R4）。
+    mat_state = _materials_state(task_id, ws_dir=ws_dir)
+    for m in mat_state.get("admitted") or []:
+        m_url = str(m.get("url") or "").strip()
+        m_title = str(m.get("title") or "").strip() or "用户提供的材料"
+        if not m_url:
+            # 上传/本地文件没有公网 URL：用 `material://<mid>` 定位到材料登记，
+            # 验收器按此 scheme 放行（它不是网页来源，不该被判"非法 URL"）
+            m_url = f"material://{m.get('material_id') or 'unknown'}"
+        _add(m_url, m_title, "user_material", "用户材料", entry="material",
+             admission="admitted",
+             **({"provenance": m.get("provenance")}
+                if m.get("provenance") else {}))
+    if not mat_state.get("admitted") and str(goal or "").strip() \
+            and any(k in str(goal) for k in ("材料", "附件", "上传")):
+        # 兼容旧路径：材料清单里没有登记，但任务文本明说带了材料——仍按旧口径登记
+        # 一条合并条目（没有任何登记证据时不伪造"已采用"）。
         _add("user-material", "用户提供的材料", "user_material", "用户材料",
-             entry="material")
+             entry="material", admission="admitted")
     # 未被采用的候选（检索落盘里存在但正文没引用）→ 只留内部审计
     known = _project_sources(task_id, ws_dir=ws_dir)
     unused = [{"url": u, "title": _host(u)} for u in known if u not in seen]
     return adopted, {"unused_sources": unused[:20],
                      "rejected": rejected[:20],
+                     "materials_state": mat_state,
                      "note": "未采用/越界材料只留在内部审计，不进简报来源清单"}
+
+
+def _materials_state(task_id: str, *, ws_dir=None) -> dict:
+    """材料准入状态摘要（material_intake 的只读投影；失败按"无登记"处理）。
+
+    声明与来源清单以**实际采用的准入材料**为准：`admitted` 里是已通过准入的材料
+    （含官方发现与用户直供），检索零结果不影响它们作为来源的地位。
+    """
+    try:
+        import material_intake as mi
+        st = mi.status(task_id, ws_dir=ws_dir)
+        items = [i for i in (st.get("materials") or []) if isinstance(i, dict)]
+        admitted = [i for i in items
+                    if str(i.get("status") or "") == mi.STATE_ADMITTED]
+        return {"count": len(items), "admitted": admitted,
+                "admitted_n": len(admitted),
+                "pending_n": len(st.get("pending") or [])}
+    except Exception as exc:                     # noqa: BLE001 - 读不到按无登记
+        logger.warning("材料准入状态读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        return {"count": 0, "admitted": [], "admitted_n": 0, "pending_n": 0}
 
 
 def _admission(url: str, *, evidence: dict | None, known=()) -> str:
@@ -3538,7 +3581,7 @@ def render_brief_markdown(structure: dict, body: str = "",
                  "交付状态与验收结论见任务页与导出清单（未验收时按草稿处理）。")
     lines.append("")
     lines.append("### 免责声明")
-    lines.append(_disclaimer(structure))
+    lines.append(_disclaimer(structure, task_id=task_id))
     return "\n".join(lines).strip() + "\n"
 
 
@@ -3977,8 +4020,8 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
         # 与资产负债表余额变化是两个口径；读者要看到"是哪一项在缓冲"。
         out["wc_flow"] = _jd.wc_flow_of(ds, locators=prov)
     except Exception as exc:                       # noqa: BLE001 - 取不到就不生成该判断
-        logger.warning("直接法收支/营运资本补充资料读取失败（task=%s）：%s",
-                       task_id, str(exc)[:120])
+        logger.warning("直接法收支/营运资本补充资料读取失败（task=%s，%s）：%s",
+                       task_id, type(exc).__name__, str(exc)[:120])
         out["dataset"] = None
         out["direct_cash"] = {}
         out["wc_flow"] = {}
@@ -4472,14 +4515,79 @@ def analysis_coverage(analysis_text: str) -> dict:
             "ok": bool(observations >= 1 and has_meaning)}
 
 
-def _disclaimer(structure: dict) -> str:
+# 声明里"外部来源"的措辞：按**实际采用的来源类别**写，不一律写"公开渠道"
+_EXTERNAL_DESC = (
+    ("issuer_annual_report", "发行人公开披露（年报/公告原文）"),
+    ("third_party", "第三方平台/媒体公开信息"),
+)
+
+
+def _external_desc(citations: list[dict]) -> str:
+    """实际采用的**外部**来源类别 → 声明措辞（U90-R4：不以检索步为准）。
+
+    结构化取数/发行人披露/第三方来源都算外部数据源——只认 `third_party` 会让
+    "仅引用了发行人披露"的报告自称"未引用外部数据源"（实机反例：三一简报的
+    免责声明写着"仅为模型知识"，而采用清单里明明有一条已准入的发行人年报）。
+    """
+    types = {str(c.get("type") or "") for c in (citations or [])}
+    parts = [label for key, label in _EXTERNAL_DESC if key in types]
+    known = {k for k, _ in _EXTERNAL_DESC} | {"", "user_material"}
+    if types - known:
+        parts.append("公开渠道")          # 未知类型也如实当外部来源，不冒充/不隐瞒
+    if not parts:
+        return ""
+    return parts[0] if len(parts) == 1 else "与".join(parts)
+
+
+def _search_degraded_reason(task_id: str | None) -> str:
+    """本轮**外部检索本身**是否降级（代做/未跑成/零命中/Redis 不可用）。
+
+    口径与交付页"数据来源摘要"同一份（`search_coverage` + `task_state` 步骤投影）；
+    判不出来返回空串——声明不猜。检索零命中**不等于**没有引用材料（用户材料/
+    官方披露照样是来源），这里只描述检索状态，不改来源措辞。
+    """
+    if not task_id:
+        return ""
+    try:
+        import search_coverage as _sc
+        import task_state as _ts
+        steps = list((_ts.task_projection(task_id) or {}).get("steps") or [])
+        s = _sc.summarize_search_coverage(steps)
+    except Exception:                        # noqa: BLE001 - 判不出来不猜
+        return ""
+    if int(s.get("total_search_steps") or 0) <= 0 or int(s.get("ok_steps") or 0) > 0:
+        return ""
+    bits = []
+    if int(s.get("redis_degraded_steps") or 0):
+        bits.append("Redis 不可用，检索未真正执行")
+    if int(s.get("degraded_steps") or 0):
+        bits.append("检索步由非检索执行者代做")
+    if int(s.get("incomplete_steps") or 0):
+        bits.append("部分检索未跑成（超时/限流/预算）")
+    if int(s.get("zero_source_steps") or 0):
+        bits.append("检索零命中")
+    return "；".join(bits) or "无有效检索结果"
+
+
+def _disclaimer(structure: dict, task_id: str | None = None) -> str:
+    """免责声明：按**实际采用的来源**（citations）与**材料准入状态**生成。
+
+    判据不是"有没有跑检索步"：采用清单里是发行人披露/第三方来源就是外部来源；
+    用户直供材料按材料措辞（material_intake 已准入即算，goal 关键词只是旧兼容）；
+    检索降级只作为附加事实注明，不因此改写来源措辞（U90-R4）。
+    """
     try:
         import report_quality as _rq
-        has_external = any(c.get("type") == "third_party"
-                           for c in (structure.get("citations") or []))
-        has_user = any(c.get("type") == "user_material"
-                       for c in (structure.get("citations") or []))
-        return _rq.disclaimer_clause(has_external, has_user)
+        cits = [c for c in (structure.get("citations") or [])
+                if isinstance(c, dict)]
+        ext_cits = [c for c in cits if str(c.get("type") or "") != "user_material"]
+        mats = structure.get("materials_state") or {}
+        has_user = any(str(c.get("type") or "") == "user_material" for c in cits) \
+            or int(mats.get("admitted_n") or 0) > 0
+        return _rq.disclaimer_clause(
+            bool(ext_cits), has_user,
+            external_desc=_external_desc(ext_cits),
+            search_degraded=_search_degraded_reason(task_id))
     except Exception:
         return ("本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
                 "据此操作风险自担。")

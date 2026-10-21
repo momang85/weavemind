@@ -10251,6 +10251,225 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
                          "绑定里要保存真实规则指纹")
 
 
+class TestSelectionIdentitySameSnapshot(unittest.TestCase):
+    """U90-R2：采纳→selection→正文→冻结→MD/PDF/ZIP 必须是**同一次**版本快照。
+
+    架构师裁决（2026-10-20）实测反例：三一包 manifest `report_version_id=23b61bee…`
+    而包内 `analysis/selection.json.adopted_identity=d290ab01…`——同一份包里"正文这
+    一段 = 这一次运行"的读者核对不成立。修复后：
+    1. `rebind_selection_identity`：正文仍绑定所选运行（run_id 在正文里）才回绑；
+       证明不了就**不改**，如实报 `consistent=False`（调用方记进清单，不隐藏）；
+    2. `export_snapshot` 冻结**之前**回绑 → 冻结成员、清单 `analysis_inputs.selection`
+       与 manifest `report_version_id` 同一身份；
+    3. `assemble_and_verify` 换版后同步回绑（下一次导出前工作区就一致）。
+    """
+
+    tid = "r2-sel-1"
+
+    RUN_ID = "a1b2c3d4e5f6"
+    MODEL_ID = "glm-4.7"
+    OLD_IDENTITY = "d290ab012e54" + "0" * 52
+
+    def setUp(self):
+        import task_state
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_r2sel_"))
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "r2sel.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _seed_selection(self, *, adopted_identity: str = "") -> dict:
+        from financial_analysis import store as fa
+        ws = ws_mod.task_workspace(self.tid)
+        return fa.save_selection(ws, {
+            "model_id": self.MODEL_ID, "run_id": self.RUN_ID,
+            "dataset_hash": "ds-1", "selected_at": "2026-10-20T10:00:00",
+        }, adopted_identity=adopted_identity, note="离线用例选择")
+
+    def _seed_adopted(self, body: str):
+        from report_version import VersionStore
+        ws = ws_mod.task_workspace(self.tid)
+        store = VersionStore(ws, self.tid)
+        v = store.record(body)
+        store.adopt(v, reason="U90-R2 用例")
+        return store, v
+
+    BODY_WITH_RUN = (f"# 研究正文\n\n## 分析卡\n\n"
+                     f"模型 glm-4.7（run=a1b2c3d4e5f6）本次对两期经营数据…\n\n"
+                     f"## 参考来源\n\n1. [年报](https://example.com/a)\n")
+
+    BODY_OTHER = ("# 研究正文（另一版）\n\n## 分析卡\n\n模型其他运行（run=9999aaaabbbb）"
+                  "构成另一版正文。\n")
+
+    def test_rebind_requires_run_id_in_body_and_leaves_trail(self):
+        from financial_analysis import store as fa
+        ws = ws_mod.task_workspace(self.tid)
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        # 正文带着所选运行 → 回绑成功并留痕
+        new_id = "23b61bee" + "7" * 56
+        out = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_WITH_RUN,
+                                           reason="修订换版")
+        self.assertTrue(out["changed"], out)
+        self.assertTrue(out["consistent"], out)
+        self.assertEqual(out["from"], self.OLD_IDENTITY)
+        self.assertEqual(out["to"], new_id)
+        self.assertEqual(out["verified_by"], "run_id_in_body")
+        cur = fa.load_selection(ws)
+        self.assertEqual(cur.get("adopted_identity"), new_id)
+        self.assertEqual(cur.get("rebound_from"), self.OLD_IDENTITY,
+                         "回绑必须留痕（从哪一版绑到哪一版）")
+        self.assertEqual([e.get("run_id") for e in cur.get("entries") or []],
+                         [self.RUN_ID], "回绑不改选择条目本身")
+        # 幂等：同一身份再回绑 → changed=False, consistent=True
+        again = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_WITH_RUN)
+        self.assertFalse(again["changed"])
+        self.assertTrue(again["consistent"])
+        # 正文没有所选运行 → 拒绝回绑（不得用回绑造假归属）
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        denied = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_OTHER,
+                                              reason="另一版")
+        self.assertFalse(denied["changed"], denied)
+        self.assertFalse(denied["consistent"], denied)
+        self.assertIn("找不到所选运行", denied["reason"])
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"),
+                         self.OLD_IDENTITY, "拒绝时不落盘")
+        # 没有正文可核对 → 同样拒绝（不凭选择记录单方面改身份）
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        blind = fa.rebind_selection_identity(ws, new_id, body_text="")
+        self.assertFalse(blind["changed"])
+        self.assertFalse(blind["consistent"])
+        # 没有选择记录 → 无身份可绑，直接一致
+        fa.selection_path(ws).unlink(missing_ok=True)
+        empty = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_WITH_RUN)
+        self.assertFalse(empty["present"])
+        self.assertTrue(empty["consistent"])
+
+    def test_export_snapshot_rebinds_selection_before_freeze(self):
+        """清单身份、冻结 selection 成员、manifest.selection 三处同一身份。"""
+        import hashlib
+        import zipfile
+        import delivery_pipeline as dp
+        from financial_analysis import store as fa
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        store, v = self._seed_adopted(self.BODY_WITH_RUN)
+        ws = ws_mod.task_workspace(self.tid)
+        delivered = self.BODY_WITH_RUN
+        store.record_delivery(delivered, accepted_body=str(v.body or ""), ok=True)
+        md = delivered.encode("utf-8")
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=delivered,
+                                  md_bytes=md, pdf_bytes=b"%PDF-1.4 r2")
+        self.assertTrue(snap["selection_binding"].get("changed"),
+                        snap["selection_binding"])
+        self.assertEqual(snap["selection_binding"].get("to"), v.identity_id())
+        sel_blob = json.loads(bytes(snap["payload"]["analysis/selection.json"])
+                              .decode("utf-8"))
+        self.assertEqual(sel_blob.get("adopted_identity"), v.identity_id(),
+                         "冻结进包的选择记录必须是回绑后的这一版")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        m = res.get("manifest") or {}
+        self.assertEqual(m.get("report_version_id"), v.identity_id())
+        self.assertEqual((m.get("analysis_inputs") or {}).get("selection", {})
+                         .get("adopted_identity"), v.identity_id(),
+                         "清单 analysis_inputs.selection 必须与采纳身份一致（三一实测反例）")
+        self.assertTrue(m.get("selection_binding", {}).get("changed"))
+        self.assertEqual(m.get("delivered_md_sha256"),
+                         hashlib.sha256(md).hexdigest())
+        with zipfile.ZipFile(ws / res["package"]) as zf:
+            inner = json.loads(zf.read("analysis/selection.json").decode("utf-8"))
+            self.assertEqual(inner.get("adopted_identity"), v.identity_id())
+        # 工作区 selection 同步回绑：下一次导出不再出现两版
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"), v.identity_id())
+
+    def test_export_snapshot_keeps_inconsistency_visible_when_unprovable(self):
+        """正文不带所选运行 → 不回绑，但不一致必须**可见**（快照+清单），不假成功。"""
+        import delivery_pipeline as dp
+        from financial_analysis import store as fa
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        store, v = self._seed_adopted(self.BODY_OTHER)
+        ws = ws_mod.task_workspace(self.tid)
+        delivered = self.BODY_OTHER
+        store.record_delivery(delivered, accepted_body=str(v.body or ""), ok=True)
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=delivered,
+                                  md_bytes=delivered.encode("utf-8"))
+        sb = snap.get("selection_binding") or {}
+        self.assertFalse(sb.get("changed"), sb)
+        self.assertFalse(sb.get("consistent"), sb)
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"),
+                         self.OLD_IDENTITY, "证明不了就不改工作区")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        m = res.get("manifest") or {}
+        self.assertFalse((m.get("selection_binding") or {}).get("consistent"),
+                         "清单必须如实记录不一致（不隐藏）")
+        self.assertEqual((m.get("analysis_inputs") or {}).get("selection", {})
+                         .get("adopted_identity"), self.OLD_IDENTITY,
+                         "包内选择记录保持原样（不篡改）")
+        self.assertEqual(m.get("report_version_id"), v.identity_id())
+
+    def _seed_data(self) -> None:
+        """可验收的最小数据面：来源 + 图 + 图表清单（数字/来源成对）。"""
+        import task_state
+        ws = ws_mod.task_workspace(self.tid)
+        proj = ws_mod.task_project_dir(self.tid)
+        proj.mkdir(parents=True, exist_ok=True)
+        (ws / "charts").mkdir(parents=True, exist_ok=True)
+        (ws / "charts" / "chart_1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+        (proj / "search_results.json").write_text(json.dumps([{
+            "title": "贵州茅台2024年报：营收1741亿元_新浪财经",
+            "url": "https://finance.sina.com.cn/a/1",
+            "snippet": "贵州茅台2024年营收1741亿元，净利润862亿元。",
+        }], ensure_ascii=False), encoding="utf-8")
+        (proj / "chart_manifest.json").write_text(json.dumps({"charts": [
+            {"file": "chart_1.png", "chart_id": "core_scale",
+             "binding": {"chart_id": "core_scale", "metric_labels": ["营业收入"],
+                         "unit": "亿元", "periods": [2023, 2024], "caliber": "合并"},
+             "grade": "publish", "question": "两期核心指标规模对比如何？",
+             "observation": "两期核心指标均下降", "type": "grouped_bar"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+
+    BODY_ACCEPT = ("# 贵州茅台2024年报核心财务数据\n\n## 核心指标\n\n"
+                   "| 指标 | 数值 | 来源 |\n|---|---|---|\n"
+                   "| 营业收入 | 1741亿元 | [1] |\n| 净利润 | 862亿元 | [1] |\n\n"
+                   f"## 分析卡\n\n模型 {MODEL_ID}（run={RUN_ID}）"
+                   "本次对两期经营数据得出以下结论…\n\n"
+                   "## 数据时效\n\n数据截至 2024-12-31 年度报告披露日，来源为公开财经报道，"
+                   "日终更新。\n\n"
+                   "## 参考来源\n\n1. [贵州茅台2024年报：营收1741亿元]"
+                   "(https://finance.sina.com.cn/a/1)\n\n"
+                   "## 免责声明\n\n本报告由织光 AI 自动生成，仅供参考，不构成任何投资建议；"
+                   "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。\n")
+
+    def test_assembly_rebinds_selection_after_version_change(self):
+        """装配把采纳版本换掉后，工作区 selection 的身份必须跟到**这一版**。"""
+        from delivery_pipeline import assemble_and_verify, accept_for_body
+        from financial_analysis import store as fa
+        from report_version import VersionStore
+        import task_state
+        task_state.mark_queued(self.tid, goal="贵州茅台2024年报核心财务数据",
+                               db_path=task_state.DB_PATH)
+        self._seed_data()
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        ws = ws_mod.task_workspace(self.tid)
+        body = self.BODY_ACCEPT
+        # 编排器口径：模型正文先登记并采纳（唯一采纳点），装配再把简报立为最终版
+        store0 = VersionStore(ws, self.tid)
+        v_raw = store0.record(body)
+        store0.adopt(v_raw, reason="U90-R2 用例：模型正文先采纳")
+        verdict = accept_for_body(self.tid, "贵州茅台2024年报核心财务数据", body,
+                                  trigger="R2 用例", prefer_body=True, ws_dir=ws) or {}
+        asm = assemble_and_verify(self.tid, "贵州茅台2024年报核心财务数据", body,
+                                  wrapper="# 交付说明",
+                                  accept_fn=lambda t, g, b: verdict or None, ws_dir=ws)
+        store = VersionStore(ws, self.tid)
+        adopted = store.adopted()
+        self.assertTrue(adopted is not None)
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"),
+                         adopted.identity_id(),
+                         "装配后工作区 selection 必须绑定最终采纳版本")
+
+
 class TestNightClosureCounterexamples(unittest.TestCase):
     """09-22 晚间收口：冻结本轮点名的确定性缺口（同值/归因/比率/别名/分母/指纹）。
 

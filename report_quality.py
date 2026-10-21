@@ -67,28 +67,44 @@ def quality_snapshot(text: str, acceptance: dict | None = None) -> dict:
     }
 
 
-def disclaimer_clause(has_external: bool, has_user_material: bool) -> str:
+def disclaimer_clause(has_external: bool, has_user_material: bool, *,
+                      external_desc: str = "", search_degraded: str = "") -> str:
     """按**真实来源**生成免责声明（V1：固定写"数据来源于公开渠道"会与事实冲突）。
 
     - 只用用户材料与派生计算：不能说"公开渠道"，要说清材料真实性未经独立核实；
-    - 引用外部检索：保留"公开渠道，可能存在延迟或误差"；
-    - 两者都有：分别说明，别把用户材料混进"公开渠道"。
+    - 引用外部来源：写明**实际采用的来源类别**（`external_desc`；缺省退回"公开渠道"）；
+    - 两者都有：分别说明，别把用户材料混进"公开渠道"；
+    - `search_degraded`（检索降级原因，如"检索零命中"）：作为**附加事实**注明检索没跑成/
+      没命中——但检索零结果**不等于**没有引用材料，来源措辞仍按实际采用的材料/外部来源走
+      （U90-R4：声明以实际采用的事实与来源为准，不以检索步为准）；
+    - 完全没有来源：如实写"未引用外部数据源"，不冒充公开渠道。
     """
     head = "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
     tail = "据此操作风险自担。"
+    desc = str(external_desc or "").strip()
     if has_external and has_user_material:
-        return (head + "数据同时来自用户提供的材料（其真实性未经独立核实）与公开渠道检索结果"
-                      "（可能存在延迟或误差）；" + tail)
-    if has_user_material:
-        return (head + "数据来自用户提供的材料及据此进行的计算（材料真实性未经独立核实，"
-                      "计算过程可复核）；" + tail)
-    if has_external:
-        return head + "数据来源于公开渠道，可能存在延迟或误差；" + tail
-    return head + "本报告未引用外部数据源，结论仅为模型知识，未经检索验证；" + tail
+        ext_part = (f"{desc}（可能存在延迟或误差）" if desc
+                    else "公开渠道检索结果（可能存在延迟或误差）")
+        text = (head + f"数据同时来自用户提供的材料（其真实性未经独立核实）与{ext_part}；"
+                + tail)
+    elif has_user_material:
+        text = (head + "数据来自用户提供的材料及据此进行的计算（材料真实性未经独立核实，"
+                       "计算过程可复核）；" + tail)
+    elif has_external:
+        text = head + f"数据来自{desc or '公开渠道'}，可能存在延迟或误差；" + tail
+    else:
+        text = head + "本报告未引用外部数据源，结论仅为模型知识，未经检索验证；" + tail
+    if search_degraded:
+        # 如实说明检索本身的状态；不因为"没查到"就改写来源措辞（材料/披露照样是来源）
+        note = (f"本次外部检索降级运行（{search_degraded}），"
+                + ("已采用的公开来源可能不完整；" if "公开渠道" in text
+                   else "报告来源以实际采用的来源清单为准，公开信息可能不完整；"))
+        text = text[: -len(tail)] + note + tail
+    return text
 
 
 def disclaimer_instruction() -> str:
-    """注入报告步骤的免责声明要求：给出三种措辞与选择规则，禁止一律写「公开渠道」。"""
+    """注入报告步骤的免责声明要求：给出措辞与选择规则，禁止一律写「公开渠道」。"""
     return (
         "3. 免责声明（按**真实来源**选择措辞，不得一律照抄）：报告结尾必须包含 "
         "'免责声明' 小节，并按下列对应关系选择：\n"
@@ -97,6 +113,8 @@ def disclaimer_instruction() -> str:
         f"   ③ 两者都有 → 「{disclaimer_clause(True, True)}」\n"
         "   没有外部检索结果时禁止写「数据来源于公开渠道」；用户材料必须写明"
         "「真实性未经独立核实」，不得改称模型知识，也不得伪造来源。\n"
+        "   检索零命中/检索降级时，来源措辞仍按**实际采用的来源**（用户材料、发行人"
+        "披露、第三方平台）写，不得因此声称「未引用任何来源」。\n"
     )
 
 

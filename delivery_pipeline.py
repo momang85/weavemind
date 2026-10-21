@@ -552,11 +552,31 @@ def package_statuses(task_id: str, *, ws_dir=None) -> dict:
                         (man.get("analysis_inputs") or {}).get("recomputable"))
                 else:
                     item["reason"] = "包内没有 PACKAGE_MANIFEST.json（旧包，无法核对身份）"
+                # R2：清单身份对得上还**不够**——同一次导出里包内冻结的选择记录也必须
+                # 是这一版（实测三一 `375af7`：manifest 23b61bee… 而包内
+                # `analysis/selection.json.adopted_identity=d290ab01…`）。旧包字节不动，
+                # 但**不得再当"当前包"下载**：身份不一致即历史包。
+                if "analysis/selection.json" in zf.namelist():
+                    try:
+                        _sel = json.loads(
+                            zf.read("analysis/selection.json").decode("utf-8")) or {}
+                        item["selection_identity"] = str(
+                            _sel.get("adopted_identity") or "")
+                    except Exception as exc:         # noqa: BLE001 - 解析不了如实标记
+                        item["selection_identity"] = ""
+                        item["reason"] = item["reason"] or f"包内选择记录不可读：{str(exc)[:60]}"
         except Exception as exc:                 # noqa: BLE001 - 坏包如实标
             item["reason"] = f"包不可读：{str(exc)[:80]}"
+        _sel_id = str(item.get("selection_identity") or "")
+        _sel_conflict = bool(adopted_id and _sel_id and _sel_id != adopted_id)
         if not adopted_id:
             item["status"] = "unknown"
             item["reason"] = item["reason"] or "该任务没有采纳版本，无法判定同版"
+        elif _sel_conflict:
+            item["status"] = "historical"
+            item["reason"] = (f"包内选择记录 {_sel_id[:12]} != 当前采纳 "
+                              f"{adopted_id[:12]}：这一版导出与选择记录不同源，"
+                              f"旧包保留但不得当当前稿下载（重新导出即生成同版包）")
         elif item["identity"] and item["identity"] == adopted_id:
             item["status"] = "current"
             item["reason"] = ""
@@ -985,14 +1005,17 @@ def _disk_drift(ws, frozen: dict) -> dict:
             continue                     # 正文/PDF 由导出动作本身写出，不算漂移
         name = arc.split("/", 1)[1] if "/" in arc else arc
         cands: list = []
+        # 工作区里的自然位置优先（analysis/plan.json 这类二级目录成员此前被误报
+        # missing_on_disk——文件明明在，只是映射只认 project/ 平铺两种布局）。
+        cands = [ws / arc]
         if arc.startswith("charts/"):
-            cands = [ws / "charts" / name]
+            cands += [ws / "charts" / name]
         elif arc.startswith("audit/"):
-            cands = [ws / "project" / name, ws / name]
+            cands += [ws / "project" / name, ws / name]
         elif arc.startswith("evidence/"):
-            cands = [ws / "project" / name, ws / name]
+            cands += [ws / "project" / name, ws / name]
         else:
-            cands = [ws / "project" / name, ws / name]
+            cands += [ws / "project" / name, ws / name]
         p = next((c for c in cands if c.is_file()), None)
         if p is None:
             out[arc] = "missing_on_disk"
@@ -1026,12 +1049,24 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
         raise LookupError("该任务没有可导出的采纳版本")
     body_text = str(getattr(adopted, "body", "") or "")
     text = str(delivered_text or "")
-    # R2（受保护读取）：交付正文必须能证明属于**这一版**。两条证据任一成立即可：
+    # R2（受保护读取）：交付正文必须能证明属于**这一版**。三条证据任一成立即可：
+    #   ⓪ 交付正文就是这一版采纳正文本身（恢复/采纳后页面交付的就是它）；
     #   ① 版本库的交付登记（装配时记下的 delivered_sha256 + 对应当前身份 + aligned）；
     #   ② 生产渲染入口能把采纳正文渲成交付正文（外壳可包住它）。
     # 都对不上 → version changed（调用方 409 重试），不把旧正文贴上新身份。
     binding_verified = False
+    binding_evidence = ""
     if text:
+        # 证据⓪（R2 同版的最强形式）：交付正文**就是**这一版采纳正文本身。
+        # 恢复/采纳把投影换成采纳正文后（`_restore_version_state` → 投影），页面
+        # 交付的正是它——直接判定同版，不再退到"重渲包含"或交付登记。
+        try:
+            if str(body_hash(text)) == str(getattr(adopted, "version_id", "") or ""):
+                binding_verified = True
+                binding_evidence = "same_as_adopted_body"
+        except Exception as exc:                 # noqa: BLE001 - 哈希失败退到别的证据
+            logger.warning("导出快照：交付正文哈希失败（task=%s）：%s", task_id, str(exc)[:80])
+    if text and not binding_verified:
         try:
             for d in reversed(store.deliveries()):
                 if str(d.get("report_version_id") or "") != adopted.identity_id():
@@ -1040,6 +1075,7 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
                     continue
                 if str(d.get("delivered_sha256") or "") == body_hash(text):
                     binding_verified = True
+                    binding_evidence = "delivery_registry"
                 else:
                     raise RuntimeError("version changed")
                 break
@@ -1059,8 +1095,9 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
         if text and not _same and not binding_verified:
             # 交付正文不是这一版正文渲染出来的（期间有修订或读到了旧投影）
             raise RuntimeError("version changed")
-        if _same:
+        if _same and not binding_verified:
             binding_verified = True
+            binding_evidence = "rendered_containment"
         if not text:
             text = _rendered
             binding_verified = True
@@ -1068,6 +1105,28 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
         # 两条证据都不成立：**fail closed**——宁可不导出，也不把无法证明归属的正文
         # 贴上当前身份（复核探针的缺陷正是"包内正文 A + 身份 B"仍自检绿）。
         raise RuntimeError("binding unverified")
+    # R2（采纳→selection→冻结 同版）：选择记录的 `adopted_identity` 只在「分析采纳」
+    # 入口写入，人工修订/重装配/检查点恢复换掉采纳版本后就落后——同一份包里 manifest
+    # 的 `report_version_id` 是新身份、`analysis/selection.json` 还写着旧身份
+    # （实测三一：manifest 23b61bee… vs 包内 selection d290ab01…）。这里在**冻结之前**
+    # 回绑：正文仍绑定所选运行（run_id 出现在分析卡里，与采纳入口同一判据）才改，
+    # 证明不了就如实记录不一致进快照（清单可见，不隐藏、不假成功）。
+    _sel_binding: dict = {}
+    try:
+        from financial_analysis.store import rebind_selection_identity as _rbs
+        _sel_binding = _rbs(ws, adopted.identity_id(),
+                            body_text=text or body_text,
+                            reason="导出快照按当前采纳版本回绑选择身份") or {}
+        if _sel_binding.get("changed"):
+            logger.info("导出快照：选择身份回绑 %s→%s（task=%s，凭 %s）",
+                        str(_sel_binding.get("from") or "")[:12],
+                        str(_sel_binding.get("to") or "")[:12],
+                        task_id, str(_sel_binding.get("verified_by") or ""))
+        elif not _sel_binding.get("consistent"):
+            logger.warning("导出快照：选择身份未回绑（task=%s）：%s",
+                           task_id, str(_sel_binding.get("reason") or "")[:140])
+    except Exception as exc:                     # noqa: BLE001 - 回绑失败不阻断导出，但要可见
+        logger.warning("导出快照：选择身份回绑失败（task=%s）：%s", task_id, str(exc)[:120])
     if not md_bytes and text:
         md_bytes = text.encode("utf-8")
     payload = _freeze_payload(task_id, ws, md_bytes=md_bytes, pdf_bytes=pdf_bytes)
@@ -1087,9 +1146,13 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
         "body_sha256": str(getattr(adopted, "version_id", "") or ""),
         "body_text_sha256": body_hash(body_text),
         "delivered_sha256": body_hash(text) if text else "",
-        # 未知依赖不伪装成已验证：两条绑定证据都没有时如实标 False（页面/清单可见）
+        # 未知依赖不伪装成已验证：三条绑定证据都没有时如实标 False（页面/清单可见）
         "binding_verified": bool(binding_verified),
+        "binding_evidence": binding_evidence,
         "delivered_text": text,
+        # R2：选择身份回绑记录（changed/consistent/reason）——同版证据链的一部分，
+        # 页面与清单都能看到"选择记录是否与这一版同源"
+        "selection_binding": dict(_sel_binding),
         "sources_fingerprint": sources_fingerprint(task_id, text),
         "rules_version": rv,
         "rules_fingerprint": rf,
@@ -1140,6 +1203,8 @@ def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
     out["snapshot_captured_at"] = float(snap.get("captured_at") or 0.0)
     out["binding_verified"] = bool(snap.get("binding_verified"))
     out["delivered_sha256"] = str(snap.get("delivered_sha256") or "")
+    # R2：选择身份回绑记录（若这次快照发生过回绑或发现不一致，如实写进清单）
+    out["selection_binding"] = dict(snap.get("selection_binding") or {})
     out["frozen"] = dict(want)
     out["analysis_runs"] = analysis_binding(ws) if ws is not None else {
         "schema": "weavemind.analysis_runs/1", "count": 0, "validated": 0, "runs": []}
@@ -2535,6 +2600,26 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
                 _rb.write_structure(task_id, _st_proj, ws_dir=ws_dir)
     except Exception as exc:                     # noqa: BLE001 - 投影同步失败不阻断交付
         logger.warning("结构投影与采纳正文同步失败（task=%s）：%s", task_id, str(exc)[:140])
+
+    # R2（采纳→selection→冻结 同版）：装配把采纳版本换掉之后，选择记录的
+    # `adopted_identity` 必须跟着**这一版**——否则一次导出里 manifest 的身份与分析
+    # 选择的身份会是两版（实测三一包：23b61bee… vs d290ab01…）。同一判据：正文里
+    # 找得到所选运行才回绑；找不到就不改，由导出快照把不一致如实记进清单。
+    try:
+        from financial_analysis.store import rebind_selection_identity as _rbs
+        _adopted_final = store.adopted()
+        _rb_out = _rbs(_ws(task_id, ws_dir), (
+            _adopted_final.identity_id() if _adopted_final is not None else ""),
+            body_text=body, reason="装配后按最终采纳版本回绑选择身份")
+        if _rb_out.get("changed"):
+            logger.info("交付装配：选择身份回绑 %s→%s（task=%s）",
+                        str(_rb_out.get("from") or "")[:12],
+                        str(_rb_out.get("to") or "")[:12], task_id)
+        elif not _rb_out.get("consistent"):
+            logger.warning("交付装配：选择身份未回绑（task=%s）：%s",
+                           task_id, str(_rb_out.get("reason") or "")[:140])
+    except Exception as exc:                     # noqa: BLE001 - 回绑失败不阻断交付
+        logger.warning("交付装配：选择身份回绑失败（task=%s）：%s", task_id, str(exc)[:120])
 
     wp = paper if paper is not None else write_working_paper(
         task_id, goal, project=project)

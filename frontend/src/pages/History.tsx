@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTaskStore } from '../stores/useTaskStore'
 import type { ConversationSummary, ConversationMessage, TaskSummary } from '../stores/types'
-import { FileText, ChevronDown, ChevronRight, MessagesSquare, Play } from 'lucide-react'
+import { FileText, ChevronDown, ChevronRight, MessagesSquare, Play, PlayCircle } from 'lucide-react'
 import { ReportMarkdown } from '../components/ReportViewer'
 import { EmptyState, StatusBadge } from '../components/ui'
 import { normalizeDeliverySummary } from '../lib/format'
 import { formatLocalTime } from '../lib/format'
+import { requestResume, resumeBlockedReason, resumeButtonState, resumeVisible, beginResumeNote, applyResumeResult, type ResumeNote } from '../lib/resume'
 
 export default function History() {
   const [mode, setMode] = useState<'conv' | 'tasks'>('conv')
@@ -16,6 +17,9 @@ export default function History() {
   const [fullReports, setFullReports] = useState<Record<string, string>>({})
   // P0-1：SUCCESS_WITH_ISSUES 任务的验收缺口明细（展开时按需加载）
   const [taskGaps, setTaskGaps] = useState<Record<string, string[]>>({})
+  // U90-B：「继续执行」的点击回执（逐任务）；U90-R3：回执改为三态
+  // （pending/ok/failed），失败且可重试时按钮保持可用，不再永久禁用
+  const [resumeNote, setResumeNote] = useState<Record<string, ResumeNote>>({})
   const { fetchSystemStatus } = useTaskStore()
 
   const loadConversations = useCallback(async () => {
@@ -87,6 +91,19 @@ export default function History() {
 
   const continueConversation = (id: string) => {
     window.location.href = '/?conv=' + encodeURIComponent(id)
+  }
+
+  // U90-B：失败任务就地「继续执行」——不重复整单，只跑未完步骤；拿到回执再刷新列表，
+  // 状态与按钮态随之更新（不乐观改状态，避免"看起来恢复了其实没有"）。
+  // U90-R3：只挡在途请求（双击去重）；失败/超时回执保留在按钮旁并**允许再点**，
+  // 只有服务端判定不可重试（终态/已确认被接管）才禁用。
+  const doResume = async (tid: string) => {
+    const note = resumeNote[tid]
+    if (note?.phase === 'pending' || note?.phase === 'ok') return
+    setResumeNote(prev => beginResumeNote(prev, tid))
+    const r = await requestResume(tid)
+    setResumeNote(prev => applyResumeResult(prev, tid, r))
+    if (r.ok) loadTasks()
   }
 
   return (
@@ -201,14 +218,52 @@ export default function History() {
                   <span className="text-slate-600 text-xs">{formatLocalTime(t.created_at)}</span>
                 </button>
                 {expanded.has('task-' + t.task_id) && (
-                  <div className="px-5 pt-4 border-t border-slate-800 flex items-center justify-between">
+                  <div className="px-5 pt-4 border-t border-slate-800 flex items-center justify-between gap-3">
                     <span className="text-slate-500 text-xs">在工作台里看这份任务的报告、复算与导出版本</span>
-                    <button
-                      onClick={() => { window.location.href = '/?task=' + encodeURIComponent(t.task_id) }}
-                      className="text-xs px-3 py-1.5 rounded-lg bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20"
-                    >
-                      打开研究工作台
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {resumeVisible(t.resume) && (() => {
+                        // U90-R3：按钮态由回执三态推导——在途/已接管禁用，
+                        // 失败（503 等）保持可点并给出失败原文与"重试"文案
+                        const btn = resumeButtonState(resumeNote[t.task_id], t.resume)
+                        return (
+                          <>
+                            <button
+                              onClick={() => doResume(t.task_id)}
+                              disabled={btn.disabled}
+                              title={btn.hint || String(t.resume?.reason || '')}
+                              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-60"
+                            >
+                              <PlayCircle className="w-3 h-3" /> {btn.label}
+                            </button>
+                            {resumeNote[t.task_id] && (resumeNote[t.task_id].phase === 'failed' || resumeNote[t.task_id].phase === 'timeout') && (
+                              <span className="text-xs text-amber-400/90 max-w-[26rem] truncate" title={btn.hint}>
+                                {btn.hint}
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
+                      <button
+                        onClick={() => { window.location.href = '/?task=' + encodeURIComponent(t.task_id) }}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20"
+                      >
+                        打开研究工作台
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {/* U90-B：失败原因与"为什么（不）能继续"——同一份后端判定，如实解释 */}
+                {expanded.has('task-' + t.task_id) && t.status === 'FAILED' && (t.resume?.failure || t.resume?.reason) && (
+                  <div className="px-5 pb-2 border-t border-slate-800 text-xs space-y-1">
+                    {t.resume?.failure && <div className="text-red-400/90">上次失败：{t.resume.failure}</div>}
+                    {t.resume?.reason && !t.resume?.failure && (
+                      <div className="text-slate-500">{t.resume.reason}</div>
+                    )}
+                  </div>
+                )}
+                {expanded.has('task-' + t.task_id) && t.status === 'CANCELLED' && resumeBlockedReason(t.resume) && (
+                  <div className="px-5 pb-2 border-t border-slate-800 text-xs text-slate-500">
+                    {resumeBlockedReason(t.resume)}
                   </div>
                 )}
                 {expanded.has('task-' + t.task_id) && t.report && (

@@ -26,18 +26,22 @@ from unittest import mock
 
 import orchestrator_v2 as ov  # noqa: E402
 import task_state as ts  # noqa: E402
+import workspace  # noqa: E402
 from test_orchestrator_v2 import FakeMessaging, make_orch  # noqa: E402
 
 # 真实序列化形状（`_finalize_task` 落 steps_json 的结构）：状态在 **result 内**
 _STEP1 = {"step_id": "1", "capability": "web_search",
           "instruction": "搜索年报",
+          "contract": {"version": 1, "fingerprint": "c" * 64},
           "result": {"task_id": "1", "status": "SUCCESS",
                      "result": "[{\"title\":\"2024年报\",\"url\":\"https://e.com/a\"}]"}}
-_STEP2 = {"step_id": "2", "capability": "content_analysis",
-          "instruction": "分析两期",
+_STEP2 = {"step_id": "2", "capability": "content_summary",
+          "instruction": "分析两期", "depends_on": ["1"],
+          "contract": {"version": 1, "fingerprint": "c" * 64},
           "result": {"task_id": "2", "status": "SUCCESS", "result": "营收增长 8%"}}
 _STEP3_FAILED = {"step_id": "3", "capability": "report_generator",
-                 "instruction": "写报告",
+                 "instruction": "写报告", "depends_on": ["2"],
+                 "contract": {"version": 1, "fingerprint": "c" * 64},
                  "result": {"task_id": "3", "status": "FAILED", "result": "超时"}}
 
 
@@ -46,11 +50,29 @@ def _plan():
     return [
         {"step_id": "1", "capability": "web_search", "instruction": "搜索年报",
          "depends_on": [], "timeout": 30},
-        {"step_id": "2", "capability": "content_analysis", "instruction": "分析两期",
+        {"step_id": "2", "capability": "content_summary", "instruction": "分析两期",
          "depends_on": ["1"], "timeout": 30},
         {"step_id": "3", "capability": "report_generator", "instruction": "写报告",
          "depends_on": ["2"], "timeout": 30},
     ]
+
+
+# U90-R1：一份"合法复用正例"需要的最小产物集（对应 `_RESUME_STEP_ARTIFACTS`）：
+#   step1 web_search → project/fetch_snapshot.json
+#   step2 content_summary → narrative_evidence.json
+#   step3 report_generator → reports/report.md
+_ARTIFACT_FILES = ("project/fetch_snapshot.json", "narrative_evidence.json",
+                   "project/working_paper.json", "reports/report.md",
+                   "export_manifest.json")
+
+
+def _seed_artifacts(ws):
+    """按真实工作区布局落一份最小产物集（缺一个就是 R1 的反例）。"""
+    for rel in _ARTIFACT_FILES:
+        p = Path(ws) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}", encoding="utf-8")
+    return Path(ws)
 
 
 class _FakeRedis:
@@ -89,7 +111,7 @@ class _FakeRedis:
 
 
 class TestLoadResumableSteps(unittest.TestCase):
-    """① 读回已持久化 SUCCESS 步骤（两个通道 + 只认当前计划）。"""
+    """① 读回已持久化 SUCCESS 步骤（两个通道 + 只认当前计划 + 产物仍有效）。"""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wm_t26_db_"))
@@ -101,6 +123,14 @@ class TestLoadResumableSteps(unittest.TestCase):
         self._p_snap = mock.patch.object(ts, "read_snapshot", return_value={})
         self._p_snap.start()
         self.addCleanup(self._p_snap.stop)
+        # U90-B/R1：复用前提是**产物还在**——工作区目录默认存在且带最小产物集
+        # （真实续跑场景），单独的测试覆盖"工作区被清理/空目录/缺单个产物"。
+        import workspace as ws_mod
+        self._ws = _seed_artifacts(self.tmp / "ws")
+        self._p_ws = mock.patch.object(ws_mod, "task_workspace",
+                                       lambda tid, project=None: self._ws)
+        self._p_ws.start()
+        self.addCleanup(self._p_ws.stop)
         self.o = make_orch()
 
     def _persist(self, steps, status=ts.FAILED, task_id="T1"):
@@ -158,6 +188,181 @@ class TestLoadResumableSteps(unittest.TestCase):
         self.assertEqual(self.o._load_resumable_steps("T3", _plan()), {},
                          "坏 JSON 按'没有已完成步骤'处理，绝不抛")
 
+    def test_missing_workspace_reuses_nothing(self):
+        """U90-B：工作区被清理 → 步骤产物已不存在，step_id+SUCCESS 不得当作可复用
+        （否则下游拿不到事实/底稿，只能凭注入文本继续编）。全部重跑。"""
+        self._persist([_STEP1, _STEP2])
+        import workspace as ws_mod
+        gone = self.tmp / "ws_gone"          # 存在性校验以真实目录为准
+        with mock.patch.object(ws_mod, "task_workspace",
+                               lambda tid, project=None: gone):
+            self.assertEqual(self.o._load_resumable_steps("T1", _plan()), {},
+                             "工作区不存在 → 一步都不复用（产物无效）")
+
+
+class TestResumeValidityChecks(unittest.TestCase):
+    """U90-R1：断点复用的**身份 + 产物**真校验（架构师反例逐条转负为正）。
+
+    反例（原实现全部错误地复用）：
+      ① 空工作区（目录在、产物不在）；② 单个必需产物缺失；
+      ③ 同 step_id 换能力 / 换指令 / 换依赖；④ 执行契约指纹变化；
+      ⑤ 上游被拒 → 下游连带重做。
+    正例：身份与产物都有效 → 确实跳过、不重复派发。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_t26_r1_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.db = str(self.tmp / "agents.db")
+        self._p_db = mock.patch.object(ts, "DB_PATH", self.db)
+        self._p_db.start()
+        self.addCleanup(self._p_db.stop)
+        self._p_snap = mock.patch.object(ts, "read_snapshot", return_value={})
+        self._p_snap.start()
+        self.addCleanup(self._p_snap.stop)
+        import workspace as ws_mod
+        self._ws = _seed_artifacts(self.tmp / "ws")
+        self._p_ws = mock.patch.object(ws_mod, "task_workspace",
+                                       lambda tid, project=None: self._ws)
+        self._p_ws.start()
+        self.addCleanup(self._p_ws.stop)
+        self.o = make_orch()
+
+    def _persist(self, steps, task_id="T1"):
+        ts.mark_queued(task_id, "研究某公司", db_path=self.db)
+        ts.record_completion(task_id, goal="研究某公司", status=ts.FAILED,
+                             steps=steps, db_path=self.db)
+
+    def test_positive_identity_and_artifacts_are_reused(self):
+        """正例：身份一致 + 产物齐 → 跳过（不重复派发）。"""
+        self._persist([_STEP1, _STEP2, _STEP3_FAILED])
+        got = self.o._load_resumable_steps("T1", _plan())
+        self.assertEqual(sorted(got), ["1", "2"], f"应复用 1/2：{sorted(got)}")
+
+    def test_empty_workspace_dir_reuses_nothing(self):
+        """反例①：工作区目录存在但为空（原实现只查目录存在 → 错判可复用）。"""
+        self._persist([_STEP1, _STEP2])
+        empty = self.tmp / "ws_empty"
+        empty.mkdir(parents=True, exist_ok=True)
+        import workspace as ws_mod
+        with mock.patch.object(ws_mod, "task_workspace",
+                               lambda tid, project=None: empty):
+            self.assertEqual(self.o._load_resumable_steps("T1", _plan()), {},
+                             "空目录 → 没有任何步骤产物可证明有效 → 全部重做")
+
+    def test_single_missing_required_artifact_blocks_that_step(self):
+        """反例②：单个必需产物缺失（底稿没了）→ 该步骤重做，其余照常复用。"""
+        self._persist([_STEP1, _STEP2, _STEP3_FAILED])
+        (self._ws / "project" / "working_paper.json").unlink()
+        self.o._plan_for_test = None
+        plan = _plan()
+        plan[1]["capability"] = "data_analyzer"        # 必需产物 = 底稿
+        got = self.o._load_resumable_steps("T1", plan)
+        self.assertNotIn("2", got, "底稿缺失 → data_analyzer 步骤必须重做")
+        self.assertEqual(sorted(got), ["1"])
+
+    def test_recorded_artifact_path_missing_blocks_reuse(self):
+        """反例②'：结果里**自己记录**的产物路径丢了 → 不复用（file_io 类无固定产物）。"""
+        entry = {"step_id": "1", "capability": "file_io", "instruction": "写文件",
+                 "result": {"status": "SUCCESS",
+                            "path": str(self._ws / "project" / "made_by_step.txt")}}
+        self._persist([entry])
+        plan = [{"step_id": "1", "capability": "file_io", "instruction": "写文件",
+                 "depends_on": []}]
+        self.assertEqual(self.o._load_resumable_steps("T1", plan), {},
+                         "记录的产物不在盘上 → 无法证明有效 → 重做")
+        (self._ws / "project" / "made_by_step.txt").write_text("x", encoding="utf-8")
+        got = self.o._load_resumable_steps("T1", plan)
+        self.assertEqual(sorted(got), ["1"], "产物回到盘上 → 可复用（正例）")
+
+    def test_same_id_changed_capability_not_reused(self):
+        """反例③a：同 step_id 换能力 → 旧结果不得沿用。"""
+        self._persist([_STEP1])
+        plan = _plan()
+        plan[0]["capability"] = "data_analyzer"
+        self.assertEqual(self.o._load_resumable_steps("T1", plan), {})
+
+    def test_same_id_changed_instruction_not_reused(self):
+        """反例③b：同 step_id 换指令 → 旧结果不得沿用。"""
+        self._persist([_STEP1])
+        plan = _plan()
+        plan[0]["instruction"] = "搜索年报（换一批查询）"
+        self.assertEqual(self.o._load_resumable_steps("T1", plan), {})
+
+    def test_same_id_changed_dependency_not_reused(self):
+        """反例③c：同 step_id 换依赖（输入面变了）→ 旧结果不得沿用。"""
+        self._persist([_STEP2])
+        plan = _plan()
+        plan[1]["depends_on"] = []                     # 原本 depends_on=["1"]
+        self.assertEqual(self.o._load_resumable_steps("T1", plan), {})
+
+    def test_contract_fingerprint_change_blocks_reuse(self):
+        """反例④：执行契约指纹与当前任务不一致 → 一步都不复用。"""
+
+        class _OtherContract:
+            def apply_to_steps(self, steps):
+                return ([dict(s) for s in steps], [])
+
+            def matches(self, wire):
+                return False
+
+        with mock.patch.object(ov.OrchestratorV2, "_task_contract",
+                               lambda self, tid: _OtherContract()):
+            self._persist([_STEP1, _STEP2])
+            self.assertEqual(self.o._load_resumable_steps("T1", _plan()), {},
+                             "契约不一致 → 旧断点全部按需重做")
+
+    def test_contract_match_keeps_positive_reuse(self):
+        """正例（契约维度）：契约一致时仍复用（不多重做、不白发钱）。"""
+
+        class _SameContract:
+            def apply_to_steps(self, steps):
+                return ([dict(s) for s in steps], [])
+
+            def matches(self, wire):
+                return str((wire or {}).get("fingerprint") or "") == "c" * 64
+
+        with mock.patch.object(ov.OrchestratorV2, "_task_contract",
+                               lambda self, tid: _SameContract()):
+            self._persist([_STEP1, _STEP2])
+            self.assertEqual(sorted(self.o._load_resumable_steps("T1", _plan())),
+                             ["1", "2"])
+
+    def test_upstream_rejection_invalidates_downstream(self):
+        """反例⑤：上游不复用 → 下游即使自己的产物在也一并重做。"""
+        self._persist([_STEP1, _STEP2])
+        # 抽掉 web_search 的必需产物（抓取缓存 + 证据层）
+        (self._ws / "project" / "fetch_snapshot.json").unlink()
+        (self._ws / "narrative_evidence.json").unlink()
+        got = self.o._load_resumable_steps("T1", _plan())
+        self.assertEqual(got, {},
+                         "步骤1 被拒 → 依赖它的步骤2（及更下游）同样不得复用")
+        self.assertTrue((self._ws / "project" / "working_paper.json").exists(),
+                        "下游产物确实还在，但上游变化仍必须连带重做")
+
+    def test_instruction_core_contained_is_reused(self):
+        """正例（真实形状）：落库指令 = 核心指令 + 运行期追加的上下文（任务目标/
+        用户目标/原始指令/技能包）→ 核心被完整包含 → 同一步骤，可复用。"""
+        stored = dict(_STEP2)
+        stored["instruction"] = ("任务目标：研究某公司\n\n用户目标：研究某公司\n\n"
+                                 "原始指令：分析两期\n\n验收：输出可验证结果")
+        self._persist([stored])
+        self.assertEqual(sorted(self.o._load_resumable_steps("T1", _plan())), ["2"],
+                         "运行期追加上下文不改写核心 → 仍应复用（否则真实任务永远全量重跑）")
+
+    def test_replanned_step_is_not_reused(self):
+        """反例⑥：上次由**重规划代做**（能力-执行者错配换了指令）→ 执行指令已非
+        当前计划指令，证明不了同输入 → 重做（真机 docker 不可用时这类步骤很多）。"""
+        stored = dict(_STEP2)
+        stored["result"] = dict(_STEP2["result"], replanned=True,
+                                mismatch_capability="content_summary",
+                                mismatch_agent="content_summarizer",
+                                replan_instruction="改用模型知识整理，不依赖上游检索")
+        stored["instruction"] = "任务目标：研究某公司\n\n原始指令：分析两期"
+        self._persist([stored])
+        self.assertEqual(self.o._load_resumable_steps("T1", _plan()), {},
+                         "重规划代做的步骤不得当作'同一步骤的已完成结果'")
+
 
 class TestExecuteStepsSkipsCompleted(unittest.TestCase):
     """② 派发循环：resume 时跳过已成功步骤，只跑未完步骤。"""
@@ -183,6 +388,10 @@ class TestExecuteStepsSkipsCompleted(unittest.TestCase):
         ts.mark_queued(task_id, "研究某公司", db_path=self.db)
         ts.record_completion(task_id, goal="研究某公司", status=status,
                              steps=steps, db_path=self.db)
+        # U90-B/R1：复用前提是产物还在——真实续跑场景工作区目录必然存在且带产物，
+        # 这里按 `_RESUME_STEP_ARTIFACTS` 落一份最小产物集。
+        from workspace import task_workspace
+        _seed_artifacts(task_workspace(task_id))
         o = make_orch()
         o._task_goals = {task_id: "研究某公司"}
         o._task_prompt_hints = {}
@@ -479,7 +688,11 @@ class TestResumeApi(unittest.TestCase):
                          ts.FAILED, "Redis 不在时不得先把状态改掉")
 
     def test_publish_failure_does_not_leave_running(self):
-        """翻成功但消息发不出去 → 报 503（状态由看护线程按 stale RUNNING 收口）。"""
+        """U90-R3：翻成功但消息发不出去 → 回滚为 FAILED 且**可再次操作**。
+
+        旧实现只报 503 而状态留在 RUNNING：用户重试拿到 409「当前 RUNNING」，
+        即失败不可再次操作，只能等看护线程按 stale RUNNING 收口（分钟级）。
+        """
         import web_ui
         self._seed(ts.FAILED, task_id="ui-pf")
 
@@ -495,6 +708,83 @@ class TestResumeApi(unittest.TestCase):
             res = web_ui._post_task_resume(self._Fake(), "/api/task/ui-pf/resume",
                                            {}, {"user": "u"})
         self.assertEqual(res[0], 503)
+        body = res[1]
+        self.assertTrue(body.get("retryable"), f"发布失败已回滚，应可重试：{body}")
+        self.assertEqual(ts.read_task("ui-pf", db_path=self.db)["status"],
+                         ts.FAILED, "发布失败必须回滚，不能把任务留在 RUNNING")
+
+        # 再次操作：这次 Redis 正常 → 恢复成功（旧实现这里会 409）
+        res2, fake2, _ = self._call("/api/task/ui-pf/resume")
+        self.assertEqual(res2[0], 200, res2[1])
+        self.assertEqual(ts.read_task("ui-pf", db_path=self.db)["status"],
+                         ts.RUNNING)
+        self.assertEqual(len(fake2.published), 1)
+
+    def test_publish_failure_after_takeover_does_not_clobber(self):
+        """编排器已接管（phase 已变）时不得回滚——只回滚本次恢复刚写的标记。
+
+        真实竞态里回滚 CAS 会落空（另一入口/看护线程已改行）：接口必须如实说
+        「状态未能回滚，请先刷新」，而不是谎称可重试。
+        """
+        import web_ui
+        self._seed(ts.FAILED, task_id="ui-pf2")
+
+        class _Boom(_FakeRedis):
+            def publish(self, *a, **k):
+                raise RuntimeError("redis down")
+
+        with mock.patch.object(web_ui, "_task_exists", return_value=True), \
+                mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis",
+                                  return_value=_Boom({})), \
+                mock.patch.object(ts, "mark_resume_undone",
+                                  return_value=False) as undone, \
+                mock.patch.object(web_ui, "audit_log"):
+            res = web_ui._post_task_resume(self._Fake(), "/api/task/ui-pf2/resume",
+                                           {}, {"user": "u"})
+        self.assertEqual(res[0], 503)
+        undone.assert_called_once()
+        self.assertFalse(res[1].get("retryable"),
+                         "无法回滚时不得谎称可重试（先刷新看状态）")
+        self.assertIn("刷新", res[1]["error"])
+        self.assertEqual(ts.read_task("ui-pf2", db_path=self.db)["status"],
+                         ts.RUNNING, "回滚未生效时不得再改状态")
+
+    def test_mark_resume_undone_only_rolls_back_own_marker(self):
+        """回滚 CAS 只认本次恢复写的 phase='恢复执行'。"""
+        self._seed(ts.FAILED, task_id="ui-und")
+        self.assertFalse(ts.mark_resume_undone("ui-und", db_path=self.db),
+                         "FAILED 状态没有可回滚的恢复标记")
+        self.assertTrue(ts.mark_resumed("ui-und", db_path=self.db))
+        self.assertTrue(ts.mark_resume_undone("ui-und", reason="测试",
+                                              db_path=self.db))
+        row = ts.read_task("ui-und", db_path=self.db)
+        self.assertEqual(row["status"], ts.FAILED)
+        self.assertEqual(row["phase"], "恢复未生效")
+        self.assertFalse(ts.mark_resume_undone("ui-und", db_path=self.db),
+                         "重复回滚必须落空（幂等）")
+
+    def test_error_bodies_carry_status_and_retryable(self):
+        """URL 404/409/503 的回执带上真实状态与"能否再试"（页面据此决定按钮）。"""
+        self._seed(ts.SUCCESS, task_id="ui-body")
+        res, _f, _a = self._call("/api/task/ui-body/resume")
+        self.assertEqual(res[0], 409)
+        self.assertEqual(res[1].get("status"), ts.SUCCESS)
+        self.assertFalse(res[1].get("retryable"))
+
+        self._seed(ts.FAILED, task_id="ui-body2")
+        res, _f, _a = self._call("/api/task/ui-body2/resume", redis_ready=False)
+        self.assertEqual(res[0], 503)
+        self.assertTrue(res[1].get("retryable"), "Redis 不在时可稍后再试")
+
+        # CAS 落空：另一方赢了 → 回执如实说"已在运行"，不再让用户重复点
+        self._seed(ts.FAILED, task_id="ui-body3")
+        self.assertTrue(ts.mark_resumed("ui-body3", db_path=self.db))
+        res, _f, _a = self._call("/api/task/ui-body3/resume")
+        self.assertEqual(res[0], 409)
+        self.assertEqual(res[1].get("status"), ts.RUNNING)
+        self.assertTrue(res[1].get("resumed"))
+        self.assertFalse(res[1].get("retryable"))
 
     def test_non_resume_path_returns_none(self):
         import web_ui
@@ -529,6 +819,72 @@ class TestResumeApi(unittest.TestCase):
         self.assertIn("_restore_dead_fetch(task_id)", body)
         self.assertIn("if not _is_resume_run:", body,
                       "续跑不得清空工作区（会把已完成步骤的产物删掉）")
+
+
+class TestRestoreAdoptProjectsBody(unittest.TestCase):
+    """U90-R2：恢复采纳哪一版正文，交付投影就写哪一版（页面/导出同版）。
+
+    实测洋河 `ui-91677c7767`：恢复包内 MD `f11adbec…` ≠ 同时下载的页面 MD
+    `3a0a3163…`——采纳版本换了而投影没换，一次导出里出现两份"正文"。
+    `_restore_version_state` 修复后把已选中（或刚采纳）的正文写进交付投影，
+    只写 report，不碰状态与验收。
+    """
+
+    tid = "ui-r2-proj"
+    BODY_A = "# 两期经营研究（版本A）\n\n2024 营收 1741 亿元，同比增长 15.7%。"
+    BODY_B = "# 两期经营研究（版本B）\n\n2024 营收 862 亿元（另一口径整理稿）。"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_r2proj_"))
+        self._old_root = workspace.WORKSPACE_ROOT
+        self._old_db = ts.DB_PATH
+        workspace.configure_workspace_root(str(self.tmp))
+        ts.DB_PATH = str(self.tmp / "r2proj.db")
+        self.addCleanup(setattr, workspace, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, ts, "DB_PATH", self._old_db)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _seed_failed_task(self):
+        ts.mark_queued(self.tid, "研究某公司", db_path=ts.DB_PATH)
+        ts.record_completion(self.tid, goal="研究某公司", status=ts.FAILED,
+                             report=self.BODY_A, db_path=ts.DB_PATH)
+
+    def _orch(self):
+        o = make_orch()
+        o._version_stores = {}
+        return o
+
+    def test_checkpoint_body_registered_and_projected(self):
+        """检查点正文在版本库无记录 → 登记并采纳，投影写这一版正文。"""
+        self._seed_failed_task()
+        o = self._orch()
+        out = o._restore_version_state(self.tid, self.BODY_A)
+        self.assertEqual(out, self.BODY_A, "以恢复的正文为准")
+        from report_version import VersionStore
+        store = VersionStore(workspace.task_workspace(self.tid), self.tid)
+        adopted = store.adopted()
+        self.assertIsNotNone(adopted, "恢复采纳必须落进版本库")
+        self.assertEqual(adopted.body, self.BODY_A)
+        # 投影：页面/导出读的正文 = 刚采纳的这一版
+        proj = ts.read_task(self.tid, db_path=ts.DB_PATH)
+        self.assertEqual(proj.get("report"), self.BODY_A)
+        self.assertEqual(proj.get("status"), ts.FAILED,
+                         "只写正文；失败状态不得被恢复洗掉")
+
+    def test_existing_adopted_version_wins_and_is_projected(self):
+        """版本库已有选中版本且与检查点不同 → 以选中版为准，投影也写它。"""
+        self._seed_failed_task()
+        from report_version import VersionStore
+        store = VersionStore(workspace.task_workspace(self.tid), self.tid)
+        v = store.record(self.BODY_B)
+        store.adopt(v, reason="用例预置：已选中版本B")
+        o = self._orch()
+        out = o._restore_version_state(self.tid, self.BODY_A)
+        self.assertEqual(out, self.BODY_B, "已选中版本优先于检查点正文")
+        proj = ts.read_task(self.tid, db_path=ts.DB_PATH)
+        self.assertEqual(proj.get("report"), self.BODY_B,
+                         "投影必须跟随实际采纳的版本（洋河反例的根修）")
+        self.assertEqual(proj.get("status"), ts.FAILED)
 
 
 class TestAccounting(unittest.TestCase):

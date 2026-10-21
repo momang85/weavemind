@@ -14,12 +14,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 from pathlib import Path
 
 from .contracts import ModelRun, RunStatus, ValidatedOutput
+
+# 本模块的落盘失败必须**可见**（各 `except` 分支都要写日志）。此前 `logger` 在本模块
+# 没有定义，写失败时会抛 NameError 把原异常盖掉——"落盘失败不静默"实际不成立。
+logger = logging.getLogger(__name__)
 
 SCHEMA = "weavemind.analysis_runs/1"
 RUNS_NAME = "analysis_runs.json"
@@ -203,11 +208,16 @@ def load_selection(ws) -> dict:
     if not data:
         return {"schema": SCHEMA_SELECTION, "entries": []}
     entries = [e for e in (data.get("entries") or []) if isinstance(e, dict)]
-    return {"schema": str(data.get("schema") or SCHEMA_SELECTION),
+    # 回绑留痕（R2）：rebound_* 字段一并读回，审计可复查"从哪一版绑到哪一版"
+    out = {"schema": str(data.get("schema") or SCHEMA_SELECTION),
             "updated_at": str(data.get("updated_at") or ""),
             "adopted_identity": str(data.get("adopted_identity") or ""),
             "note": str(data.get("note") or ""),
             "entries": entries}
+    for k in ("rebound_from", "rebound_to", "rebound_at", "rebound_reason"):
+        if data.get(k) is not None:
+            out[k] = str(data.get(k) or "")
+    return out
 
 
 def selection_payload_bytes(ws) -> bytes | None:
@@ -247,6 +257,83 @@ def save_selection(ws, entry: dict, *, adopted_identity: str = "", note: str = "
     except Exception as exc:                           # noqa: BLE001 - 落盘失败不静默
         logger.warning("分析选择落盘失败：%s", str(exc)[:140])
     return data
+
+
+def rebind_selection_identity(ws, adopted_identity: str, *, body_text: str = "",
+                              reason: str = "") -> dict:
+    """采纳版本身份变化后，把选择记录的 `adopted_identity` 回绑到**这一版**。
+
+    为什么必须有：`adopted_identity` 只在「分析采纳」入口写入。此后人工修订、
+    重装配、检查点恢复等路径换掉采纳版本时它就落后了——同一份交付包里
+    `PACKAGE_MANIFEST.json` 的 `report_version_id` 是新身份，而
+    `analysis/selection.json` 还写着旧身份，读者无法核对"正文这一段 = 这一次运行"。
+
+    回绑不是无条件改字段：给了 `body_text` 时，**所选运行必须仍在这一版正文里**
+    （`run_id` 前缀出现在正文的分析卡绑定文本里——与采纳入口同一条判据）；
+    证明不了就不改，如实回 `consistent=False`，由调用方把不一致记进清单（不隐藏、
+    不假成功）。没有选择记录（没有 entries）时无身份可绑，直接按一致返回。
+
+    返回：`{present, changed, consistent, from, to, verified_by, reason}`。
+    """
+    cur = load_selection(ws)
+    entries = [e for e in (cur.get("entries") or []) if isinstance(e, dict)]
+    old_id = str(cur.get("adopted_identity") or "")
+    new_id = str(adopted_identity or "")
+    if not entries:
+        # 没有选择记录：正文按默认（每模型第一条已验证运行）装配，没有"所选运行"可绑
+        return {"present": False, "changed": False, "consistent": True,
+                "from": old_id, "to": new_id, "verified_by": "",
+                "reason": "没有选择记录（正文按默认运行装配），无身份可回绑"}
+    if old_id and new_id and old_id == new_id:
+        return {"present": True, "changed": False, "consistent": True,
+                "from": old_id, "to": new_id, "verified_by": "already_bound",
+                "reason": ""}
+    if not new_id:
+        return {"present": True, "changed": False, "consistent": False,
+                "from": old_id, "to": "", "verified_by": "",
+                "reason": "当前没有采纳身份，无法把选择记录绑到任何一版"}
+    _run_ids = [str(e.get("run_id") or "") for e in entries if str(e.get("run_id") or "")]
+    if not _run_ids:
+        return {"present": True, "changed": False, "consistent": False,
+                "from": old_id, "to": new_id, "verified_by": "",
+                "reason": "选择记录没有 run_id：无法证明它属于哪一次运行"}
+    if not str(body_text or "").strip():
+        return {"present": True, "changed": False, "consistent": False,
+                "from": old_id, "to": new_id, "verified_by": "",
+                "reason": "没有正文可核对：不凭选择记录单方面回绑采纳身份"}
+    _missing = [r for r in _run_ids if r[:12] not in str(body_text)]
+    if _missing:
+        # 正文里找不到所选运行 ⇒ 这一版正文不是由这条选择装配的，回绑会造假归属
+        return {"present": True, "changed": False, "consistent": False,
+                "from": old_id, "to": new_id, "verified_by": "",
+                "reason": (f"这一版正文里找不到所选运行 "
+                           f"{'、'.join(m[:12] for m in _missing)}："
+                           "选择记录与当前版本不同源，不回绑")}
+    data = {"schema": SCHEMA_SELECTION,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "adopted_identity": new_id,
+            "note": str(cur.get("note") or ""),
+            # 回绑留痕：从哪一版绑到哪一版、凭什么判的、什么时候——审计可复查
+            "rebound_from": old_id,
+            "rebound_to": new_id,
+            "rebound_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "rebound_reason": str(reason or "采纳版本身份变化后按当前版本回绑"),
+            "entries": entries}
+    try:
+        d = inputs_dir(ws)
+        d.mkdir(parents=True, exist_ok=True)
+        p = selection_path(ws)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as exc:                           # noqa: BLE001 - 落盘失败不静默
+        logger.warning("分析选择身份回绑落盘失败：%s", str(exc)[:140])
+        return {"present": True, "changed": False, "consistent": False,
+                "from": old_id, "to": new_id, "verified_by": "",
+                "reason": f"回绑落盘失败：{str(exc)[:120]}"}
+    return {"present": True, "changed": True, "consistent": True,
+            "from": old_id, "to": new_id, "verified_by": "run_id_in_body",
+            "reason": str(reason or "")}
 
 
 def selection_status(ws, *, dataset_hash: str = "", rules_version: str = "") -> dict:
@@ -429,7 +516,8 @@ def select_for_report(ws, *, rules_version: str = ""):
 
 def dataset_from_inputs(ws):
     """从 `analysis/dataset.json` 还原 `AnalysisDataset`（离线复算的唯一入口）。"""
-    from .contracts import AnalysisDataset, DatasetManifest, Observation
+    from .contracts import (AnalysisDataset, DatasetManifest, DatasetUnavailable,
+                            Observation)
 
     blob = load_inputs(ws).get("dataset") or {}
     ds = blob.get("dataset") or {}
@@ -447,6 +535,18 @@ def dataset_from_inputs(ws):
     for f in ("periods", "gaps", "conflicts", "available_models"):
         if f in kw and kw[f] is not None:
             kw[f] = tuple(kw[f])
+    # 身份字段必须**在场**：工作区没有冻结数据集（旧任务）或清单为旧格式时，
+    # 如实抛 `DatasetUnavailable`——**不补造** `dataset_hash`/`source_label`。
+    # 此前这里是裸 `TypeError`（缺必填参数），被上层 `except Exception` 静默吞掉，
+    # 真机报告就这样无声少了一块直接法判断（2026-10-20 洋河任务重复 5 次）。
+    _missing = [f for f in ("dataset_hash", "source_label") if f not in man]
+    if "dataset_hash" not in _missing and not str(kw.get("dataset_hash") or "").strip():
+        _missing.append("dataset_hash")            # 空哈希不算身份
+    if _missing:
+        raise DatasetUnavailable(
+            "工作区没有可还原的冻结数据集（analysis/dataset.json"
+            f"{'缺失' if not man else '为旧格式'}，缺身份字段 {'、'.join(_missing)}）；"
+            "不补造数据集身份")
     manifest = DatasetManifest(**kw)
     index = {}
     for o in obs:

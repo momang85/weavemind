@@ -28,9 +28,12 @@ import orchestrator_v2 as ov  # noqa: E402
 import report_quality as rq  # noqa: E402
 from workers.report_generator_worker import ReportGeneratorWorker  # noqa: E402
 
-# 标准文案（注入模板与格式要求必须同一条，逐字比对）
-BASE_SENTENCE = ("本报告由 AI 生成，不构成任何投资建议；数据来源于公开披露，"
-                 "可能存在时效性差异和获取误差")
+# 标准文案（注入模板与格式要求必须同一条，逐字比对）。
+# U90-R4：基线不再咬定"数据来源于公开披露"——声明必须按实际采用的来源措辞，
+# 基线只用于"完全没有任何外部来源"的兜底（与 workers/report_generator_worker
+# 的 STANDARD_DISCLAIMER、orchestrator_v2._REPORT_FORMAT_REQUIREMENTS 逐字一致）。
+BASE_SENTENCE = ("本报告由 AI 生成，仅供参考，不构成任何投资建议；数据与结论以报告内"
+                 "来源清单与可复算底稿为准，请注意其时效性与适用范围")
 
 FULL_DISCLAIMER = f"## 免责声明\n\n{BASE_SENTENCE}。\n"
 

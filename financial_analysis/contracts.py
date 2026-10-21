@@ -271,6 +271,16 @@ class MissingInput(RuntimeError):
     """输入缺失/不可用：**停止该分析**，输出补料清单，不用别的数顶上。"""
 
 
+class DatasetUnavailable(RuntimeError):
+    """工作区没有可还原的冻结数据集（`analysis/dataset.json` 缺失，或旧格式缺身份字段）。
+
+    刻意**不补造** `dataset_hash`/`source_label`：身份算不出来就说算不出来，
+    否则"另算一个 hash"看起来像"换了一份数据"（本包三条纪律第 2 条）。
+    此前这里是裸 `TypeError`（缺必填参数），会被调用方的 `except Exception`
+    静默吞掉——旧任务的真机报告就是这样少了一块直接法判断且无人知道。
+    """
+
+
 # 未声明口径的两种写法：空串与抽取层给的 "unknown"。
 _UNDECLARED_CALIBERS = ("", "unknown")
 

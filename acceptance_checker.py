@@ -5323,6 +5323,11 @@ def check_source_list_completeness(report: str) -> dict:
     bad_urls = [
         e for e in entries
         if e["url"] and not re.match(r"^https?://", e["url"])
+        # U90-R4：用户材料没有公网 URL——材料登记定位 `material://<mid>` 与旧占位
+        # `user-material` 是合法条目，不判"非法 URL"（材料照样算来源，且声明已注明
+        # "真实性未经独立核实"）。
+        and not re.match(r"^material://", e["url"])
+        and e["url"] != "user-material"
     ]
     for e in bad_urls:
         gaps.append(f"来源条目 URL 非 http(s) 格式：{e['title'] or e['url']}")

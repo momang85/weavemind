@@ -62,13 +62,31 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
   const [showBody, setShowBody] = useState(false)
   const [adoptArmed, setAdoptArmed] = useState(false)
   const [op, setOp] = useState<string>('')
+  // U90-B：清单读取态（loading/ok/error）——避免读取失败时静默显示空清单
+  const [loadState, setLoadState] = useState<'loading' | 'ok' | 'error'>('loading')
+  const [loadErr, setLoadErr] = useState('')
 
   const load = useCallback(async () => {
-    if (!taskId) { setItems([]); return }
+    // U90-B：清单要有**明确的加载/失败态**。实测（2026-10-20 真实浏览器）：页面连接被卡住时
+    // 后端已有 1 条已准入材料，面板却静默显示"任务材料（0）／还没有补充材料。"——用户会以为
+    // 材料丢了。所以：读取中/读失败都显式说出来，并给重试入口；只有**读到确认空**才说没有材料。
+    if (!taskId) { setItems([]); setLoadState('ok'); return }
+    setLoadState('loading'); setLoadErr('')
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 12000)
     try {
-      const d = await (await fetch(`/api/task/${taskId}/materials`)).json()
+      const res = await fetch(`/api/task/${taskId}/materials`, { signal: ac.signal })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const d = await res.json()
       setItems(d.materials ?? [])
-    } catch { /* 读不到就保持上一次的清单，不编 */ }
+      setLoadState('ok')
+    } catch (e: any) {
+      // 保留上一次读到的清单（不编造），但把失败原因与重试摆出来
+      setLoadErr(e?.name === 'AbortError' ? '读取超时（12 秒无响应）' : String(e?.message || e))
+      setLoadState('error')
+    } finally {
+      clearTimeout(timer)
+    }
   }, [taskId])
 
   useEffect(() => { load() }, [load])
@@ -200,8 +218,9 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
       if (res.ok) {
         setPrev(d)
         const c = d.comparison ?? {}
+        // 采纳后预览的"当前稿"就是候选本身：按服务端 is_adopted 如实标注，不得硬编码"未采纳"。
         setMsg({ kind: 'ok',
-                 text: `候选预览（只读，未采纳）：与当前稿相比改动 ${c.changed_lines ?? 0} 行`
+                 text: `候选预览（只读${d.is_adopted ? '，即当前交付' : '，未采纳'}）：与当前稿相比改动 ${c.changed_lines ?? 0} 行`
                    + `（+${c.added_lines ?? 0}/-${c.removed_lines ?? 0}）；`
                    + `人工分析节${c.analysis_section_preserved ? '原样保留' : '**未保留**'}。` })
       } else {
@@ -474,8 +493,26 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
       )}
 
       <div className="space-y-2">
-        <div className="text-slate-400">任务材料（{items.length}）</div>
-        {items.length === 0 && <div className="text-slate-600 text-center py-6">还没有补充材料。</div>}
+        <div className="text-slate-400">
+          任务材料（{items.length}）
+          {loadState === 'loading' && <span className="text-slate-600"> · 读取中…</span>}
+        </div>
+        {loadState === 'error' && (
+          <div className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="inline-flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5" />
+              <span>
+                材料清单读取失败：{loadErr || '连接中断'}
+                {items.length > 0 ? `（下面仍是上次读到的 ${items.length} 条）` : '（这不代表没有材料）'}
+              </span>
+            </span>
+            <button onClick={() => void load()}
+              className="text-xs px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 shrink-0">
+              重试
+            </button>
+          </div>
+        )}
+        {loadState === 'ok' && items.length === 0 && <div className="text-slate-600 text-center py-6">还没有补充材料。</div>}
         {items.map(m => {
           const st = STATUS_TEXT[m.status ?? ''] ?? { label: m.status ?? '未知', cls: 'text-slate-400 border-slate-700' }
           const scope = m.read_scope ?? {}

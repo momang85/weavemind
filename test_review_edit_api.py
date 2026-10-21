@@ -315,6 +315,32 @@ class TestAnalysisWorkbenchEndpoints(_Base):
         self.assertIn("revenue_growth", sc["allowed_params"],
                       "面板要能拿到**允许改的假设**清单")
 
+    def test_state_endpoint_lists_registered_scenario_models_even_without_runs(self):
+        """U90-C（10-20）："改一个情景参数"的入口不能依赖"恰好算过这个模型"。
+
+        回归背景：`_analysis_workbench` 曾把 `models` 一直留空，前端只能从"已有运行"
+        推模型清单 ⇒ scenario_sensitivity/cash_pressure 这类注册了情景参数却没算过的
+        模型在页面上选不到，用户没有"改一个情景参数"的入口。注册清单必须一起回显。
+        """
+        import web_ui
+        self._seed_inputs()
+        h = _Handler("/api/task/" + self.tid + "/analysis")
+        web_ui._get_task_analysis(h, h.path)
+        payload, status = h.last
+        self.assertEqual(status, 200, payload)
+        reg = {m["id"]: m for m in (payload.get("models") or [])}
+        self.assertIn("scenario_sensitivity", reg,
+                      "注册模型清单没有回显情景模型：改情景参数无入口")
+        self.assertIn("revenue_growth", reg["scenario_sensitivity"]["allowed_params"])
+        self.assertEqual(reg["scenario_sensitivity"]["allowed_params"]["revenue_growth"],
+                         [-0.5, 0.5])
+        # 没算过的模型要如实标注 ran=false（前端据此显示"未算过｜先复算"）；
+        # fixture 只跑了 scenario_sensitivity，所以拿 cash_pressure 验"未算过也回显"
+        self.assertFalse(reg["cash_pressure"]["ran"])
+        self.assertTrue(reg["scenario_sensitivity"]["ran"])
+        # 比率运行不进假设面板
+        self.assertNotIn("ratio:归母净利率", reg)
+
     def test_adopt_binding_reads_the_moved_argument_line_too(self):
         """移出内容仍是同一份交付：收束进附件的运行标识必须能被采纳绑定校验读到。
 
@@ -428,6 +454,88 @@ class TestAnalysisWorkbenchEndpoints(_Base):
                                        {"run_id": "not-validated-run"})
         self.assertEqual(status2, 409, payload2)
         self.assertIn("未通过验证", str(payload2.get("error")))
+
+    def _call_freeze(self, tid: str | None = None):
+        import web_ui
+        path = "/api/task/" + (tid or self.tid) + "/analysis/freeze"
+        h = _Handler(path)
+        web_ui._post_task_analysis_freeze(h, path, {}, {"user": "admin"})
+        payload, status = h.last
+        return payload, status
+
+    def _seed_working_paper(self):
+        """落一份底稿（同一冻结链的真实来源，2 期 + 三大表核心行）。"""
+        ws = ws_mod.task_workspace(self.tid)
+        proj = ws / "project"
+        proj.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {"fact_id": "f-rev-23", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "revenue", "period": "2023年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 288.76},
+            {"fact_id": "f-rev-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "revenue", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 300.0},
+            {"fact_id": "f-gp-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "gross_profit", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 211.25},
+            {"fact_id": "f-np-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "net_profit", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 66.73},
+            {"fact_id": "f-cfo-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "operating_cashflow", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 90.1},
+        ]
+        paper = {"request": {"company": "洋河股份", "company_id": "002304.SZ",
+                             "market": "A股", "periods": [2023, 2024],
+                             "as_of": "2025-04-30"},
+                 "rows": rows, "derived": [], "gaps": [], "ok": True}
+        (proj / "working_paper.json").write_text(json.dumps(paper, ensure_ascii=False),
+                                                 encoding="utf-8")
+
+    def test_freeze_without_any_source_is_409_and_writes_nothing(self):
+        """U90-C：工作区没有底稿/财务载荷 → 409 no_source（离线补不了，如实说）。"""
+        import task_state
+        from financial_analysis import store as fa_store
+        task_state.mark_queued("u90-nosrc", goal="研究某公司", db_path=self.db)
+        payload, status = self._call_freeze("u90-nosrc")
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload.get("code"), "no_source")
+        self.assertNotIn("analysis/dataset.json",
+                         list(fa_store.input_payload_bytes(
+                             ws_mod.task_workspace("u90-nosrc")).keys()))
+
+    def test_freeze_running_task_is_409(self):
+        """U90-C：任务在跑 → 拒绝补算（避免与分析步同时写工作区）。"""
+        import task_state
+        task_state.mark_queued("u90-running", goal="研究某公司", db_path=self.db)
+        with mock.patch.object(task_state, "is_running", lambda tid: True):
+            payload, status = self._call_freeze("u90-running")
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload.get("code"), "task_running")
+
+    def test_freeze_from_working_paper_then_idempotent(self):
+        """U90-C：底稿在、分析步没跑 → 补算成功（200）；再点 → already 幂等不重算。"""
+        from financial_analysis import store as fa_store
+        self._seed_working_paper()
+        payload, status = self._call_freeze()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload.get("status"), "ok", payload)
+        self.assertFalse(payload.get("already"), payload)
+        res = payload.get("result") or {}
+        self.assertGreaterEqual(res.get("runs_total", 0), 1, payload)
+        self.assertGreaterEqual(res.get("runs_validated", 0), 1,
+                                "至少一个模型要产出已验证运行（否则补算等于没补）")
+        ws = ws_mod.task_workspace(self.tid)
+        self.assertTrue((ws / "analysis" / "dataset.json").exists())
+        runs = {str(r.get("run_id")): r for r in fa_store.load_runs(ws)}
+        self.assertGreaterEqual(len(runs), 1)
+        # 幂等：第二次点不再重算（already=true，不重复落运行）
+        runs_before = set(runs)
+        payload2, status2 = self._call_freeze()
+        self.assertEqual(status2, 200, payload2)
+        self.assertTrue(payload2.get("already"), payload2)
+        runs_after = {str(r.get("run_id")) for r in fa_store.load_runs(ws)}
+        self.assertEqual(runs_before, runs_after, "幂等补算不得重复落运行")
 
 
 class TestWorkingPaperExportAndDownload(_Base):

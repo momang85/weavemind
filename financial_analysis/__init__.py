@@ -12,8 +12,8 @@
 """
 
 from .contracts import (  # noqa: F401
-    AnalysisDataset, AnalysisPlan, DatasetManifest, ModelRun, ModelSpec,
-    MissingInput, NotApplicable, NotComputable, Observation, RunStatus,
+    AnalysisDataset, AnalysisPlan, DatasetManifest, DatasetUnavailable, ModelRun,
+    ModelSpec, MissingInput, NotApplicable, NotComputable, Observation, RunStatus,
     ValidatedOutput, full_identity_ok, report_scope_ok,
 )
 from . import charts  # noqa: F401
@@ -26,6 +26,7 @@ from .validation import tamper_check, unusable_inputs, validate_output  # noqa: 
 
 __all__ = [
     "AnalysisDataset", "AnalysisPlan", "DatasetManifest", "ModelRun", "ModelSpec",
+    "DatasetUnavailable",
     "MissingInput", "NotApplicable", "NotComputable", "Observation", "RunStatus",
     "ValidatedOutput",
     "report_scope_ok", "full_identity_ok",

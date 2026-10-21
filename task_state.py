@@ -881,6 +881,41 @@ def mark_resumed(task_id: str, db_path: str | None = None) -> bool:
         return False
 
 
+def mark_resume_undone(task_id: str, *, reason: str = "",
+                       db_path: str | None = None) -> bool:
+    """U90-R3：恢复**未能生效**时的回滚（RUNNING → FAILED），让用户能再点一次。
+
+    背景（架构师裁决 2026-10-20）：恢复入口先 CAS 翻 RUNNING 再发 `resume_task`；
+    发布失败时旧实现直接 503 而状态留在 RUNNING——用户重试拿到 409「只有失败的任务
+    可以恢复（当前 RUNNING）」，即**失败不可再次操作**，只能等看护线程按 stale
+    RUNNING 收口（分钟级）。这里把这次恢复的回滚做成一条 CAS：只回滚**本次恢复刚写
+    的标记**（`phase='恢复执行'`），编排器一旦接管（改了 phase / 状态）就不再回滚，
+    不覆盖任何真实进展。
+
+    返回 True = 真的回滚了（调用方才能如实告诉用户"可以再试"）。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            _reason = str(reason or "恢复未生效：通知编排器失败")[:200]
+            cur = con.execute(
+                "UPDATE task_history SET status=?, phase=?, completed_at=COALESCE("
+                "completed_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=? AND status=? AND phase=?",
+                (FAILED, "恢复未生效", task_id, RUNNING, "恢复执行"),
+            )
+            done = int(cur.rowcount or 0) > 0
+            con.commit()
+            if done:
+                logger.warning("任务 %s 恢复已回滚为 FAILED（%s）", task_id, _reason)
+            return done
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("任务 %s 恢复回滚失败：%s", task_id, str(exc)[:200])
+        return False
+
+
 def update_report(task_id: str, report: str, db_path: str | None = None) -> bool:
     """只改**交付正文**（人工复核修订用）：状态/步骤/日志/验收一律不动。
 

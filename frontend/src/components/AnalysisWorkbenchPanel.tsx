@@ -27,10 +27,17 @@ type Run = {
   run_id?: string; model_id?: string; status?: string; validation_ok?: boolean
   params?: Record<string, number | string>
   allowed_params?: Record<string, [number, number] | string[]>
-  default_params?: Record<string, number>
+  /** 默认值可能是数值（范围参数）或字符串（**选择型**参数，如 rounding/below_gross_mode） */
+  default_params?: Record<string, number | string>
   dataset_hash?: string; outputs?: RunOutput[]; limits?: string[]
   selected?: boolean; selection_state?: string; selection_why?: string
   started_at?: string; rules_version?: string
+}
+/** U90-C：注册模型清单（含**本任务还没算过**的情景模型）——"改一个情景参数"的入口。 */
+type ModelSpec = {
+  id?: string; label?: string; ran?: boolean
+  allowed_params?: Record<string, [number, number] | string[]>
+  default_params?: Record<string, number | string>
 }
 type SelectionEntry = {
   model_id?: string; run_id?: string; state?: string; why?: string
@@ -38,8 +45,15 @@ type SelectionEntry = {
 }
 type AnalysisState = {
   ok?: boolean; reason?: string
-  inputs?: { present?: string[]; dataset_hash?: string; recomputable?: boolean }
+  inputs?: { present?: string[]; dataset_hash?: string; recomputable?: boolean
+    /** 本次任务留存的可用事实来源（working_paper/financials/空）——补算按钮据此显隐 */
+    source?: string }
+  /** U90-C：没有可复算输入时的**可行动出口**——can_freeze=按现有事实确定性补算 */
+  can_freeze?: boolean
+  next_action?: 'freeze' | 'material' | 'recompute' | ''
   runs?: Run[]
+  /** U90-C：注册的非比率模型（含没算过的情景模型）——模型选择器的选项来源之一 */
+  models?: ModelSpec[]
   cards?: { run_id?: string; model_id?: string; title?: string; value?: number; unit?: string
     in_report?: boolean }[]
   current_package?: string
@@ -71,6 +85,9 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
   const [diff, setDiff] = useState<DiffRow[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
+  // U90-B：读取态（loading/ok/error）——读失败不得被表述成"没有可复算输入"
+  const [loadState, setLoadState] = useState<'loading' | 'ok' | 'error'>('loading')
+  const [loadErr, setLoadErr] = useState('')
 
   // 任务切换必须**重置**草稿与比较状态（L0-b-5）：否则会把上一个任务的假设/差异
   // 显示在新任务上，读者以为那是本任务的读数。
@@ -87,35 +104,75 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
     () => panelRuns.filter((r) => String(r.model_id || '') === modelId),
     [panelRuns, modelId],
   )
-  const model = useMemo(() => modelRuns[0] || null, [modelRuns])
+  // U90-C：选择器 = 已有运行的模型 ∪ 注册模型（含**本任务还没算过**的情景模型）。
+  // 没有这一条，用户就没有"改一个情景参数"的入口：模型进不了选择器 → 复算按钮无从点。
+  const availableModels = useMemo(() => {
+    const fromRuns = panelRuns.map((r) => String(r.model_id || ''))
+    const fromSpecs = (state?.models || []).map((m) => String(m.id || ''))
+    return Array.from(new Set([...fromRuns, ...fromSpecs])).filter(Boolean)
+  }, [panelRuns, state])
+  const ranModelIds = useMemo(
+    () => new Set(panelRuns.map((r) => String(r.model_id || ''))),
+    [panelRuns],
+  )
+  const specModel = useMemo(
+    () => (state?.models || []).find((m) => String(m.id || '') === modelId) || null,
+    [state, modelId],
+  )
+  // 已算过的模型用运行自带的参数声明；**没算过**的模型用注册声明（同一套 allowed_params），
+  // 面板据此渲染可改的假设——参数边界仍由后端复算接口再次校验（400 越界）。
+  const model = useMemo<Run | null>(() => {
+    if (modelRuns[0]) return modelRuns[0]
+    if (!specModel) return null
+    return {
+      model_id: String(specModel.id || ''), status: '', run_id: '',
+      allowed_params: specModel.allowed_params,
+      default_params: specModel.default_params,
+    }
+  }, [modelRuns, specModel])
   const chosen = useMemo(
     () => modelRuns.find((r) => r.run_id === chosenRunId) || null,
     [modelRuns, chosenRunId],
   )
+  // 可改的假设 = 声明过的**范围参数**（数值上下界）与**选择型参数**（字符串候选）。
+  // 二者都是"假设"，改它们只产生**新运行**，不覆盖原始观测。
   const editableKeys = useMemo(() => {
     const ap = model?.allowed_params || {}
-    return Object.keys(ap).filter((k) => Array.isArray(ap[k]) && typeof (ap[k] as any)[0] === 'number')
+    return Object.keys(ap).filter((k) => Array.isArray(ap[k]) && (ap[k] as any).length > 0)
   }, [model])
+  const isChoiceParam = useCallback(
+    (k: string) => Array.isArray(model?.allowed_params?.[k])
+      && typeof (model!.allowed_params![k] as any)[0] !== 'number',
+    [model],
+  )
 
   const paramsFor = useCallback((r: Run | null): Record<string, string> => {
     const base: Record<string, string> = {}
     const ap = r?.allowed_params || {}
     for (const k of Object.keys(ap)) {
-      if (!Array.isArray(ap[k]) || typeof (ap[k] as any)[0] !== 'number') continue
+      if (!Array.isArray(ap[k]) || (ap[k] as any).length === 0) continue
       const v = (r?.params || {})[k]
       // 运行没记这个参数 → 显示模型**声明的默认值**（不让用户猜"不改会用什么"）
       const dft = (r?.default_params || {})[k]
-      const use = typeof v === 'number' ? v : dft
-      base[k] = typeof use === 'number' ? String(use) : ''
+      const use = v !== undefined && v !== null ? v : dft
+      base[k] = (typeof use === 'number' || typeof use === 'string') ? String(use) : ''
     }
     return base
   }, [])
 
   const load = useCallback(async () => {
+    // U90-B：读失败/读超时**不能**被说成"该任务还没有可复算输入"——那是两回事，用户会据此
+    // 误判任务状态。这里显式区分 loading/ok/error，并给重试入口。
     if (!taskId) return
+    setLoadState('loading'); setLoadErr('')
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 12000)
     try {
-      const d = await (await fetch(`/api/task/${taskId}/analysis`)).json()
+      const res = await fetch(`/api/task/${taskId}/analysis`, { signal: ac.signal })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const d = await res.json()
       setState(d)
+      setLoadState('ok')
       const runs: Run[] = (d?.runs || []).filter(
         (r: Run) => !String(r.model_id || '').startsWith('ratio:'),
       )
@@ -130,21 +187,63 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
         setParams(paramsFor(sel))
       }
     } catch (e: any) {
-      setMsg({ kind: 'err', text: `读取分析状态失败：${String(e?.message || e)}` })
+      setLoadErr(e?.name === 'AbortError' ? '读取超时（12 秒无响应）' : String(e?.message || e))
+      setLoadState('error')
+    } finally {
+      clearTimeout(timer)
     }
   }, [taskId, paramsFor])
 
   useEffect(() => { void load() }, [load])
+
+  // U90-C：**补算分析输入**——工作区留有本次任务的事实来源（研究底稿/财务载荷）而
+  // 分析步没跑（或历史工作区被清理后重新落地）时，按现有事实确定性冻结数据集并复算
+  // 注册模型（零模型调用、可复现）。契约要素不全 → 后端 409 带原文缺口：如实显示，
+  // 绝不降门槛、绝不用估计值补披露数。
+  const freezeNow = async () => {
+    if (!taskId) return
+    setBusy(true); setMsg(null)
+    try {
+      const res = await fetch(`/api/task/${taskId}/analysis/freeze`, { method: 'POST' })
+      const d = await res.json()
+      if (!res.ok) {
+        setMsg({ kind: 'warn', text: `补算被拒绝（未写入任何数据）：${String(d?.error || `HTTP ${res.status}`)}` })
+        return
+      }
+      if (d?.already) {
+        setMsg({ kind: 'ok', text: String(d?.note || '该任务已有可复算输入，未重算') })
+      } else {
+        const r = d?.result || {}
+        const gaps = Array.isArray(r.gaps) ? r.gaps : []
+        setMsg({
+          kind: 'ok',
+          text: `补算完成：${r.runs_validated ?? 0}/${r.runs_total ?? 0} 个模型产出已验证运行`
+            + (gaps.length ? `；资料不足的模型如实留缺口：${gaps.join('；')}` : ''),
+        })
+      }
+      await load(); onAdopted?.()
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: `补算失败：${String(e?.message || e)}` })
+    } finally { setBusy(false) }
+  }
 
   const recompute = async () => {
     if (!taskId || !modelId) return
     setBusy(true); setMsg(null); setDiff(null)
     try {
       const body: Record<string, unknown> = { model_id: modelId, params: {} }
-      const p: Record<string, number> = {}
+      const p: Record<string, number | string> = {}
       for (const k of editableKeys) {
         const raw = params[k]
-        if (raw !== undefined && raw !== '') p[k] = Number(raw)
+        if (raw === undefined || raw === '') continue
+        // **范围参数**转数值（越界由后端 400 拦）；**选择型参数**按候选原文提交，
+        // 不把 "yi_2" 这种候选值 Number() 成 NaN（那会被后端判成参数不合法）。
+        if (isChoiceParam(k)) {
+          p[k] = raw
+        } else {
+          const n = Number(raw)
+          if (Number.isFinite(n)) p[k] = n
+        }
       }
       body.params = p
       const res = await fetch(`/api/task/${taskId}/analysis/recompute`, {
@@ -248,10 +347,48 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
       <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
         <Calculator className="w-4 h-4" /> 分析工作台（选运行 → 改假设 → 复算 → 对比 → 采纳 → 导出）
       </div>
-      {!state?.ok && (
+      {loadState === 'loading' && (
+        <div className="text-xs text-slate-500">正在读取分析状态…（最多等 12 秒）</div>
+      )}
+      {loadState === 'error' && (
+        <div className="text-xs border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+          <span className="inline-flex items-start gap-1.5">
+            <TriangleAlert className="w-3.5 h-3.5 mt-0.5" />
+            <span>分析状态读取失败：{loadErr || '连接中断'}（这不代表本任务没有可复算输入）</span>
+          </span>
+          <button onClick={() => void load()}
+            className="text-xs px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 shrink-0">
+            重试
+          </button>
+        </div>
+      )}
+      {loadState === 'ok' && !state?.ok && (
         <div className="text-xs text-amber-400 flex items-start gap-1">
           <TriangleAlert className="w-3.5 h-3.5 mt-0.5" />
           <span>{state?.reason || '该任务还没有可复算输入（analysis/dataset.json）'}</span>
+        </div>
+      )}
+      {/* U90-C：有报告却无可复算分析输入时，给一个**可行动出口**——
+          工作区留有本次任务的事实来源（底稿/财务载荷）就按现有事实确定性补算；
+          契约要素不全 → 补研究请求；连事实来源都没有 → 补材料。 */}
+      {loadState === 'ok' && !state?.ok && (state?.can_freeze || state?.inputs?.source) && (
+        <div className="flex items-center gap-2">
+          <button
+            disabled={busy} onClick={() => void freezeNow()}
+            title="按本任务现有留存的公开资料冻结数据集并复算注册模型（确定性、零模型调用）"
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-60"
+          >
+            {busy ? '补算中…' : '补算分析输入'} <Calculator className="w-3 h-3" />
+          </button>
+          {state?.inputs?.source && (
+            <span className="text-slate-500">来源：{state.inputs.source === 'working_paper' ? '研究底稿 working_paper.json' : '财务载荷 financials.json'}</span>
+          )}
+        </div>
+      )}
+      {!state?.ok && state?.next_action === 'material' && (
+        <div className="text-xs text-slate-400">
+          工作区没有可用的分析事实来源：请在本页「补材料」上传该公司的公开财务资料（年报/摘要），
+          补齐后再点「补算分析输入」。缺口如实保留，不会用估计值代替披露数。
         </div>
       )}
       {card && (
@@ -323,53 +460,82 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
                 setModelId(mid)
                 setDiff(null)
                 const same = panelRuns.filter((r) => String(r.model_id || '') === mid)
-                const sel = same.find((r) => r.selected) || same[0]
+                const sel = same.find((r) => r.selected) || same[0] || null
+                // 该模型还没算过（U90-C 情景模型）：没有运行可选，参数用**注册默认值**起稿，
+                // 复算后才会出现第一条运行。
                 setChosenRunId(String(sel?.run_id || ''))
-                setParams(paramsFor(sel))
+                setParams(sel ? paramsFor(sel) : paramsFor(model))
               }}
             >
-              {Array.from(new Set(panelRuns.map((r) => String(r.model_id || '')))).map((mid) => (
-                <option key={mid} value={mid}>{mid}</option>
-              ))}
-            </select>
-            {/* 同模型的历史运行可区分：选哪一条进正文是**显式选择** */}
-            <select
-              className="bg-slate-800 border border-slate-600 rounded px-2 py-1"
-              value={chosenRunId}
-              onChange={(e) => {
-                const rid = e.target.value
-                setChosenRunId(rid)
-                setDiff(null)
-                const r = modelRuns.find((x) => x.run_id === rid) || null
-                setParams(paramsFor(r))
-              }}
-            >
-              {modelRuns.map((r) => (
-                <option key={r.run_id} value={r.run_id}>
-                  {String(r.run_id || '').slice(0, 12)}｜{r.status}
-                  {r.selected ? '｜进正文' : ''}
-                  {r.started_at ? `｜${String(r.started_at).slice(0, 19)}` : ''}
+              {availableModels.map((mid) => (
+                <option key={mid} value={mid}>
+                  {mid}{ranModelIds.has(mid) ? '' : '｜未算过'}
                 </option>
               ))}
             </select>
-            {editableKeys.map((k) => (
-              <label key={k} className="flex items-center gap-1 text-slate-400">
-                {k}
-                <input
-                  className="w-20 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-100"
-                  value={params[k] ?? ''}
-                  placeholder={String(model?.default_params?.[k] ?? '')}
-                  onChange={(e) => setParams({ ...params, [k]: e.target.value })}
-                />
-                <span className="text-slate-500">
-                  {Array.isArray(model?.allowed_params?.[k])
-                    ? `[${(model!.allowed_params![k] as number[])[0]}, ${(model!.allowed_params![k] as number[])[1]}]`
-                    : ''}
-                  {typeof model?.default_params?.[k] === 'number'
-                    ? ` 默认 ${model!.default_params![k]}` : ''}
-                </span>
-              </label>
-            ))}
+            {/* 同模型的历史运行可区分：选哪一条进正文是**显式选择**；
+              还没算过的模型没有运行可选——如实提示下一步，不显示空菜单 */}
+            {modelRuns.length > 0 ? (
+              <select
+                className="bg-slate-800 border border-slate-600 rounded px-2 py-1"
+                value={chosenRunId}
+                onChange={(e) => {
+                  const rid = e.target.value
+                  setChosenRunId(rid)
+                  setDiff(null)
+                  const r = modelRuns.find((x) => x.run_id === rid) || null
+                  setParams(paramsFor(r))
+                }}
+              >
+                {modelRuns.map((r) => (
+                  <option key={r.run_id} value={r.run_id}>
+                    {String(r.run_id || '').slice(0, 12)}｜{r.status}
+                    {r.selected ? '｜进正文' : ''}
+                    {r.started_at ? `｜${String(r.started_at).slice(0, 19)}` : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-slate-500">
+                该模型还没算过：改参数后点「确定性复算」生成新运行
+              </span>
+            )}
+            {editableKeys.map((k) => {
+              const range = Array.isArray(model?.allowed_params?.[k])
+                && typeof (model!.allowed_params![k] as any)[0] === 'number'
+                ? (model!.allowed_params![k] as number[]) : null
+              const choices = !range && Array.isArray(model?.allowed_params?.[k])
+                ? (model!.allowed_params![k] as string[]) : null
+              return (
+                <label key={k} className="flex items-center gap-1 text-slate-400">
+                  {k}
+                  {choices ? (
+                    /* **选择型参数**（如 rounding）：候选即边界，下拉选择，不自由输入 */
+                    <select
+                      className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-100"
+                      value={params[k] ?? ''}
+                      onChange={(e) => setParams({ ...params, [k]: e.target.value })}
+                    >
+                      {choices.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      className="w-20 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-100"
+                      value={params[k] ?? ''}
+                      placeholder={String(model?.default_params?.[k] ?? '')}
+                      onChange={(e) => setParams({ ...params, [k]: e.target.value })}
+                    />
+                  )}
+                  <span className="text-slate-500">
+                    {range
+                      ? `[${range[0]}, ${range[1]}]`
+                      : ''}
+                    {typeof model?.default_params?.[k] === 'number'
+                      ? ` 默认 ${model!.default_params![k]}` : ''}
+                  </span>
+                </label>
+              )
+            })}
             <button
               className="px-2 py-1 rounded border border-sky-500/40 text-sky-300 disabled:opacity-50"
               disabled={busy} onClick={() => void recompute()}

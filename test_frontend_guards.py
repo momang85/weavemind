@@ -168,6 +168,75 @@ class TestK3AnalysisWorkbenchWiring(unittest.TestCase):
                       "导出必须用「与采纳稿同版」的当前包（不得取最新 zip）")
 
 
+class TestU90RecoveryAndCompensateWiring(unittest.TestCase):
+    """U90-B/C（2026-10-20）：恢复入口与补算入口必须真的接到用户可见的组件上。
+
+    源文本闸门（必要不充分）：行为由 `test_task26_checkpointer`（恢复链路）、
+    `test_review_edit_api.TestAnalysisWorkbenchEndpoints`（补算接口）与真实浏览器
+    操作覆盖；这里挡"按钮又被摘掉"的回退。
+    """
+
+    CONSOLE = SRC / "components" / "console" / "ConsoleSideTabs.tsx"
+    PAGE = SRC / "pages" / "TaskConsole.tsx"
+    HISTORY = SRC / "pages" / "History.tsx"
+    PANEL = SRC / "components" / "AnalysisWorkbenchPanel.tsx"
+    RESUME_LIB = SRC / "lib" / "resume.ts"
+
+    def test_resume_entry_is_wired_on_console_and_history(self):
+        console = self.CONSOLE.read_text(encoding="utf-8")
+        self.assertIn("onResume", console, "控制台侧栏没有接恢复回调")
+        page = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn("requestResume", page, "任务页没有调用恢复请求库")
+        history = self.HISTORY.read_text(encoding="utf-8")
+        self.assertIn("requestResume", history, "历史页没有调用恢复请求库")
+        self.assertIn("resumeVisible", history, "历史页没有按可恢复条件显隐按钮")
+
+    def test_resume_lib_keeps_dedupe_and_error_passthrough(self):
+        src = self.RESUME_LIB.read_text(encoding="utf-8")
+        self.assertIn("resumeInFlight", src, "恢复请求缺在飞去重（防重复提交）")
+        self.assertIn("encodeURIComponent", src, "任务 id 未经编码就拼进 URL")
+
+    def test_resume_failure_stays_retryable_on_both_pages(self):
+        """U90-R3（10-20）：失败/超时回执不得把按钮永久禁用。
+
+        实测缺陷：503 之后 `resumeNote` 被写成失败文案，按钮 `disabled` 再不可点，
+        用户既看不到原因也不能重试。现在两个页面都必须走三态按钮态推导。
+        """
+        lib = self.RESUME_LIB.read_text(encoding="utf-8")
+        self.assertIn("resumeButtonState", lib, "恢复回执缺少按钮态推导（三态）")
+        self.assertIn("retryable", lib, "回执缺少「能否再试」字段")
+        self.assertIn("AbortController", lib, "POST 恢复缺少有界超时")
+        self.assertIn("正在请求恢复", lib, "缺少在途态文案")
+        history = self.HISTORY.read_text(encoding="utf-8")
+        console = self.CONSOLE.read_text(encoding="utf-8")
+        for name, src in (("History", history), ("ConsoleSideTabs", console)):
+            self.assertIn("resumeButtonState", src, f"{name} 未按三态渲染恢复按钮")
+            self.assertNotIn(
+                "disabled={!!resumeNote[", src,
+                f"{name} 仍用「有回执就禁用」的旧判定（失败不可重试）")
+        self.assertIn("timeout", lib, "超时回执与真实状态查询缺失")
+        self.assertIn("/task/", lib, "超时后未查询真实任务状态（防重复恢复）")
+
+    def test_freeze_compensate_button_is_wired_on_the_panel(self):
+        src = self.PANEL.read_text(encoding="utf-8")
+        self.assertIn("/analysis/freeze", src, "分析面板没有接补算入口")
+        self.assertIn("补算", src, "补算入口对用户不可见")
+
+    def test_scenario_models_are_selectable_for_param_editing(self):
+        """U90-C（10-20）："改一个情景参数"必须有真实入口，不能只列已有运行的模型。
+
+        情景模型（scenario_sensitivity/cash_pressure）注册了可改的情景参数，但本任务
+        可能还没算过它：模型选择器必须合并**注册模型**（含没算过的），且字符串选择型
+        参数（rounding/below_gross_mode）要渲染成候选下拉，而不是消失成不可改。
+        """
+        src = self.PANEL.read_text(encoding="utf-8")
+        self.assertIn("availableModels", src, "模型选择器没有合并注册模型清单")
+        self.assertIn("未算过", src, "没算过的模型没有如实标注")
+        self.assertIn("isChoiceParam", src, "选择型参数（字符串候选）没有单独处理")
+        self.assertIn("<select", src.split("editableKeys.map")[1],
+                      "选择型参数没有渲染成候选下拉")
+
+
 class TestL0BAnalysisSelectionWiring(unittest.TestCase):
     """L0-b（09-30 复核 U1/U2）：面板必须让**用户的选择**驱动正文与导出，而不是默认前两条。
 

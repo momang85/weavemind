@@ -512,10 +512,13 @@ _REPORT_FORMAT_REQUIREMENTS = (
     "（如'指出'、'主要挑战'、'能量密度提升空间有限'这类不是来源）；"
     "数据无对应检索来源时，必须写形式③，禁止编造任何来源名。\n"
     "6. 免责声明（合规红线，强制）：报告必须包含 '## 免责声明' 章节，"
-    "并写明**本报告由 AI 生成**、不构成任何投资建议，基线文案："
-    "'本报告由 AI 生成，不构成任何投资建议；数据来源于公开披露，"
-    "可能存在时效性差异和获取误差'。"
-    "缺少免责声明时系统会自动补入标准文案（已有免责声明则原样保留、不重复添加），"
+    "并写明**本报告由 AI 生成**、不构成任何投资建议。**来源措辞按第 3 条"
+    "按实际采用的来源选择**——没有外部来源时不得写'数据来源于公开披露'，"
+    "只有用户材料时不得改称'模型知识'（U90-R4：声明必须与实际采用的来源一致）。"
+    "没有任何外部来源时的基线文案："
+    "'本报告由 AI 生成，仅供参考，不构成任何投资建议；数据与结论以报告内来源清单"
+    "与可复算底稿为准，请注意其时效性与适用范围'。"
+    "缺少免责声明时系统会自动补入基线文案（已有免责声明则原样保留、不重复添加），"
     "但报告自己写全（含 AI 生成标识）才算合规。"
 )
 
@@ -580,6 +583,29 @@ def perspective_requirements(perspective: str) -> str:
 # HTML/JS/CSS/PY/图片等源码或二进制一律跳过正文，只保留"文件存在 + 路径"提示，
 # 防止报告"抄产物"把落盘的 index.html 等源码原文混入报告 prompt。
 _ARTIFACT_TEXT_EXTENSIONS = {".md", ".txt", ".csv", ".json"}
+
+# U90-R1（断点身份与产物校验）：断点复用的**必需产物**表（capability → 工作区内
+# 相对路径；映射内**任一存在**即视为"产物还在"，缺失即重做）。
+# 每一条都来自既有消费者/既有落盘记录，不是新造约定：
+#   web_search/web_fetch → project/fetch_snapshot.json（抓取缓存；acceptance 的
+#                          `_self_artifacts`/结构化管线都从它取正文证据与页面定位）
+#                          ＋ narrative_evidence.json（证据层，EVIDENCE_FILE）
+#   content_summary      → narrative_evidence.json（narrative_evidence.EVIDENCE_FILE）
+#   data_analyzer        → project/working_paper.json（事实底稿；financial_analysis
+#                          与交付装配的共同输入）
+#   report_generator     → reports/report.md（交付链读的正文落盘；结果里也带 report_path）
+#   package              → export_manifest.json（导出清单）
+# 未列出的能力（file_io/data_loader/code_execution/model_trainer/react_agent…）
+# 没有固定产物：只认步骤结果里**自己记录**的产物路径（file_io 的
+# `files[].path`/`report_path` 等）；一条都取不到就是"无法证明有效" → 不复用。
+_RESUME_STEP_ARTIFACTS: dict = {
+    "web_search": ("project/fetch_snapshot.json", "narrative_evidence.json"),
+    "web_fetch": ("project/fetch_snapshot.json", "narrative_evidence.json"),
+    "content_summary": ("narrative_evidence.json",),
+    "data_analyzer": ("project/working_paper.json",),
+    "report_generator": ("reports/report.md",),
+    "package": ("export_manifest.json",),
+}
 
 # make_charts 语义图 → chart_manifest.json 回填时的文件名推断关键词
 # （中文语义 + 英文 token；无 chart_data.json 规格，section_hint 保持为空）
@@ -2508,6 +2534,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "恢复：检查点正文与已选中版本不一致（task=%s），以已选中版本为准",
                     task_id,
                 )
+            # R2（恢复→采纳→交付 同版）：恢复把**已选中版本**立为本次 best_report 时，
+            # 交付投影（页面下载正文）必须跟着它——不换的话恢复包/页面/采纳版是三份正文
+            # （实测洋河：恢复包 f11adbec…、页面下载 3a0a3163…、采纳版 619159be…）。
+            # 只写正文，状态/验收一字不动；失败收尾前中断也保持一致。
+            self._project_restored_body(task_id, adopted.body)
             return adopted.body
         v = store.find_by_body(body)
         if v is None:
@@ -2524,7 +2555,36 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             logger.warning(
                 "恢复：选中版本只有旧的短 hash 验收（task=%s），按待重验处理", task_id)
         store.adopt(v, reason="恢复自检查点")
+        # R2：采纳即同步交付投影（同一处口径，见 `_project_restored_body`）
+        self._project_restored_body(task_id, body)
         return body
+
+    def _project_restored_body(self, task_id: str, body: str) -> bool:
+        """恢复采纳后把**这一版正文**写进交付投影（页面/导出读的就是它）。
+
+        R2（2026-10-20 架构师裁决）：采纳版本变了而投影没变时，页面下载/导出读到的是
+        另一份正文——恢复包内 MD 与同时下载的页面 MD 成了两份文件（洋河实测
+        `f11adbec…` vs `3a0a3163…`）。这里只写 `report`：**状态与验收摘要一个字不改**
+        （恢复不把失败洗成成功），`allow_terminal=True` 让失败任务也能换正文而不翻状态。
+        失败只记日志，不阻断恢复。
+        """
+        _body = str(body or "")
+        if not _body.strip():
+            return False
+        try:
+            import task_state as _ts
+            ok = bool(_ts.update_delivery_projection(
+                task_id, report=_body, status="", allow_terminal=True))
+            if ok:
+                logger.info("恢复：交付投影按采纳正文同步（task=%s，%d 字符）",
+                            task_id, len(_body))
+            else:
+                logger.warning("恢复：交付投影未同步（task=%s）——页面正文可能仍是旧稿",
+                               task_id)
+            return ok
+        except Exception as exc:                 # noqa: BLE001 - 投影失败不阻断恢复
+            logger.warning("恢复：交付投影同步失败（task=%s）：%s", task_id, str(exc)[:140])
+            return False
 
     def _goal_of(self, task_id: str) -> str:
         try:
@@ -8514,7 +8574,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return optional_ids
 
     def _load_resumable_steps(self, task_id: str, steps: list[dict]) -> dict:
-        """任务26：读回**已持久化为 SUCCESS** 的步骤 → `{str(step_id): 结果}`。
+        """任务26/U90-R1：读回**已持久化为 SUCCESS 且仍可证明有效**的步骤 → `{str(step_id): 结果}`。
 
         根因：步骤级状态其实早就落库了（`task_state` 的 `steps_json`，终态由
         `record_completion` 写入；运行中的实时态另有 Redis 快照），但
@@ -8529,13 +8589,50 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
         只认**当前计划**里的 `step_id`：计划变了（反思重做/修复轮）就不得沿用旧结论，
         否则会把上一轮的步骤当成这一轮已完成而跳过。
+
+        U90-R1：`step_id`+SUCCESS 只是**候选**，复用前必须证明**三件事**，证明不了
+        就按需重做（架构师反例：空目录、缺单个产物、同 ID 换能力/指令/依赖/契约，
+        均不得拿旧结果）：
+        1. **工作区在**（既有检查）：工作区没了，产物就无从谈起 → 全量重跑；
+        2. **身份一致**（`_resume_step_identity_verdict`）：capability/依赖与当前计划
+           一致，指令核心**相同或被落库指令完整包含**（派发时运行期会在核心指令上
+           追加运行上下文，落库的是追加后的那份），执行契约指纹与任务当前契约一致
+           （`contract.matches`，派发路径同一判定），两边都声明了 iteration 时迭代号
+           也必须一致；上次由**重规划代做**（`replanned`/`worker_mismatch`）的步骤
+           执行指令已非当前计划指令 → 不复用；
+        3. **产物在**（`_resume_artifact_verdict`）：能力对应的必需产物
+           （`_RESUME_STEP_ARTIFACTS`）存在，且步骤结果里自己记录的产物路径
+           （file_io/data_loader 的 `path`/`files[].path`、report_path 等）都还在。
+        被拒的步骤**连带其后继**（直接或间接依赖它的当前计划步骤）一并重做——
+        上游输入已经变了，下游的旧结果不能再当"已完成"。
         """
-        wanted = {str(s.get("step_id")) for s in (steps or []) if s.get("step_id") is not None}
+        plan_by_id = {str(s.get("step_id")): s for s in (steps or [])
+                      if s.get("step_id") is not None}
+        wanted = set(plan_by_id)
         found: dict = {}
+        # ① 工作区不存在 → 一步都不复用（产物无从谈起），按全量重跑。
+        try:
+            import workspace as _ws_mod
+            _ws_dir = Path(_ws_mod.task_workspace(task_id))
+            if not _ws_dir.exists():
+                logger.info("Task %s 断点恢复不复用任何步骤：工作区不存在（%s），按全量重跑",
+                            task_id, _ws_dir)
+                return {}
+        except Exception as exc:                # noqa: BLE001 - 判不了产物就按全量执行
+            logger.warning("Task %s 断点恢复产物校验失败（按全量执行）：%s", task_id, str(exc)[:150])
+            return {}
         try:
             import task_state as _ts
         except Exception:                           # noqa: BLE001 - 读不到就按全量执行
             return found
+        # ② 执行契约：与派发路径同一对象/同一判定（拿不到就按"无契约可比对"处理，
+        #    身份校验退化为 capability/instruction/depends_on + 产物）。
+        try:
+            _contract = self._task_contract(task_id)
+        except Exception:                            # noqa: BLE001
+            _contract = None
+        candidates: dict[str, dict] = {}
+        rejected: dict[str, str] = {}
         for getter in (lambda: (_ts.task_projection(task_id) or {}).get("steps"),
                        lambda: (_ts.read_snapshot(task_id) or {}).get("steps")):
             try:
@@ -8548,7 +8645,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 if not isinstance(entry, dict):
                     continue
                 sid = str(entry.get("step_id") or "")
-                if not sid or sid not in wanted or sid in found:
+                if not sid or sid not in wanted or sid in candidates:
                     continue
                 inner = entry.get("result")
                 status = str(entry.get("status") or "")
@@ -8556,18 +8653,192 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     status = str(inner.get("status") or "")
                 if status != "SUCCESS":
                     continue
+                # U90-R1：身份 + 产物都证明有效才算可复用；证明不了就重做。
+                ok, why = self._resume_step_identity_verdict(
+                    plan_by_id[sid], entry, _contract)
+                if not ok:
+                    rejected[sid] = why
+                    continue
+                _cap = str(entry.get("capability")
+                           or (plan_by_id[sid] or {}).get("capability") or "")
+                ok, why = self._resume_artifact_verdict(_cap, inner, _ws_dir)
+                if not ok:
+                    rejected[sid] = why
+                    continue
                 if isinstance(inner, dict):
                     text = str(inner.get("result") or "")
                 elif inner is None:
                     text = ""
                 else:
                     text = str(inner)
-                found[sid] = {
+                candidates[sid] = {
                     "task_id": sid, "status": "SUCCESS",
                     # 结果文本截断：续跑时它只用于下游指令注入/上下文，不是交付正文
                     "result": text[:20000], "resumed": True,
                 }
+        # ③ 后继失效：任何（直接或间接）依赖被拒步骤的当前计划步骤一并重做。
+        invalid = set(rejected)
+        _changed = True
+        while _changed:
+            _changed = False
+            for sid, ps in plan_by_id.items():
+                if sid in invalid:
+                    continue
+                if any(str(d) in invalid for d in self._step_dep_ids(ps or {})):
+                    invalid.add(sid)
+                    rejected.setdefault(sid, "上游步骤不复用（输入已变，连带重做）")
+                    _changed = True
+        found = {sid: rec for sid, rec in candidates.items() if sid not in invalid}
+        # 审计：页面/日志可见"复用了谁、重做了谁、为什么"。
+        try:
+            if found or invalid:
+                _msg = (f"断点复用裁决：可复用 {len(found)}/{len(plan_by_id)} 步"
+                        + (f"（{'、'.join(sorted(found))}）" if found else ""))
+                if invalid:
+                    _msg += (f"；按需重做 {len(invalid)} 步：" + "；".join(
+                        f"{k}（{rejected[k]}）" for k in sorted(invalid)))
+                logger.info("Task %s %s", task_id, _msg)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": _msg, "timestamp": self._now_iso()})
+        except Exception:                            # noqa: BLE001 - 审计不阻断
+            pass
         return found
+
+    # ── U90-R1：断点复用裁决（身份/产物） ──────────────────────────────────
+    @staticmethod
+    def _norm_step_text(value) -> str:
+        """步骤身份字段的规范投影（空白折叠；None → 空串）。"""
+        return " ".join(str(value if value is not None else "").split())
+
+    @classmethod
+    def _step_dep_ids(cls, step: dict) -> list[str]:
+        """`depends_on` 的顺序无关投影（str/list 两种落库形状都认）。"""
+        raw = (step or {}).get("depends_on")
+        if isinstance(raw, str):
+            raw = [x for x in re.split(r"[,\s]+", raw) if x]
+        return sorted(str(x) for x in (raw or []))
+
+    def _resume_step_identity_verdict(self, plan_step: dict, stored: dict,
+                                      contract) -> tuple[bool, str]:
+        """落库步骤与**当前计划**的身份一致性 → `(可复用, 原因)`。
+
+        三条判据（都要过）：
+
+        1. **执行契约**（`contract.matches`，与派发路径同一判定）：指纹/版本不一致，
+           或落库步骤压根没有契约身份 → 证明不了"同主体/同期间/同口径/同问题集"。
+        2. **能力 + 依赖 + 迭代号**：与当前计划一致（依赖顺序无关比对）。
+        3. **指令**：派发时运行期会在**核心指令**上追加运行上下文（任务目标/用户目标/
+           `原始指令：`/历史经验/技能包等，实测落库指令 3000~11000 字 vs 核心 120~570 字），
+           落库的是追加后的那一份。因此判据是"两个都规范后**相同**，或当前核心指令
+           被落库指令**完整包含**"——核心被改写（换指令/换查询面）就既不相等也不包含。
+           另外，上次执行若由**重规划代做**（`result.replanned`/`replan_instruction`/
+           `worker_mismatch`：能力-执行者错配后换了指令），其执行指令已不是当前计划的
+           指令，证明不了"同输入" → 不跳过（本机 docker 不可用时这类步骤很多，
+           真实样本的复用面因此变小；这是忠实于"证明不了就重做"的代价）。
+        """
+        plan_step = dict(plan_step or {})
+        stored = dict(stored or {})
+        inner = stored.get("result") if isinstance(stored.get("result"), dict) else {}
+        if contract is not None:
+            try:
+                fixed, _ = contract.apply_to_steps([plan_step])
+                if fixed and isinstance(fixed[0], dict):
+                    plan_step = fixed[0]
+            except Exception as exc:                 # noqa: BLE001
+                return False, f"契约规范化失败（{str(exc)[:60]}）"
+            if not contract.matches(stored.get("contract")):
+                return False, "执行契约指纹不一致（或落库步骤没有契约身份）"
+        if inner.get("replanned") or str(inner.get("replan_instruction") or "").strip() \
+                or inner.get("worker_mismatch"):
+            return False, "上次执行由重规划代做（执行指令与当前计划不同）"
+        for key, label in (("capability", "能力"),):
+            if self._norm_step_text(plan_step.get(key)) != \
+                    self._norm_step_text(stored.get(key)):
+                return False, f"{label}与当前计划不一致"
+        if self._step_dep_ids(plan_step) != self._step_dep_ids(stored):
+            return False, "依赖与当前计划不一致"
+        p_i = self._norm_step_text(plan_step.get("instruction"))
+        s_i = self._norm_step_text(stored.get("instruction"))
+        if p_i != s_i and not (p_i and p_i in s_i):
+            return False, "指令核心与当前计划不一致（既不相同也不被落库指令包含）"
+        p_it, s_it = plan_step.get("iteration"), stored.get("iteration")
+        if p_it is not None and s_it is not None and \
+                self._norm_step_text(p_it) != self._norm_step_text(s_it):
+            return False, f"迭代号不一致（{p_it} ≠ {s_it}）"
+        return True, "身份一致"
+
+    @staticmethod
+    def _recorded_step_artifacts(inner, ws_dir: Path) -> list[Path]:
+        """步骤结果里**自己记录**的产物路径（只认工作区内路径）。
+
+        file_io/data_loader 这类没有固定产物的能力，产物路径就在结果 JSON 里
+        （file_io 的 `path`/`files[].path`，report_generator 的 `report_path`，
+        package 的 `zip` 等）；工作区之外的路径（旧平铺工作区/模块目录）不能
+        当本任务产物证据，忽略。
+        """
+        out: list[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw):
+            s = str(raw or "").strip().strip('"').strip("'")
+            if not s or len(s) < 3 or "://" in s[:12]:
+                return
+            try:
+                p = Path(s)
+            except Exception:                        # noqa: BLE001
+                return
+            if not p.is_absolute():
+                p = ws_dir / s
+            try:
+                rp, wsp = p.resolve(), ws_dir.resolve()
+            except Exception:                        # noqa: BLE001
+                return
+            if rp != wsp and wsp not in rp.parents:
+                return
+            key = str(rp).lower()
+            if key in seen:
+                return
+            seen.add(key)
+            out.append(rp)
+
+        if isinstance(inner, dict):
+            for key in ("path", "report_path", "zip", "zip_path", "file",
+                        "output_path", "artifact", "artifacts", "files"):
+                val = inner.get(key)
+                items = val if isinstance(val, (list, tuple)) else [val]
+                for it in items:
+                    if isinstance(it, dict):
+                        _add(it.get("path") or it.get("filename"))
+                    else:
+                        _add(it)
+        return out
+
+    def _resume_artifact_verdict(self, capability: str, inner,
+                                 ws_dir: Path) -> tuple[bool, str]:
+        """步骤产物是否还在 → `(可复用, 原因)`。
+
+        判据（两条都要过）：
+        1. 结果里记录的产物路径**全部存在**（一条丢了就是产物缺失）；
+        2. `_RESUME_STEP_ARTIFACTS` 里该能力的必需产物**至少一个存在**；
+           未列出的能力靠第 1 条——一条产物路径都没记录就是"无法证明有效"。
+        """
+        try:
+            recorded = self._recorded_step_artifacts(inner, ws_dir)
+        except Exception:                            # noqa: BLE001 - 取不了就当没有
+            recorded = []
+        missing = [str(p) for p in recorded if not p.exists()]
+        if missing:
+            return False, f"步骤记录的产物已不存在：{missing[0]}"
+        mapped = _RESUME_STEP_ARTIFACTS.get(str(capability or ""))
+        if mapped:
+            hit = [rel for rel in mapped if (ws_dir / rel).exists()]
+            if hit:
+                return True, f"必需产物存在（{hit[0]}）"
+            return False, f"必需产物不存在（{' 或 '.join(mapped)}）"
+        if recorded:
+            return True, f"结果记录的产物仍在（{len(recorded)} 项）"
+        return False, "该能力没有固定产物、结果也未记录产物路径：无法证明有效"
 
     def _execute_steps(self, steps: list[dict], task_id: str, goal: str,
                        *, resume_completed: bool = False) -> tuple[list[dict], bool]:

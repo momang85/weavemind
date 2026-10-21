@@ -491,9 +491,103 @@ def _list_tasks(limit=50):
             d = dict(r)
             d["created_at"] = _iso_utc(d.get("created_at"))
             d["completed_at"] = _iso_utc(d.get("completed_at"))
+            d["resume"] = _resume_view(d)
             out.append(d)
         return out
     except Exception: return []
+
+
+# ── U90-B：「能不能接着跑」的统一视图 ──────────────────────────────────────────
+# 与 `_post_task_resume` 的服务端硬门槛**同一口径**：只有 FAILED/CRASHED 可续跑；
+# SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED 是不可逆终态（复核红线：结论只能人工改，
+# 不得由接口重跑覆盖）。前端只按这里显隐按钮与解释文案，不再各自猜状态。
+
+_RESUME_ALLOWED_STATUS = ("FAILED", "CRASHED")
+_RESUME_RUNNING_STATUS = ("RUNNING", "PENDING", "QUEUED", "RECEIVED")
+_RESUME_TERMINAL_STATUS = ("SUCCESS", "SUCCESS_WITH_ISSUES")
+
+
+def _json_steps(raw) -> list:
+    """任务行里的步骤列表（steps_json 字符串或已解析列表）——解析失败按空，不抛。"""
+    if isinstance(raw, list):
+        return raw
+    s = str(raw or "").strip()
+    if not s or s[0] != "[" or len(s) > 2_000_000:
+        return []
+    try:
+        v = json.loads(s)
+    except Exception:
+        return []
+    return v if isinstance(v, list) else []
+
+
+def _step_verdict(entry) -> tuple:
+    """一条步骤记录 → `(step_id, 状态, 失败说明)`。
+
+    落库形状是 `{"step_id", "capability", "result": {"task_id","status","result"}}`：
+    **状态在嵌套的 result 里**，只看顶层会把所有步骤都判成未完成（与编排器
+    `_load_resumable_steps` 的取法一致）。
+    """
+    if not isinstance(entry, dict):
+        return "", "", ""
+    sid = str(entry.get("step_id") or entry.get("task_id") or "")
+    inner = entry.get("result")
+    status = str(entry.get("status") or "")
+    text = ""
+    if isinstance(inner, dict):
+        status = status or str(inner.get("status") or "")
+        text = str(inner.get("error") or inner.get("reason")
+                    or inner.get("result") or "")
+    elif inner is not None and not status:
+        text = str(inner)
+    status = status.upper()
+    why = ""
+    if status and status != "SUCCESS":
+        why = text.strip()[:300] or f"{sid or '该步骤'}未成功（{status}）"
+    return sid, status, why
+
+
+def _resume_view(row: dict) -> dict:
+    """`resume` 视图（U90-B）：按钮显隐 + 点击说明 + 失败原因，三处共用一份判定。
+
+    - `available=true` 只在 FAILED/CRASHED（与 `/resume` 接口 409 规则一致）；
+    - `reason` 说明**为什么能/不能继续**；失败的任务带第一步失败的位置与原因；
+    - `label` 是按钮文案；`endpoint` 是点击后调用的接口。
+    """
+    row = row or {}
+    status = str(row.get("status") or "").upper()
+    view = {"available": False, "status": status, "total": 0, "completed": 0,
+            "failed_step": "", "failure": "", "reason": "", "label": "",
+            "endpoint": f"/api/task/{row.get('task_id') or ''}/resume"}
+    if status in _RESUME_TERMINAL_STATUS:
+        view["reason"] = ("任务已完成：结论是不可重跑的终态；要修正内容走报告页的"
+                          "修订/复核入口，或补材料后在分析工作台复算。")
+    elif status == "CANCELLED":
+        view["reason"] = ("任务已取消：取消是持久终态，不会自动重跑；"
+                          "要重来请重新提交任务。")
+    elif status in _RESUME_RUNNING_STATUS:
+        view["reason"] = "任务正在执行中：等它收尾，无需恢复。"
+    elif status in _RESUME_ALLOWED_STATUS:
+        view["available"] = True
+        steps = _json_steps(row.get("steps_json") if "steps_json" in row
+                            else row.get("steps"))
+        view["total"] = len(steps)
+        for s in steps:
+            _sid, _st, _why = _step_verdict(s)
+            if _st == "SUCCESS":
+                view["completed"] += 1
+            elif _st and not view["failure"]:
+                view["failed_step"], view["failure"] = _sid, _why
+        view["label"] = (f"继续执行（跳过 {view['completed']}/{view['total']} 步）"
+                         if view["completed"] else "重新接管执行（无已完成步骤可复用）")
+        view["reason"] = (f"上次在第 {view['failed_step']} 步失败：{view['failure']}"
+                          if view["failure"] else
+                          "上次执行未完成：可从已成功的步骤继续，不重复整单。")
+    else:
+        view["reason"] = (f"状态未知（{status or '空'}）：不提供自动恢复，"
+                          "请从任务详情确认后再操作。")
+    return view
+
 
 def _build_conversation_context(conv_id, limit=4):
     """取该会话最近的消息（要求+结果摘要），拼成后续任务的对话上下文。"""
@@ -559,7 +653,7 @@ def _get_conversation(conv_id):
     try:
         db = sqlite3.connect(DB_PATH, timeout=5); db.row_factory = sqlite3.Row
         rows = db.execute(
-            "SELECT task_id, goal, status, created_at, completed_at, report "
+            "SELECT task_id, goal, status, created_at, completed_at, report, steps_json "
             "FROM task_history WHERE conversation_id=? ORDER BY created_at ASC",
             (conv_id,),
         ).fetchall()
@@ -570,6 +664,9 @@ def _get_conversation(conv_id):
             d["created_at"] = _iso_utc(d.get("created_at"))
             d["completed_at"] = _iso_utc(d.get("completed_at"))
             d["report_preview"] = (d.get("report") or "")[:500]
+            # U90-B：会话页的失败任务也要给「继续执行」按钮（同一份判定，
+            # 与列表/详情同口径）；查看/重跑之外多一条"接着跑"的路。
+            d["resume"] = _resume_view(d)
             out.append(d)
         return out
     except Exception:
@@ -5309,6 +5406,8 @@ def _get_task_page(self, p):
             "content_filter": content_filter,
             "research": research,
             "export": export,
+            # U90-B：「继续执行」按钮与解释的**同一份判定**（与 /tasks 列表一致）
+            "resume": _resume_view(data),
         })
         return self._json({"error":"not found"},404)
 
@@ -5894,6 +5993,9 @@ def _analysis_workbench(tid: str) -> dict:
     from workspace import task_workspace
     ws = task_workspace(tid)
     out: dict = {"task_id": tid, "ok": False, "reason": "",
+                 # U90-C：没有可复算输入时，面板要给"下一步做什么"；
+                 # can_freeze=按现有事实确定性补算，next_action ∈ freeze/material/recompute
+                 "can_freeze": False, "next_action": "",
                  "models": [], "runs": [], "inputs": {}, "cards": []}
     try:
         from financial_analysis import registry as _reg
@@ -5913,6 +6015,18 @@ def _analysis_workbench(tid: str) -> dict:
                 _obs_by_fact[str(o["fact_id"])] = o
     except Exception as exc:                        # noqa: BLE001 - 索引建不出不影响其它字段
         logger.warning("原始依据索引构建失败（task=%s）：%s", tid, str(exc)[:120])
+    # U90-C：**"没有可复算输入"时页面必须给出下一步**，不能只丢一句缺口。
+    # 判定只读工作区、不落盘、不调模型：本次任务是否留有可冻结的事实来源
+    # （`project/working_paper.json` 优先，其次 `project/financials.json`）。
+    # 有来源 ⇒ 可以按现有事实补算（确定性、零模型调用）；没有 ⇒ 如实说"补不了"。
+    _freeze_src = ""
+    try:
+        from workers.data_analyzer_worker import DataAnalyzerWorker as _DAW
+        _picked = _DAW._financial_source(ws)
+        _freeze_src = str(_picked[0]) if _picked else ""
+    except Exception as exc:                        # noqa: BLE001 - 判定失败按"不能补算"
+        logger.warning("补算来源判定失败（task=%s）：%s", tid, str(exc)[:120])
+        _freeze_src = ""
     out["inputs"] = {
         "present": sorted(fa_store.input_payload_bytes(ws)),
         "dataset_hash": str((inputs.get("dataset") or {}).get("dataset_hash") or ""),
@@ -5920,6 +6034,8 @@ def _analysis_workbench(tid: str) -> dict:
         "contract": (inputs.get("context") or {}).get("contract") or {},
         "recomputable": bool((inputs.get("dataset") or {}).get("dataset")),
         "observations": len(_obs_by_fact),
+        # 可用事实来源（working_paper / financials / 空）——补算按钮据此显隐
+        "source": _freeze_src,
     }
     _ds_hash = str(out["inputs"]["dataset_hash"] or "")
     try:
@@ -5947,9 +6063,51 @@ def _analysis_workbench(tid: str) -> dict:
                        for p in (_pkgs.get("packages") or [])]
     out["adopted_identity"] = str(_pkgs.get("adopted_identity") or "")
     if not out["inputs"]["recomputable"]:
-        out["reason"] = ("该任务没有可复算输入（analysis/dataset.json）："
-                         "先让分析步跑完（分析链会落 dataset/plan/context）")
+        # U90-C：缺口要**如实且可行动**——要么能补算（有本次任务事实），要么明确说
+        # 该补材料/重跑，绝不把"补不了"伪装成"已就绪"。
+        out["can_freeze"] = bool(_freeze_src)
+        if _freeze_src:
+            _src_label = ("本次任务的工作底稿（project/working_paper.json）"
+                          if _freeze_src == "working_paper" else
+                          "本次任务的财务事实（project/financials.json）")
+            out["reason"] = (
+                "该任务没有可复算输入（analysis/dataset.json）：分析步没跑或没落盘。"
+                f"工作区留有{_src_label}，可点『补算分析输入』按现有事实冻结数据集"
+                "并复算注册模型（确定性、不调模型）；资料不足的模型会如实留缺口，"
+                "不会编数据。")
+            out["next_action"] = "freeze"
+        else:
+            out["reason"] = (
+                "该任务没有可复算输入（analysis/dataset.json），且工作区没有本次任务的"
+                "事实来源（project/working_paper.json 与 project/financials.json 均不存在）："
+                "无法离线补算。要么补一份披露材料（材料页→补材料），要么重跑研究；"
+                "系统不会用猜测的数据补齐。")
+            out["next_action"] = "material"
     runs = fa_store.load_runs(ws)
+    # U90-C（10-20）：**把注册模型接进"改假设"面板**——不只列已有运行的模型。
+    # 情景模型（scenario_sensitivity/cash_pressure）注册了可改的情景参数，但本任务
+    # 可能还没算过它：此前模型选择器只列"已有运行"的模型 ⇒ 用户在页面上根本没有
+    # "改一个情景参数"的入口（只剩 rounding 这种字符串选择还没渲染）。
+    # 这里把 registry 里的非比率模型清单一起回显（ran=是否已算过），
+    # 只读 registry：确定性、不调模型、不落盘。列不出就如实空。
+    try:
+        _ran_mids = {str(r.get("model_id") or "") for r in runs}
+        out["models"] = [
+            {
+                "id": str(s.model_id),
+                "label": str(s.question or s.model_id),
+                "ran": str(s.model_id) in _ran_mids,
+                "allowed_params": {
+                    k: (list(v) if isinstance(v, (tuple, list)) else v)
+                    for k, v in dict(getattr(s, "allowed_params", {}) or {}).items()
+                },
+                "default_params": dict(getattr(s, "default_params", {}) or {}),
+            }
+            for s in _reg.specs()
+            if not str(s.model_id).startswith("ratio:")
+        ]
+    except Exception as exc:                        # noqa: BLE001 - 清单列不出就如实空
+        logger.warning("注册模型清单读取失败（task=%s）：%s", tid, str(exc)[:120])
     cards: list[dict] = []
     for r in runs:
         mid = str(r.get("model_id") or "")
@@ -6028,6 +6186,8 @@ def _analysis_workbench(tid: str) -> dict:
         c["in_report"] = (str(c.get("run_id") or "") in _selected_ids) if _selected_ids \
             else bool(c.get("selected"))
     out["ok"] = bool(out["inputs"]["recomputable"])
+    if out["ok"]:
+        out["next_action"] = "recompute"
     return out
 
 
@@ -6041,6 +6201,79 @@ def _get_task_analysis(self, p):
     if not _task_exists(tid):
         return self._json({"error": "task not found"}, 404)
     return self._json(_analysis_workbench(tid))
+
+
+def _post_task_analysis_freeze(self, p, body, admin):
+    """`POST /api/task/<id>/analysis/freeze`：用**现有事实**补算可复算分析输入（U90-C）。
+
+    复用 data_analyzer 的同一条冻结链（`_run_financial`：冻结数据集 → 编译计划 →
+    跑注册模型 → 落盘 dataset/plan/context + analysis_runs.json）——**确定性、零模型
+    调用、零派发**：不新增服务/worker/DB，也不拿猜测数据顶上。
+
+    - 已有输入：200 + `already=true`（幂等，不重算；要改假设走复算入口）；
+    - 任务在跑：409（正在写工作区，同时补算会互相覆盖）；
+    - 没有本次任务事实来源：409 + `code=no_source`（离线补不了，如实说）；
+    - 契约要素不全：409 + `code=contract_gap` + 缺什么（不降门槛、不编数据）。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/analysis/freeze")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/analysis/freeze", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    import task_state as _ts
+    from workspace import task_workspace
+    from financial_analysis import store as fa_store
+    from workers.data_analyzer_worker import ContractGap as _ContractGap
+    from workers.data_analyzer_worker import DataAnalyzerWorker as _DAW
+    ws = task_workspace(tid)
+    if fa_store.input_payload_bytes(ws).get("analysis/dataset.json"):
+        return self._json({"status": "ok", "already": True,
+                           "note": "已有可复算输入，未重算（要改假设请用分析工作台的复算入口）",
+                           "analysis": _analysis_workbench(tid)})
+    try:
+        if _ts.is_running(tid):
+            return self._json(
+                {"error": "任务正在运行：等它收尾后再补算（避免与分析步同时写工作区）",
+                 "code": "task_running"}, 409)
+    except Exception:                            # noqa: BLE001 - 读不到状态就不挡
+        pass
+    source = _DAW._financial_source(ws)
+    if source is None:
+        return self._json(
+            {"error": "工作区没有本次任务的事实来源（project/working_paper.json 与 "
+                      "project/financials.json 均不存在）：无法离线补算；请补一份披露"
+                      "材料或重跑研究。系统不会用猜测的数据补齐。",
+             "code": "no_source", "analysis": _analysis_workbench(tid)}, 409)
+    row = {}
+    try:
+        row = _ts.read_task(tid) or {}
+    except Exception:                            # noqa: BLE001 - 读不到就按空目标
+        row = {}
+    ctx = dict(row.get("context") or {}) if isinstance(row.get("context"), dict) else {}
+    ctx.setdefault("root_task_id", ctx.get("root_task_id") or tid)
+    task = {"task_id": tid, "goal": str(row.get("goal") or ""),
+            "workspace": str(ws), "context": ctx}
+    worker = _DAW.__new__(_DAW)                  # 只用静态冻结链，不连 Redis
+    res = worker._run_financial(ws, "", task, source)
+    if str(res.get("status")) == "failed" and not res.get("runs"):
+        # 契约要素不全/没有相容观察：409 + 原文缺口（不落任何运行记录）
+        return self._json({"status": "failed", "error": str(res.get("error") or "补算失败"),
+                           "code": "contract_gap", "gap": str(res.get("gap") or ""),
+                           "dataset_source": res.get("dataset_source") or {},
+                           "analysis": _analysis_workbench(tid)}, 409)
+    _valid = sum(1 for r in (res.get("runs") or [])
+                 if str(r.get("status") or "") == "validated")
+    return self._json({
+        "status": "ok", "already": False,
+        "result": {"runs_total": len(res.get("runs") or []),
+                   "runs_validated": _valid,
+                   "dataset_hash": str(res.get("dataset_hash") or ""),
+                   "dataset_source": res.get("dataset_source") or {},
+                   "gaps": list(res.get("gaps") or [])},
+        # 资料不足的模型如实留缺口：结果里明说哪些模型没跑出来
+        "analysis": _analysis_workbench(tid)})
 
 
 def _post_task_analysis_recompute(self, p, body, admin):
@@ -7456,7 +7689,9 @@ def _post_task_package(self, p, body, admin):
                 "retry": True}, 409)
         if "version changed" in str(exc):
             return self._json({
-                "error": "导出期间发生修订（交付正文与采纳版本不一致），未生成新包；请重试",
+                "error": ("交付正文与当前采纳版本不一致（恢复/修订后页面投影可能未更新），"
+                          "未生成新包，不把旧正文贴上新身份；请先重新装配或重验该版本，"
+                          "页面正文刷新后再导出（单纯重试不会好）"),
                 "retry": True}, 409)
         logger.warning("导出快照失败（task=%s）：%s", tid, str(exc)[:200])
         return self._json({"error": f"导出快照失败：{str(exc)[:160]}"}, 500)
@@ -7486,6 +7721,7 @@ def _post_task_package(self, p, body, admin):
         "snapshot": {
             "report_version_id": snap.get("report_version_id"),
             "research_body_sha256": snap.get("body_sha256"),
+            "selection_binding": snap.get("selection_binding"),
             "sources_fingerprint": snap.get("sources_fingerprint"),
             "rules_version": snap.get("rules_version"),
             "rules_fingerprint": snap.get("rules_fingerprint"),
@@ -7591,20 +7827,39 @@ def _post_task_resume(self, p, body, admin):
         row = {}
     status = str(row.get("status") or "").upper()
     if status not in ("FAILED", "CRASHED"):
+        # R3：409 带上真实状态与"能否再试"，页面据此决定按钮是否可再点
+        # （旧实现只给一句 error，页面把任何回执都当成"点过了"，失败不可重试）
+        _running = status in ("RUNNING", "QUEUED", "PENDING", "QRUNNING")
         return self._json(
-            {"error": f"只有失败的任务可以恢复（当前 {status or '未知'}）"}, 409)
+            {"error": f"只有失败的任务可以恢复（当前 {status or '未知'}）",
+             "status": status, "retryable": False, "resumed": _running,
+             "note": ("任务已在运行：无需重复恢复，刷新即可看到进展"
+                      if _running else "该状态是不可逆终态，不能由接口改写")}, 409)
     if not _redis_ready():
-        return self._json({"error": "Redis 未连接，无法恢复任务"}, 503)
+        return self._json({"error": "Redis 未连接，无法恢复任务；稍后可再试",
+                           "status": status, "retryable": True}, 503)
     # 翻转 FAILED → RUNNING（CAS：只有翻成功的一方赢得重新接管权；
     # 两个恢复入口竞争时后者拿到 409，不会各自建线程执行两次）
     try:
         import task_state as _ts
         won = _ts.mark_resumed(tid)
     except Exception as exc:
-        return self._json({"error": f"恢复失败：{str(exc)[:120]}"}, 500)
+        return self._json({"error": f"恢复失败：{str(exc)[:120]}",
+                           "status": status, "retryable": True}, 500)
     if not won:
+        # CAS 落空：另一方赢了（或状态已变）。回读真实状态如实回报——
+        # 若已是 RUNNING，说明**确实已被恢复**（可刷新查看），不要再点。
+        try:
+            now = str((_ts.read_task(tid) or {}).get("status") or "").upper()
+        except Exception:
+            now = ""
+        _resumed = now in ("RUNNING", "QUEUED", "PENDING", "QRUNNING")
         return self._json(
-            {"error": "任务已被另一个入口恢复或状态已变化，未重复接管"}, 409)
+            {"error": "任务已被另一个入口恢复或状态已变化，未重复接管",
+             "status": now, "retryable": not _resumed,
+             "resumed": _resumed,
+             "note": ("任务已在运行：本次未重复接管，刷新即可看到进展"
+                      if _resumed else "状态已变化，请刷新后按当前状态决定")}, 409)
     # 通知编排器重新接管（resume_task 消息与普通提交同通道但**分流**：
     # 终态任务的收执早已消费过，走普通提交会被 promote_received 判 "already" 跳过）
     try:
@@ -7616,7 +7871,22 @@ def _post_task_resume(self, p, body, admin):
             "project": str(row.get("project") or "default"),
         }, ensure_ascii=False))
     except Exception:
-        return self._json({"error": "Redis 发布失败，未通知编排器"}, 503)
+        # R3：发布失败时状态已经翻成 RUNNING，若不回滚，用户重试会拿到
+        # 409「当前 RUNNING」——失败不可再次操作，只能等看护线程按 stale
+        # RUNNING 收口。回滚是 CAS（只回滚本次恢复刚写的 phase），编排器若已
+        # 接管则回滚落空，此时如实告诉用户"先刷新看状态"，不谎称可重试。
+        try:
+            _undone = bool(_ts.mark_resume_undone(
+                tid, reason="resume_task 发布失败"))
+        except Exception:
+            _undone = False
+        return self._json(
+            {"error": ("恢复未生效：未能通知编排器，已回滚为失败态，可稍后再试"
+                       if _undone else
+                       "恢复未生效：未能通知编排器，且状态未能回滚——"
+                       "请先刷新查看任务当前状态，不要重复点击"),
+             "status": "FAILED" if _undone else "",
+             "retryable": _undone}, 503)
     audit_log(admin.get("user", ""), self._client_ip(), "task.resume",
               target=tid, result="ok")
     return self._json({"status": "ok", "task_id": tid,
@@ -9606,6 +9876,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/research-study/hypothesis-card", _post_research_study_hypothesis_card),
     (lambda self, p: self.path == "/api/research-study/experiment", _post_research_study_experiment),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/freeze"), _post_task_analysis_freeze),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/recompute"), _post_task_analysis_recompute),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/adopt"), _post_task_analysis_adopt),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),

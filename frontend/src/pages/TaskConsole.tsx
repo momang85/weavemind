@@ -9,6 +9,7 @@ import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
 import FirstRunGuide from '../components/FirstRunGuide'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import { resolveSubmissionKey } from '../lib/submissionKey'
+import { requestResume } from '../lib/resume'
 import { actionIntent, actionableTone, shouldShowActionable } from '../lib/actionable'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
@@ -312,6 +313,31 @@ export default function TaskConsole() {
     else if (intent.kind === 'retry') submit(lastGoal || goal)
   }, [actionable, submit, lastGoal, goal])
 
+  // U90-B：失败任务的「继续执行」——翻回 RUNNING 并让编排器按持久化步骤状态续跑
+  // （跳过已成功步骤，不重复整单）。请求本身带去重闸；页面拿到回执后开始跟踪该任务，
+  // 这样"继续"之后实时动态/执行计划直接落到这条任务上，而不是停在旧的历史视图。
+  // U90-R3：把三态回执**返回给调用方**（ConsoleSideTabs 据此渲染"可重试/已请求"），
+  // 并区分超时回执（有界超时后已查真实状态）与失败回执。
+  const onResumeTask = useCallback(async (tid: string) => {
+    const r = await requestResume(tid)
+    addLog({
+      timestamp: new Date().toISOString(), type: r.ok ? 'info' : 'error',
+      agent: 'orchestrator',
+      message: r.ok ? `任务 ${tid} ${r.message}`
+        : (r.phase === 'timeout'
+            ? `任务 ${tid} 恢复超时未确认（${r.taskStatus || '状态未知'}）：${r.message}`
+            : `任务 ${tid} 未恢复：${r.message}`),
+    })
+    if (r.ok) {
+      useTaskStore.setState({ currentTaskId: tid, status: 'running', startedAt: Date.now() })
+      saveLastTask(tid)          // 与提交路径一致：刷新后仍能恢复跟踪
+      setTab('live')
+    }
+    loadRecentTasks()
+    if (activeConversationId) loadConversation(activeConversationId)
+    return r
+  }, [addLog, loadRecentTasks, loadConversation, activeConversationId])
+
   // 「改为修改目标」：把目标填回提交框并滚回提交区，不自动提交
   const prefillGoal = useCallback((g: string) => {
     setGoal(g)
@@ -512,7 +538,8 @@ export default function TaskConsole() {
           convMessages={convMessages}
           resultItems={resultItems} activeConversationId={activeConversationId}
           gapsFor={gapsFor} onToggleGaps={toggleGaps}
-          onViewReport={viewFullReport} onSubmit={submit} onPrefillGoal={prefillGoal} />
+          onViewReport={viewFullReport} onSubmit={submit} onPrefillGoal={prefillGoal}
+          onResume={onResumeTask} />
       </div>
 
       <ReportViewer />

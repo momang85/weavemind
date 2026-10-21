@@ -261,6 +261,68 @@ def _dataset_rows_with(*, mutate=(), restatement=""):
     return rows
 
 
+class TestDatasetFromInputsOldWorkspace(unittest.TestCase):
+    """旧工作区（无 `analysis/dataset.json` 或清单缺身份字段）**如实说没有**。
+
+    真机缺陷（2026-10-20 洋河/三一任务，重复 5 次）：`report_brief` 的直接法收支/
+    营运资本判断调 `store.dataset_from_inputs`，旧工作区没有冻结数据集时抛
+    `DatasetManifest.__init__() missing 2 required positional arguments`，被上层
+    `except Exception` 静默吞掉——报告少一块判断且无人知道。修法**不补造身份**：
+    算不出 `dataset_hash`/`source_label` 就说算不出（本包纪律第 2 条），但必须是
+    可识别的领域异常，而不是裸 `TypeError`。
+    """
+
+    def _write_dataset(self, ws, *, drop_identity=False):
+        """把一份合法冻结数据集落成 `analysis/dataset.json`，返回 store 供调用。"""
+        from financial_analysis import store as fa_store
+        ds = _dataset()
+        man = ds.manifest.as_dict()
+        if drop_identity:
+            man.pop("dataset_hash")
+            man.pop("source_label")
+        blob = {"dataset": {"manifest": man,
+                            "observations": [o.as_dict() for o in ds.observations]}}
+        d = Path(ws) / "analysis"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "dataset.json").write_text(json.dumps(blob, ensure_ascii=False),
+                                        encoding="utf-8")
+        return fa_store
+
+    def test_missing_dataset_file_raises_dataset_unavailable(self):
+        import tempfile
+        from financial_analysis import store as fa_store
+        with tempfile.TemporaryDirectory(prefix="fa_old_ws_") as tmp:
+            Path(tmp, "analysis").mkdir(parents=True, exist_ok=True)
+            with self.assertRaises(fa.DatasetUnavailable) as cm:
+                fa_store.dataset_from_inputs(tmp)
+            msg = str(cm.exception)
+            self.assertIn("dataset_hash", msg)
+            self.assertIn("source_label", msg)
+            self.assertIn("缺失", msg)
+            self.assertIn("不补造", msg)
+
+    def test_old_format_manifest_raises_dataset_unavailable(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="fa_old_ws_") as tmp:
+            fa_store = self._write_dataset(tmp, drop_identity=True)
+            with self.assertRaises(fa.DatasetUnavailable) as cm:
+                fa_store.dataset_from_inputs(tmp)
+            msg = str(cm.exception)
+            self.assertIn("为旧格式", msg)
+            self.assertIn("dataset_hash", msg)
+
+    def test_identity_round_trip_still_succeeds(self):
+        """有身份字段时照旧还原（本次修复不动正常路径）。"""
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="fa_old_ws_") as tmp:
+            fa_store = self._write_dataset(tmp)
+            ds = fa_store.dataset_from_inputs(tmp)
+            self.assertEqual(len(ds.manifest.dataset_hash), 64)
+            self.assertEqual(ds.manifest.entity_id, "002304.SZ")
+            self.assertEqual(ds.manifest.observations, 8)
+            self.assertEqual(len(ds.observations), 8)
+
+
 class TestProfitBridgeChain(unittest.TestCase):
     def test_gold_matches_and_closure_holds(self):
         ds = _dataset()
@@ -2269,6 +2331,34 @@ class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
         self.assertGreater(res.get("rows") or 0, 0, res)
         self.assertTrue(any("未采用" in n for n in (res.get("official_notes") or [])),
                         f"必须说明为什么没用结构化载荷：{res.get('official_notes')}")
+
+    def test_official_route_carries_detail_rows_for_charts_and_assembly(self):
+        """U90-C 根因（10-20 实机 `ui-cc853cf86b`）：官方原文分支必须带出**明细行**。
+
+        反例：`build_result` 的官方原文分支当时只返回 rows/derived 的**条数**，而
+        `chart_rows` 只读 `rows_detail`/`derived_detail` → 这类任务恒 `ok=False`
+        → `report_brief.build_structure` **静默返回 None** → 交付装配沿用旧正文
+        → 用户"改一个情景参数再采纳"报"正文不是采纳版本的正文"（现象在采纳，根因在底稿明细）。
+        """
+        import report_brief as _rb
+        from working_paper_export import build_result, chart_rows
+        self._admit_material()
+        res = build_result(self.tid, self.goal, project="default")
+        self.assertEqual(res.get("request_source"), "official_material", res)
+        self.assertGreater(res.get("rows") or 0, 0, res)
+        rows_detail = res.get("rows_detail") or []
+        self.assertEqual(len(rows_detail), res.get("rows"), res)
+        self.assertEqual(len(res.get("derived_detail") or []), res.get("derived"), res)
+        self.assertTrue(all(r.get("fact_id") for r in rows_detail),
+                        f"明细行要带稳定 fact_id：主张绑定与图表定位都靠它 {rows_detail[:2]}")
+        cr = chart_rows(self.tid, self.goal, project="default")
+        self.assertTrue(cr.get("ok"), cr)
+        self.assertGreater(len(cr.get("rows") or []), 0, cr)
+        self.assertTrue(any(str(r.get("metric") or "") == "revenue"
+                            and str(r.get("period") or "").startswith("2024")
+                            for r in (cr.get("rows") or [])), cr.get("rows"))
+        struct = _rb.build_structure(self.tid, self.goal)
+        self.assertIsNotNone(struct, "有了明细行，装配就不得再静默返回 None（否则采纳必失败）")
 
     def test_report_version_arbitration_ignores_index_order(self):
         """R2-a：同 as_of 下原稿/更正稿必须按**披露版本**裁决，目录顺序不得决定读数。

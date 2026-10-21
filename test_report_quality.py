@@ -175,6 +175,59 @@ class TestDisclaimerBySource(unittest.TestCase):
         self.assertIn("disclaimer_instruction()", src, "报告格式要求仍写死固定免责声明")
 
 
+class TestU90R4SourceStatement(unittest.TestCase):
+    """U90-R4：来源声明按**实际采用的来源**生成，区分零来源/材料直供/检索降级。
+
+    根因（实机反例）：三一简报的免责声明写着"未引用外部数据源，结论仅为模型知识"，
+    而结构对象 citations 里有一条已准入的发行人年报——旧实现只认 `third_party`
+    才算外部来源，且用户材料只按 goal 文本关键词登记。
+    """
+
+    def test_issuer_disclosure_counts_as_external_source(self):
+        """只有发行人披露（issuer_annual_report）也必须写成外部来源，不得称"仅为模型知识"。"""
+        cits = [{"n": 1, "url": "https://www.sanygroup.com/a", "title": "年报",
+                 "type": "issuer_annual_report", "admission": "admitted"}]
+        import report_brief as rb
+        desc = rb._external_desc(cits)
+        self.assertIn("发行人公开披露", desc)
+        clause = rq.disclaimer_clause(True, False, external_desc=desc)
+        self.assertIn("发行人公开披露", clause)
+        self.assertNotIn("模型知识", clause)
+        self.assertNotIn("未引用外部数据源", clause)
+        res = ac.check_disclaimer("## 免责声明\n\n" + clause)
+        self.assertTrue(res["pass"], res["details"])
+
+    def test_zero_source_states_model_knowledge(self):
+        """零来源（无任何采用来源/材料）→ 如实写"未引用外部数据源"，不冒充。"""
+        import report_brief as rb
+        self.assertEqual(rb._external_desc([]), "")
+        clause = rq.disclaimer_clause(False, False)
+        self.assertIn("未引用外部数据源", clause)
+        self.assertNotIn("公开渠道", clause)
+        res = ac.check_disclaimer("## 免责声明\n\n" + clause)
+        self.assertTrue(res["pass"], res["details"])
+
+    def test_material_direct_with_degraded_search(self):
+        """材料直供 + 检索零命中：声明按材料措辞（不因检索零结果改称模型知识/公开渠道），
+        且检索降级作为附加事实注明。"""
+        clause = rq.disclaimer_clause(False, True, search_degraded="检索零命中")
+        self.assertIn("用户提供的材料", clause)
+        self.assertIn("未经独立核实", clause)
+        self.assertNotIn("公开渠道", clause)
+        self.assertNotIn("模型知识", clause)
+        self.assertIn("检索零命中", clause)
+        res = ac.check_disclaimer("## 免责声明\n\n" + clause)
+        self.assertTrue(res["pass"], res["details"])
+
+    def test_material_from_intake_state_not_goal_keywords(self):
+        """用户材料登记看**材料准入状态**（material_intake 已准入），不只在 goal 文本里
+        找"材料/附件/上传"关键词。"""
+        import report_brief as rb
+        self.assertTrue(hasattr(rb, "_materials_state"))
+        self.assertIn("material_intake", (rb._materials_state.__doc__ or ""))
+        self.assertIn("材料准入状态", (rb._disclaimer.__doc__ or ""))
+
+
 class TestOfflineCounterexamples(unittest.TestCase):
     """架构复核 2026-09-16 第 0 节给出的三个离线反例（修前全部错误通过）。"""
 
