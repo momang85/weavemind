@@ -1034,6 +1034,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._task_starts: dict[str, float] = {}
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}
+        # F1（收口 20261021）：检索候选 ≠ 正文采用。`_task_sources` 只放**通过相关性
+        # 判定**、可以进入报告 `[数据来源]` 的候选；被判无关的候选连同理由进
+        # `_task_excluded_sources`（剔除审计，可查但不进正文/来源清单）。
+        self._task_excluded_sources: dict[str, list[dict]] = {}
         self._task_goals: dict[str, str] = {}
         # 执行契约（主体/代码/期间/as_of/口径/文档类型/必需指标）：规划、Critic 修订、
         # 派发三处共用同一份，检索查询由它生成，指纹在派发时复核
@@ -1268,8 +1272,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return {}
 
     def _now_iso(self):
+        # 进度流/日志的时间戳用**本地墙钟**（带时区偏移）：这些值直接显示给用户，
+        # 此前统一 UTC（+00:00）而交付包/工作区文件用的是本地时间，控制台同一屏
+        # 出现两种时刻（20261021 复验 P1-4）。模式取自 adapters/market_history.py
+        # 的既有先例；audit 轨迹（acceptance_events 的 Z 后缀 UTC）不受影响。
         import datetime
-        return datetime.datetime.now(datetime.timezone.utc).isoformat()
+        return (datetime.datetime.now(datetime.timezone.utc).astimezone()
+                .isoformat(timespec="seconds"))
 
     @staticmethod
     def _new_redis_sync():
@@ -3131,6 +3140,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     # ── 任务24：失效来源落盘 ＋ 任务26：死链 Redis 持久化/恢复 ─────────────
     DEAD_SOURCES_FILE = "dead_sources.json"
+    # F1：剔除审计（工作区 project/ 下；打包含为 audit/source_exclusions.json）
+    SOURCE_EXCLUSIONS_FILE = "source_exclusions.json"
     DEAD_FETCH_KEY_PREFIX = "dead_fetch:"
 
     def dead_sources_records(self, task_id: str) -> list:
@@ -3163,6 +3174,39 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return str(ws / self.DEAD_SOURCES_FILE)
         except Exception as exc:                # noqa: BLE001 - 辅助文件不阻断报告步骤
             logger.warning("dead_sources.json 写入失败（task=%s）：%s",
+                           task_id, str(exc)[:120])
+            return ""
+
+    def _write_source_exclusions_file(self, task_id: str) -> str:
+        """F1：把本任务的**剔除审计**写进工作区 `project/source_exclusions.json`。
+
+        为什么要落盘：`_task_excluded_sources` 是进程内字典，任务终态/重启即丢；
+        而报告的缺口行会写"剔除记录见交付包 `audit/source_exclusions.json`"——
+        没有这份工件就是虚假指引。落盘后由打包路径按名纳入交付包，成为可核验记录。
+
+        内容只有 URL 与剔除理由（**不含提示词、响应体、密钥**）；每次都整体覆写
+        （含空数组），重跑任务不带着上一轮的陈旧剔除；`write_bytes` 保证字节稳定。
+        """
+        try:
+            recs = list((getattr(self, "_task_excluded_sources", {}) or {})
+                        .get(task_id, []))
+            ws = task_project_dir(task_id)
+            ws.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps({
+                "task_id": task_id,
+                "generated_at": self._now_iso(),
+                "note": ("检索候选 ≠ 正文采用。下列 URL 经相关性判定与本标的无关，"
+                         "已从正文与来源清单中剔除，仅作审计留痕。"),
+                "count": len(recs),
+                "excluded": [{"url": str(r.get("url") or ""),
+                              "reason": str(r.get("reason") or "")}
+                             for r in recs if r.get("url")],
+            }, ensure_ascii=False, indent=1)
+            (ws / self.SOURCE_EXCLUSIONS_FILE).write_bytes(payload.encode("utf-8"))
+            logger.info("剔除审计已落盘 task=%s 条数=%d", task_id, len(recs))
+            return str(ws / self.SOURCE_EXCLUSIONS_FILE)
+        except Exception as exc:                # noqa: BLE001 - 辅助文件不阻断报告步骤
+            logger.warning("source_exclusions.json 写入失败（task=%s）：%s",
                            task_id, str(exc)[:120])
             return ""
 
@@ -6433,7 +6477,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 size_kb = (f["size"] or 0) / 1024
                 lines.append(f"- `{f['name']}`（{f['kind']}，{size_kb:.1f} KB）")
             lines.append("")
-            lines.append(f"**成果文件夹**：`{task_workspace(task_id)}`（每个任务独立目录，可整体移动/备份）")
+            # P1-6：交付页显示的是**相对工作区根**的路径（projects/default/<tid>），
+            # 不再打印本机绝对路径——实机里那行是
+            # `C:\Users\...\Temp\dsh-win-bash-…\agent_workspace\tasks\projects\…`，
+            # 读者既点不开也认不出，还把临时目录结构暴露进交付物。
+            lines.append(
+                f"**成果文件夹**：`{self._workspace_display_path(task_id)}`"
+                "（相对工作区根目录；每个任务独立目录，可整体移动/备份）"
+            )
             lines.append("")
 
         # 2) 运行验证：code_execution 步骤的真实运行结果
@@ -6466,9 +6517,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if e2e:
                 lines.append("## 贯通测试（整体可运行性）")
                 passed = sum(1 for r in e2e if r.get("ok"))
-                lines.append(f"**结果**：{passed}/{len(e2e)} 项通过")
+                # P1-7（20261021 复验）：脚本"运行成功"≠产物生成。真机样本里
+                # make_charts.py 退出码 0，但 stdout 全是「SKIP …」（三张图全部
+                # 因数据不足被跳过），结论行却写「1/1 项通过」——用户读成"跑通了"。
+                # 这里把"运行成功但产物被跳过"单列（⚠️），不让 ✅ 掩盖 SKIP。
+                def _skips_in(_r) -> int:
+                    return str(_r.get("detail") or "").count("SKIP")
+                _partial = sum(1 for r in e2e
+                               if r.get("ok") and _skips_in(r) > 0)
+                _head = f"**结果**：{passed}/{len(e2e)} 项通过"
+                if _partial:
+                    _head += f"（其中 {_partial} 项运行成功但产物被跳过 ⚠️，见下）"
+                lines.append(_head)
                 for r in e2e:
                     mark = "✅" if r.get("ok") else "❌"
+                    if r.get("ok") and _skips_in(r) > 0:
+                        mark = "⚠️"
                     line = f"- {mark} `{r['name']}`（{r['type']}）：{r.get('detail', '')}"
                     if r.get("screenshot") and os.path.exists(str(r["screenshot"])):
                         rel_shot = os.path.relpath(r["screenshot"], project_dir).replace("\\", "/")
@@ -6517,6 +6581,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         stem = os.path.splitext(os.path.basename(str(name)))[0]
         m = re.match(r"^(.*)_\d{9,11}$", stem)
         return m.group(1) if m else stem
+
+    @staticmethod
+    def _workspace_display_path(task_id: str) -> str:
+        """成果文件夹的**展示路径**：相对工作区根的 posix 形式
+        （`projects/<project>/<task_id>`）。相对化失败时退回绝对路径——
+        展示用，不参与任何文件操作。"""
+        try:
+            import workspace as _ws
+            ws = _ws.task_workspace(task_id)
+            root = _ws.WORKSPACE_ROOT
+            rel = Path(os.path.abspath(str(ws))).relative_to(
+                Path(os.path.abspath(str(root))))
+            return Path(*rel.parts).as_posix()
+        except Exception:
+            return str(task_workspace(task_id))
 
     def _is_research_task(self, task_id: str) -> bool:
         """是否有**落库研究契约**（表单提交的研究任务）。
@@ -8064,8 +8143,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 但必须在交付里注明"检索步骤未获取到有效结果"，让用户看得见缺什么。
         # 写在 wrapper（不改被验收的正文 `detail`）：交付字节与验收对象的同一性
         # 由上面的装配唯一实现保证，这里与预算耗尽提示走同一道口子。
+        # P1-5：缺口步骤必须**按能力**判定（见 `_is_search_gap_skip`），否则
+        # 写作步正文里引用"无候选 URL"会把提示指向错误的步骤号。
+        _cap_by_sid = {str(s.get("step_id")): str(s.get("capability") or "")
+                       for s in all_steps}
         _gap_steps = sorted(str(k) for k, r in completed_all.items()
-                            if self._is_search_gap_skip(r))
+                            if self._is_search_gap_skip(
+                                r, cap=_cap_by_sid.get(str(k), "")))
         if _gap_steps:
             push_progress(self._messaging, task_id, "log",
                           {"type": "info", "agent": "orchestrator",
@@ -8332,6 +8416,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 等全部按任务键存储的辅助字典，常驻进程不清会无界增长）
         self._task_simple.pop(task_id, None)
         self._task_sources.pop(task_id, None)
+        if hasattr(self, "_task_excluded_sources"):
+            self._task_excluded_sources.pop(task_id, None)
         for d in (
             "_task_goals", "_task_projects", "_task_user_ids",
             "_task_prompt_hints", "_task_market_resolution", "_task_starts",
@@ -8534,17 +8620,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return True
 
     @staticmethod
-    def _is_search_gap_skip(result) -> bool:
+    def _is_search_gap_skip(result, cap: str = "") -> bool:
         """谓词：这一步是不是"检索没产出可用来源"的门禁跳过（任务13）。
 
         资料缺口 ≠ 能力失败：`无候选 URL` 是检索门禁**未派发抓取**就跳过，
         不该计入真实失败或把任务判 FAILED。判据按结果文本（历史数据没有
         `gate_skipped` 标记）+ 本轮新数据的显式标记，两处同源。
+
+        20261021 复验 P1-5：`无候选 URL` 也会出现在**下游步的成稿引用**里
+        （content_summary 步把检索缺口叙述写进正文），裸子串匹配会把写作步
+        误标成"检索缺口步"，用户被指向错误的步骤（步骤 5 是写作步，检索步是
+        步骤 1）。因此文本判据叠加**能力匹配**：只有检索类步
+        （web_search/web_fetch）按文本判缺口；非检索步只有显式 `gate_skipped`
+        标记才成立。`cap` 未给时保持旧口径（测试/历史调用兼容）。
         """
         if not isinstance(result, dict):
             return False
         if result.get("gate_skipped"):
             return True
+        if str(cap or "") and str(cap) not in ("web_search", "web_fetch"):
+            return False
         return "无候选 URL" in str(result.get("result") or "")
 
     def _optional_step_ids(self, steps: list[dict], task_id: str) -> set:
@@ -8851,6 +8946,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not hasattr(self, "_task_sources"):
             self._task_sources = {}
             self._task_sources_lock = threading.Lock()
+        if not hasattr(self, "_task_excluded_sources"):
+            self._task_excluded_sources = {}
         # 状态真源：阶段名落库（进入步骤执行）
         try:
             import task_state
@@ -8906,13 +9003,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 集合随任务终态/重启丢失，这份文件是报告里能落到实处的唯一通道。
             if str(step.get("capability") or "") == "report_generator":
                 self._write_dead_sources_file(task_id)
+                # F1：剔除审计落盘——内存字典随任务终态/重启丢失，而报告里会写
+                # "剔除记录见交付包 audit/source_exclusions.json"，必须真有这份工件。
+                self._write_source_exclusions_file(task_id)
             base_instr = self._inject_step_context(step, completed, lock, task_id)
             if step.get("capability") in ("report_generator", "content_summary"):
                 # 注入前序搜索的数据来源 URL（任务级累计，跨迭代生效），
                 # 报告末尾自动生成"数据来源"附录
                 with self._task_sources_lock:
                     urls: list[str] = list(self._task_sources.get(task_id, []))
-                # 补充本迭代 completed 中的搜索结果（双保险）
+                    _excluded: list[dict] = list(
+                        (getattr(self, "_task_excluded_sources", {}) or {})
+                        .get(task_id, []))
+                _excluded_urls = {str(x.get("url") or "") for x in _excluded}
+                # 补充本迭代 completed 中的搜索结果（双保险）——**同样要过剔除名单**：
+                # 这条路径此前不过滤，会让已判无关的候选从旁路重新进入来源清单。
                 with lock:
                     for k, r in completed.items():
                         if r.get("status") != "SUCCESS":
@@ -8925,21 +9030,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             continue
                         for it in parsed:
                             u = str((it or {}).get("url") or "").strip()
-                            if u.startswith("http") and u not in urls:
+                            if (u.startswith("http") and u not in urls
+                                    and u not in _excluded_urls):
                                 urls.append(u)
-                if urls:
-                    # 显式编号来源清单：模型在正文/表格里直接引用 [1]/[2]，
-                    # 与 '## 参考来源' 清单编号一致——避免模型自造来源名
-                    base_instr += (
-                        "\n\n[数据来源]\n"
-                        "以下为本次任务检索到的来源清单，编号即引用编号：\n"
-                        + "\n".join(
-                            f"[{i+1}] {u}" for i, u in enumerate(urls[:12])
-                        )
-                        + "\n正文/表格引用时使用上述编号；'## 参考来源' 清单"
-                        "按上述编号与顺序原样列出（可追加额外条目，但编号必须"
-                        "与引用一致）。"
-                    )
+                urls = [u for u in urls if u not in _excluded_urls]
+                base_instr += source_injection_text(urls, _excluded)
             # 注入全局任务目标，让 Worker 知道自己正在为哪个目标工作（Codex 式上下文感知）
             if goal and "任务目标" not in base_instr[:60]:
                 step["instruction"] = f"任务目标：{goal[:300]}\n\n{base_instr}"
@@ -9124,9 +9219,50 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             "(%d candidates all 404/410) -> FAILED",
                             task_id, _raw_count,
                         )
+                    # 来源桶逐条相关性治理（P0-3）：整表相关性校验通过 ≠ 每条都相关。
+                    # 混在有效候选里的词典页/导航页此前会原样写入 `[数据来源]`，最终
+                    # 在报告里被当成证据来源。只作用于研究任务（其来源列表是交付内容
+                    # 的一部分）；非研究任务的多来源列表维持原语义，避免启发式误删。
+                    _src_items = parsed
+                    _excluded_items: list = []
+                    if self._is_research_task(task_id):
+                        try:
+                            # F1：候选 / 采用 / 剔除三分。判为无关的候选不进来源桶，
+                            # 连同理由进剔除审计（`_task_excluded_sources`），报告步骤
+                            # 据此在正文里既不给编号、也不进 `## 数据来源`。
+                            _src_items, _excluded_items = self._partition_source_items(
+                                goal, parsed)
+                        except Exception as _src_exc:      # noqa: BLE001 - 过滤失败不减损来源
+                            logger.warning(
+                                "source relevance filter failed for %s: %s",
+                                task_id, str(_src_exc)[:120])
+                            _src_items = parsed
+                            _excluded_items = []
+                        else:
+                            if _excluded_items:
+                                logger.info(
+                                    "web_search source-bucket relevance filter for %s: "
+                                    "dropped %d/%d candidates from 数据来源",
+                                    task_id, len(_excluded_items), len(parsed))
+                                if hasattr(self, "_task_excluded_sources"):
+                                    with self._task_sources_lock:
+                                        _reg = self._task_excluded_sources.setdefault(
+                                            task_id, [])
+                                        _known = {str(x.get("url") or "")
+                                                  for x in _reg}
+                                        for it in _excluded_items:
+                                            u = str((it or {}).get("url") or "").strip()
+                                            if u.startswith("http") and u not in _known:
+                                                _reg.append({
+                                                    "url": u,
+                                                    "reason": str(
+                                                        (it or {}).get("_exclude_reason")
+                                                        or "与本目标无共同主题词"),
+                                                })
+                                                _known.add(u)
                     with self._task_sources_lock:
                         bucket = self._task_sources.setdefault(task_id, [])
-                        for it in parsed:
+                        for it in _src_items:
                             u = str((it or {}).get("url") or "").strip()
                             if u.startswith("http") and u not in bucket:
                                 bucket.append(u)
@@ -9357,7 +9493,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     # 任务13：检索门禁跳过（无候选 URL）同样是**资料缺口**——
                     # 谓词判定兜住旧路径与重试路径（不依赖 optional_ids 登记）
                     if (result.get("status") != "SUCCESS" and k not in optional_ids
-                            and not self._is_search_gap_skip(result)):
+                            and not self._is_search_gap_skip(
+                                result, cap=str(step.get("capability") or ""))):
                         has_failure = True
                 if step.get("capability") == "web_search":
                     res_raw = result.get("result", "")
@@ -10512,6 +10649,132 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "搜索结果均为无关来源（标题/摘要未命中目标关键词），"
             "请更换查询词组合/增加限定条件"
         )
+
+    @staticmethod
+    def _filter_source_items(goal: str, results: list) -> tuple[list, int]:
+        """逐条来源相关性过滤（返回 (保留条目, 剔除条数)）——只服务于任务级
+        来源桶（报告的 `## 数据来源` / `[数据来源]` 注入）。
+
+        背景（真机实测）：`_contract_issue` 的相关性校验是**整表判定**——候选里
+        混有无关条目时整表照样通过，于是一个汉语词典页（hanyuguoxue.com/cidian/…）
+        跟着有效候选一起进入来源桶，最终被写成报告的证据来源。
+        "整表通过"不等于"每条都相关"，这里把同一套判据下推到逐条。
+
+        判据与 `_search_results_irrelevant` 同源（行情关键词 / `_goal_search_tokens`）；
+        **一条都不剩时保留全部**：启发式判不准时不减损来源，与
+        `filter_dead_search_results` 的"检索可用性优先"同一原则。
+        只用于来源桶——step 结果（喂 LLM 上下文）与 search_results.json 不受影响。"""
+        items = [it for it in (results or []) if isinstance(it, dict)]
+        if not items:
+            return [], 0
+        if OrchestratorV2._is_market_goal(goal):
+            keys: list[str] = ["a股", "成交", "排行", "排名", "涨停",
+                               "跌幅", "前十", "股票"]
+        else:
+            keys = list(OrchestratorV2._goal_search_tokens(goal))
+        if not keys:
+            return items, 0
+        kept = [
+            it for it in items
+            if any(k in " ".join(
+                str(it.get(f) or "")
+                for f in ("title", "snippet", "url", "content", "summary")
+            ).lower() for k in keys)
+        ]
+        if not kept:
+            return items, 0
+        return kept, len(items) - len(kept)
+
+    # 强主体锚点用的公司名后缀（**形态学**判据，不针对任何具体公司/URL 写死）：
+    # 「研究某上市公司（600887）」「研究伊利股份」都能取到锚点；
+    # 「总结一下要点」取不到 → 维持 fail-open。
+    _SUBJECT_SUFFIXES = ("股份", "有限公司", "公司", "集团", "银行", "证券", "保险",
+                         "乳业", "药业", "医药", "科技", "汽车", "电器", "能源",
+                         "航空", "钢铁", "地产", "食品", "酒业", "传媒", "电子")
+    _SUBJECT_LEAD_VERBS = ("研究", "分析", "评估", "看看", "请", "帮我", "查", "梳理",
+                           "对比", "测算", "跟踪")
+    _SUBJECT_CODE_RE = re.compile(r"(?<!\d)\d{6}(?!\d)")
+
+    @classmethod
+    def _subject_anchors(cls, goal: str) -> list[str]:
+        """目标里的**可证主体锚点**：6 位证券代码 + 带公司名后缀的中文段。
+
+        与 `clean_data._strong_subject_tokens`（4 字滑窗、噪声大且不含数字）不同，
+        这里只认同位性强的锚点——它决定"零命中时敢不敢整批剔除候选来源"，
+        宁可少给锚点（退回 fail-open），也不能给错锚点去误删合法来源。
+        """
+        text = str(goal or "")
+        anchors: list[str] = []
+        for c in cls._SUBJECT_CODE_RE.findall(text):
+            if c not in anchors:
+                anchors.append(c)
+        for run in re.findall(r"[\u4e00-\u9fff]{2,20}", text):
+            name = run
+            for v in cls._SUBJECT_LEAD_VERBS:
+                if name.startswith(v) and len(name) > len(v) + 1:
+                    name = name[len(v):]
+            if len(name) >= 3 and name.endswith(cls._SUBJECT_SUFFIXES):
+                if name not in anchors:
+                    anchors.append(name)
+        return anchors
+
+    @staticmethod
+    def _partition_source_items(goal: str, results: list) -> tuple[list, list]:
+        """把检索候选分成（可进来源清单, 剔除项）——F1「候选 / 采用 / 剔除」三分。
+
+        与 `_filter_source_items` 的区别：后者在"一条都没命中"时**全保留**（fail-open，
+        怕启发式误删）。这个兜底在"目标里有强主体词、而没有任何候选含该主体"时是错的：
+        实机反例（2026-10-22，任务 ui-b23642e5de 研究伊利股份 600887）——检索返回
+        3 条全是 SKF 深沟球轴承 6008 / Windows 事件日志 6008 / 汉语词典页，与标的
+        毫无共同主题词，fail-open 把它们全放进来源桶，报告末尾 `## 数据来源`
+        因此列出了 3 条从未采用、甚至与标的不相关的 URL，而正文同时又声明
+        "已按来源纪律整体剔除"——一份交付里自相矛盾。
+
+        判据（可证伪，不按公司名/URL 写死）：
+          · 目标里有**强主体词**（公司名/证券代码一类），且
+          · 没有任何候选在 title/snippet/url/content/summary 命中**任何**目标词，
+          ⇒ 这些候选不可能在讲这个标的，剔除并记理由；
+          · 否则维持 fail-open（启发式判不准时不减损来源）。
+        """
+        items = [it for it in (results or []) if isinstance(it, dict)]
+        if not items:
+            return [], []
+        if OrchestratorV2._is_market_goal(goal):
+            keys: list[str] = ["a股", "成交", "排行", "排名", "涨停",
+                               "跌幅", "前十", "股票"]
+            subject_keys: list[str] = []
+        else:
+            keys = list(OrchestratorV2._goal_search_tokens(goal))
+            try:
+                subject_keys = OrchestratorV2._subject_anchors(goal)
+            except Exception:                      # noqa: BLE001 - 判不出主体就退回 fail-open
+                subject_keys = []
+        if not keys:
+            return items, []
+
+        def _blob(it: dict) -> str:
+            return " ".join(
+                str(it.get(f) or "")
+                for f in ("title", "snippet", "url", "content", "summary")
+            ).lower()
+
+        kept: list[dict] = []
+        dropped: list[dict] = []
+        for it in items:
+            blob = _blob(it)
+            if any(k in blob for k in keys):
+                kept.append(it)
+            else:
+                dropped.append(it)
+        if not kept:
+            if subject_keys:
+                # 有强主体却零命中：不是"判不准"，是可证的无关——整批剔除
+                return [], [dict(it, _exclude_reason=(
+                    "与本标的不含任何共同主题词（目标主体："
+                    + "、".join(subject_keys[:3]) + "）")) for it in items]
+            return items, []                       # 无强主体：维持 fail-open
+        return kept, [dict(it, _exclude_reason="与本目标无共同主题词")
+                      for it in dropped]
 
     @staticmethod
     def _classify_step_error(capability: str, result: dict, issue: str = "") -> str:
@@ -11920,18 +12183,85 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     return ok, reason
 
 
-def main():
-    from logging_setup import setup_logging
-    setup_logging("orchestrator")
-    r = OrchestratorV2._new_redis_sync()
-    # 清理历史残留的结果键，避免与本次运行的新派发 ID 混淆（防御性清理）
+def _cleared_stale_results(r) -> int:
+    """清理历史残留的 `task_result:*`（防御性）。**只在认领成功后调用**。
+
+    F3（收口 20261021）：这段清理原先在 `main()` 里位于实例认领**之前**——
+    第二个编排器进程起来先把活跃实例正在等待的结果键全删掉，然后才去认领、
+    认领失败退出。活跃实例的 `brpop task_result:*` 从此等不到结果，任务只能超时。
+    认领失败必须**零副作用**：先认领，成功后才允许触碰共享结果键。
+    """
     try:
         stale = r.keys("task_result:*")
         if stale:
             r.delete(*stale)
             logger.info("Cleaned %d stale task_result keys", len(stale))
-    except Exception:
-        pass
+            return len(stale)
+    except Exception as exc:                        # noqa: BLE001 - 清理失败不挡启动
+        logger.warning("stale task_result 清理失败（不挡启动）：%s", str(exc)[:120])
+    return 0
+
+
+def source_injection_text(urls: list[str], excluded: list) -> str:
+    """报告步骤的「数据来源 / 已剔除来源」注入文本（F1 的唯一生成口）。
+
+    三类严格分开：检索候选（`_task_sources`，已过相关性）／正文采用（本函数给的
+    编号清单，是模型唯一可引用的东西）／剔除审计（`excluded`，只下发不得引用）。
+    没有可用来源时**不给编号、不给 URL**，只如实说缺口——否则模型会把无关候选
+    当来源写进 `## 数据来源`，与正文"已剔除"的声明自相矛盾（实机反例见
+    `test_source_exclusion_registry.py` 顶部说明）。
+    """
+    text = ""
+    if urls:
+        text += (
+            "\n\n[数据来源]\n"
+            "以下为本次任务**通过相关性判定、可被正文引用**的来源清单，"
+            "编号即引用编号：\n"
+            + "\n".join(f"[{i+1}] {u}" for i, u in enumerate(urls[:12]))
+            + "\n正文/表格引用时使用上述编号；'## 参考来源' 清单"
+            "按上述编号与顺序原样列出（可追加额外条目，但编号必须"
+            "与引用一致）。"
+        )
+    elif excluded:
+        text += (
+            "\n\n[数据来源]\n"
+            "本次检索到的候选来源均与标的无关、已按来源纪律整体剔除，"
+            "**没有可引用的外部来源**。正文与表格不得出现任何外部 URL 或 "
+            "[n] 编号引用；'## 数据来源' 一节如实写"
+            "『本次无采用的外部来源』，可用数字来源（结构化财务数据）"
+            "需写明字段与接口名。缺证据的地方按缺口如实标注。"
+        )
+    if excluded:
+        text += (
+            "\n\n[已剔除来源]\n"
+            "以下 URL 经相关性判定与本标的无关，**不得**出现在正文、"
+            "表格、'## 数据来源' 或 '## 参考来源' 中：\n"
+            + "\n".join(f"- {str(x.get('url') or '')}"
+                        for x in excluded[:20] if x.get("url"))
+        )
+    return text
+
+
+def main():
+    from logging_setup import setup_logging
+    setup_logging("orchestrator")
+    r = OrchestratorV2._new_redis_sync()
+    # C3/H3 实例归属：同一 Redis 上只允许**一个**编排器消费 orchestrator:main。
+    # pub/sub 是广播语义——两个编排器都会收到同一条任务请求，各自执行一次
+    # （重复付费、重复写库）。所以这里显式认领；已有别的活实例就**明确拒绝启动**，
+    # 而不是默默重复消费。上一位持有者没有心跳（崩溃/重启）时允许接管。
+    #
+    # F3：认领必须在**任何共享状态清理之前**（含 `task_result:*` 清理、恢复扫描）。
+    # 认领失败 = 立即返回，对本进程之外的状态零删除副作用。
+    _owner_ok, _owner_why = claim_ownership_with_wait(r)
+    if not _owner_ok:
+        logger.error("拒绝启动：%s", _owner_why)
+        return 2
+    logger.info("编排器实例归属：%s", _owner_why)
+    # 认领成功后才清残留结果键（此时这个 Redis 上的结果通道归本实例管）
+    _cleared = _cleared_stale_results(r)
+    if _cleared:
+        logger.info("启动清理：%d 个残留结果键（已认领本实例，安全）", _cleared)
     orch = OrchestratorV2()
 
     # C1 局部恢复：停在"已保存未摄取"的材料在启动时补做一遍（原件已落盘的读字节，
@@ -11946,15 +12276,6 @@ def main():
         logger.warning("补材料恢复扫描失败：%s", str(exc)[:150])
 
     logger.info("OrchestratorV2 listening on orchestrator:main")
-    # C3/H3 实例归属：同一 Redis 上只允许**一个**编排器消费 orchestrator:main。
-    # pub/sub 是广播语义——两个编排器都会收到同一条任务请求，各自执行一次
-    # （重复付费、重复写库）。所以这里显式认领；已有别的活实例就**明确拒绝启动**，
-    # 而不是默默重复消费。上一位持有者没有心跳（崩溃/重启）时允许接管。
-    _owner_ok, _owner_why = claim_ownership_with_wait(r)
-    if not _owner_ok:
-        logger.error("拒绝启动：%s", _owner_why)
-        return 2
-    logger.info("编排器实例归属：%s", _owner_why)
     # P0-b 租约续租：旧实现只在认领时写一次心跳，30 秒后 TTL 到期 → A 还活着 B 就能接管。
     start_owner_lease_renewal(r)
     # 任务26：启动时恢复 Redis 持久化的死链清单（dead_fetch:*）——进程崩溃后

@@ -242,6 +242,8 @@ def _degradation_reason(exc: Exception) -> str:
     text = str(exc or "")
     if "Empty content" in text or "Empty choices" in text:
         return "empty_content"
+    if getattr(exc, "bad_response", False):
+        return "bad_response"
     m = re.search(r"HTTP[ _-]?(\d{3})", text)
     if m and m.group(1) in ("401", "402", "403"):
         return f"HTTP_{m.group(1)}"
@@ -305,6 +307,10 @@ def _error_shape(exc: Exception) -> tuple[int, str]:
         return 0, "budget_exhausted"
     if isinstance(exc, LLMJSONParseError):
         return 0, "bad_json"
+    if getattr(exc, "bad_response", False):
+        # F2：200 但不是模型响应（HTML/坏 JSON/供应商 error 对象）。单列一类，
+        # 避免被记成 generic 后被当成"端点瞬时故障"反复重试。
+        return 0, "bad_response"
     # httpx 异常：状态码在 response 上，类名区分超时/连接（文本里往往没有 "HTTP 504"）
     _code = getattr(getattr(exc, "response", None), "status_code", None)
     if isinstance(_code, int) and _code:
@@ -528,6 +534,15 @@ _ledger_errors: dict[str, str] = {}
 # T0-c 要求"后台线程显式继承 root"，正常情况下这里应恒为 0；
 # 非 0 说明还有调用没被归属（有日志、可断言），而不是"看不见所以没事"。
 _no_root_calls: dict[str, int] = {}
+# F2：未归属调用的**诊断账**（不写任何任务账本，也不补造历史费用）。
+# 为什么要单列 token/费用：未归属调用的 token 往往没取到、也没有可信单价口径，
+# 只能记"未知"（None），不能填 0——填 0 会被读成"这次没花钱"。
+# `_unattributed_calls` 含**所有**未归属调用（含本来就不属于任务的端点探测）；
+# `_no_root_calls` 只含"本应有根却丢了"的调用，保持它"健康时应为 0"的告警语义。
+_unattributed_calls: dict[str, int] = {}
+_no_root_lock = threading.Lock()
+_no_root_tokens_known = 0
+_no_root_tokens_unknown_calls = 0
 
 
 def ledger_unavailable_reason(task_id: str) -> str:
@@ -536,16 +551,62 @@ def ledger_unavailable_reason(task_id: str) -> str:
 
 
 def no_root_call_count() -> int:
-    """累计"没有根任务归属"的模型调用次数（诊断用）。"""
+    """累计"本应有根却丢了"的模型调用次数（诊断用）。
+
+    刻意**不含**端点探测这类"本来就不属于任务"的未归属调用（它们只进
+    `get_unattributed_diagnostics()`）：否则这个计数永远非 0，真正的归属回归
+    就看不出来了。
+    """
     return int(sum(_no_root_calls.values()))
 
 
-def _note_no_root_call(stage: str, usage: str) -> None:
+def get_unattributed_diagnostics() -> dict:
+    """未归属模型调用的诊断快照（F2）。
+
+    **不写入任何任务账本，也不补造历史费用**：没有可靠根任务归属时，把这次调用
+    留在"未归属"诊断里，token 只在每次调用都取到实际用量时给数；费用一律 `None`
+    （未知）——没有可归属的根任务，也不能拿一个估价冒充任务账。
+    """
+    with _no_root_lock:
+        by_stage = dict(_unattributed_calls)
+        known = int(_no_root_tokens_known)
+        unknown = int(_no_root_tokens_unknown_calls)
+        calls = int(sum(by_stage.values()))
+    return {
+        "calls": calls,
+        "by_stage": by_stage,
+        "tokens": None if (unknown or not calls) else known,
+        "tokens_actual": known,
+        "tokens_unknown_calls": unknown,
+        "cost_usd": None,
+        "cost_known": False,
+        "note": "未归属调用：不写入任何任务账本；费用未知（不填 0）",
+    }
+
+
+def _note_no_root_call(stage: str, usage: str, *, tokens: int | None = None,
+                       warn: bool = True) -> None:
+    """记一次未归属调用；`tokens=None` 表示**用量未知**（不填 0）。
+
+    `warn=False` 用于**本来就不属于任务**的调用（如端点探测）：它仍要留在诊断里
+    （可见、可计数），但不需要每次探测都刷"后台线程忘了继承 root"的告警，也不
+    计入 `no_root_call_count()`——那个计数只表示"本应有根却丢了"。
+    """
+    global _no_root_tokens_known, _no_root_tokens_unknown_calls
     key = f"{stage}:{usage}"
-    _no_root_calls[key] = int(_no_root_calls.get(key) or 0) + 1
-    logger.warning("模型调用没有根任务归属（stage=%s usage=%s）：本次不记账；"
-                   "后台线程必须显式继承 root（累计 %d 次）",
-                   stage, usage, no_root_call_count())
+    with _no_root_lock:
+        _unattributed_calls[key] = int(_unattributed_calls.get(key) or 0) + 1
+        if warn:
+            _no_root_calls[key] = int(_no_root_calls.get(key) or 0) + 1
+        if tokens is None:
+            _no_root_tokens_unknown_calls += 1
+        else:
+            _no_root_tokens_known += max(0, int(tokens))
+        total = int(sum(_no_root_calls.values()))
+    if warn:
+        logger.warning("模型调用没有根任务归属（stage=%s usage=%s）：本次不记账；"
+                       "后台线程必须显式继承 root（累计 %d 次）",
+                       stage, usage, total)
 
 
 def _root_budget_for_task():
@@ -916,20 +977,38 @@ def _probe_endpoint_status(
     鉴权通过"已足以判定端点可达——因此把 thinking_budget_exhausted 视为 ok，
     否则探测会永久误报 unreachable（设置页一直显示"主备均不健康"，
     并可能让任务预检直接拒绝任务）。
+
+    F2：探测是**诊断请求，不属于任何任务**，因此：
+    - 显式 `stream=False`：探测只要一次小请求。此前它继承流式开关，网关对
+      `stream:true` 回 404 后再回退非流式——每次探测白多一个被拒请求，还因为
+      探测跑在健康守护线程/线程池（没有任务上下文）而刷
+      `llm:stream_fallback 没有根任务归属`。这不是任务丢了归属，而是探测本来
+      就没有、也不该有归属。
+    - 未归属诊断仍留痕（`tokens` 取到就记，取不到记未知），不写任务账本。
     """
+    client = None
+    tokens: int | None = None
     try:
         client = LLMClient(base_url=base_url, api_key=api_key, model=model)
-        raw = client._send_request(
+        client._send_request(
             "你是连通性探测器，只回复：ok", "ping", 0.0, 32,
             endpoint=endpoint, timeout=float(
                 os.environ.get("LLM_PROBE_TIMEOUT", "20") or 20),
+            stream=False,
         )
+        _u = getattr(client, "_last_usage", None) or {}
+        if isinstance(_u, dict) and _u:
+            tokens = (int(_u.get("prompt_tokens") or 0)
+                      + int(_u.get("completion_tokens") or 0))
         return {"ok": True, "reason": "ok"}
     except Exception as exc:
         if getattr(exc, "thinking_budget_exhausted", False):
             # 端点可达且鉴权通过，只是探测预算被推理吃光
             return {"ok": True, "reason": "ok"}
         return {"ok": False, "reason": _classify_probe_error(exc)}
+    finally:
+        if not get_task_context():
+            _note_no_root_call("probe", "llm:probe", tokens=tokens, warn=False)
 
 
 def _probe_endpoint(base_url: str, api_key: str, model: str) -> bool:
@@ -1587,6 +1666,92 @@ class LLMUnavailableError(LLMCallError):
     pass
 
 
+class LLMBadResponseError(LLMCallError):
+    """HTTP 200 但响应体**不是合法模型响应**（F2）。
+
+    实机形态：网关拒绝流式（404）后回退非流式，回来的是 HTML 登录页 / 半截 JSON /
+    `{"error": ...}` 错误对象。旧实现把非 SSE 响应体**原样当正文**返回，调用方
+    因此把它当成功正文发布，`call(expect_json=False)` 还会写入成功缓存。
+
+    本异常让这些形态走失败路径：回退那张票按失败结算、记 `bad_response` 形状、
+    不发布片段、不进缓存；合法的非 SSE JSON 仍照常解析（单独有测试）。
+    """
+
+    bad_response = True
+
+
+def _response_content_type(resp: Any) -> str:
+    """尽力取响应的 Content-Type（urllib/httpx/测试替身都能用）；取不到返回空串。"""
+    try:
+        headers = getattr(resp, "headers", None)
+        if headers is None:
+            return ""
+        getter = getattr(headers, "get_content_type", None)
+        if callable(getter):
+            return str(getter() or "").strip().lower()
+        return str(headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+    except Exception:                            # noqa: BLE001 - 诊断不得影响解析
+        return ""
+
+
+def _validate_chat_response(data: Any) -> dict:
+    """校验"明确的合法模型响应"：返回原对象，否则抛 `LLMBadResponseError`。
+
+    接受的最小形状（OpenAI 兼容非流式）：
+    `{"choices": [{"message": {"content": "<str|null>"}}], ...}`
+    `content` 允许 None（由调用方按"空正文"处理），但**不允许**缺 choices /
+    message 不是对象 / 根是错误对象——那说明我们拿到的不是模型输出。
+    """
+    if not isinstance(data, dict):
+        raise LLMBadResponseError("非模型响应：JSON 根不是对象")
+    if data.get("error"):
+        # 只报"是错误对象"，不把供应商响应体（可能含账号信息）带进异常文本
+        raise LLMBadResponseError("供应商返回错误对象（error），不是模型响应")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise LLMBadResponseError("非模型响应：缺少 choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise LLMBadResponseError("非模型响应：choices[0] 不是对象")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise LLMBadResponseError("非模型响应：choices[0].message 不是对象")
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        raise LLMBadResponseError("非模型响应：message.content 不是字符串")
+    return data
+
+
+def _parse_model_response_body(body_text: str, *, content_type: str = "") -> dict:
+    """把非 SSE 的完整响应体解析成合法模型响应；否则抛 `LLMBadResponseError`。
+
+    **只接受明确的模型响应**：HTML（无论 Content-Type 是否标对，JSON 解析也会失败）、
+    坏 JSON、供应商错误对象全部失败——不能作为正文返回，更不能进入成功缓存。
+    """
+    ct = str(content_type or "").lower()
+    if "text/html" in ct or "application/xhtml" in ct:
+        raise LLMBadResponseError("非模型响应：Content-Type 是 HTML")
+    try:
+        data = json.loads(body_text)
+    except Exception as exc:                     # noqa: BLE001
+        raise LLMBadResponseError("非模型响应：响应体不是合法 JSON") from exc
+    return _validate_chat_response(data)
+
+
+def _parse_async_model_response(response: Any) -> dict:
+    """httpx 响应 → 合法模型响应；不能用 `.text`（注入的替身/私有客户端可能只有
+    `.json()`，既有测试与部署都依赖这一点）。HTML 由 Content-Type 拦截，坏 JSON 由
+    `.json()` 异常拦截，错误对象由 `_validate_chat_response` 拦截。"""
+    ct = _response_content_type(response).lower()
+    if "text/html" in ct or "application/xhtml" in ct:
+        raise LLMBadResponseError("非模型响应：Content-Type 是 HTML")
+    try:
+        data = response.json()
+    except Exception as exc:                     # noqa: BLE001
+        raise LLMBadResponseError("非模型响应：响应体不是合法 JSON") from exc
+    return _validate_chat_response(data)
+
+
 class LLMCancelledError(LLMCallError):
     """任务已被取消：**不再重试、也不再切备用**（R2）。
 
@@ -2117,6 +2282,7 @@ class LLMClient:
         endpoint: str = "primary",
         timeout: float | None = None,
         no_thinking: bool = False,
+        stream: bool | None = None,
     ) -> str:
         """发送 HTTP 请求到 LLM 服务。
 
@@ -2129,12 +2295,15 @@ class LLMClient:
                      探测类调用传短值（如 20），避免预检被挂死。
             no_thinking: 关掉供应商侧的思考（`thinking={"type":"disabled"}`）。
                      只用于"思考烧光输出预算、content 恒空"后的重发。
+            stream: 本次是否允许走流式。None=跟随 `WM_LLM_STREAM`；
+                    探测显式传 False（探测不需要流式，且它没有任务上下文，
+                    不能让它去开"流式回退"的任务票据）。
 
         Returns:
             LLM 的文本响应。
 
         Raises:
-            LLMCallError: 请求失败。
+            LLMCallError: 请求失败（含 200 但不是合法模型响应的 `LLMBadResponseError`）。
         """
         url = f"{self.base_url.rstrip('/')}/chat/completions"
 
@@ -2170,7 +2339,8 @@ class LLMClient:
         # 网关在 ~60s 处切断**整段**非流式响应，报告/总结这类长生成因此必 504
         # （实机复现：8192 tokens 中文生成非流式 60.6s 被 504，流式 76.7s 正常返回）。
         self._fell_back = False      # 本次发送是否发生"流式→非流式"回退（供调用方结算用）
-        if _stream_enabled():
+        _use_stream = _stream_enabled() if stream is None else bool(stream)
+        if _use_stream:
             _info: dict = {}
             try:
                 text = _call_llm_stream_once(
@@ -2219,16 +2389,24 @@ class LLMClient:
             _t_fb = time.monotonic()
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    response_data = json.loads(resp.read().decode("utf-8"))
+                    _fb_ct = _response_content_type(resp)
+                    _fb_body = resp.read().decode("utf-8", errors="replace")
+                # F2：**先校验响应形状，再结算这张票**。旧实现先按成功结算、
+                # 后去看 choices；供应商错误对象 `{"error":...}` 因此被记成
+                # `stream_fallback_ok`（票也是 ok），随后才失败——账实不符。
+                response_data = _parse_model_response_body(
+                    _fb_body, content_type=_fb_ct)
             except Exception as exc:
                 if _fb_ticket:
                     _budget_close(_fb_rb, _fb_ticket, ok=False, max_tokens=max_tokens,
                                   note="llm:nonstream_failed")
+                    _http_status, _err_class = _error_shape(exc)
                     _record_llm_call(get_task_context(), stage="llm", attempt=1,
                                      elapsed_ms=int((time.monotonic() - _t_fb) * 1000),
                                      input_chars=len(system) + len(user),
                                      max_tokens=max_tokens,
-                                     error_class=type(exc).__name__,
+                                     http_status=_http_status,
+                                     error_class=_err_class,
                                      end_reason="stream_fallback_failed")
                 raise
             if _fb_ticket:
@@ -2475,23 +2653,37 @@ def _call_llm_stream_once(
                     except Exception:
                         pass
     else:
-        # 非流式端点：整段读取返回
+        # 非流式端点：整段读取返回。F2：**只接受明确的合法模型响应**——旧实现的
+        # `except: chunks.append(body_text)` 会把 HTML 登录页/坏 JSON/供应商错误对象
+        # 原样当正文返回：调用方按成功发布，`expect_json=False` 的路径还会把它
+        # 写入成功缓存。现在这些形态抛 `LLMBadResponseError`（失败并记账）。
         body_text = head + resp.read().decode("utf-8", errors="replace")
-        try:
-            data = json.loads(body_text)
-            content = data["choices"][0]["message"]["content"]
-            chunks.append(str(content))
-            if data.get("usage") and out is not None:
-                out["usage"] = data["usage"]
+        data = _parse_model_response_body(
+            body_text, content_type=_response_content_type(resp))
+        _choice = data["choices"][0]
+        content = _choice["message"].get("content")
+        content = "" if content is None else str(content)
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        if usage:
+            # 非 SSE 的 usage 也要进全局用量；否则这类响应只有票据没有 token 账
+            _record_stream_usage(usage, model)
+            if out is not None:
+                out["usage"] = usage
+        if out is not None:
+            if _choice.get("finish_reason"):
+                out["finish_reason"] = str(_choice["finish_reason"])
+            if _choice["message"].get("reasoning_content"):
+                out["reasoning"] = True
+        # 空正文不发布、不返回假正文：由调用方按"空响应"判失败
+        if content:
+            chunks.append(content)
             if publish:
-                _publish_stream_chunk(str(content))
+                _publish_stream_chunk(content)
             if on_chunk is not None:
                 try:
-                    on_chunk(str(content))
+                    on_chunk(content)
                 except Exception:
                     pass
-        except Exception:
-            chunks.append(body_text)
     return "".join(chunks)
 
 
@@ -2826,6 +3018,23 @@ async def call_llm_async(
             await asyncio.sleep(1)
             continue
 
+        except LLMBadResponseError as exc:
+            # F2：200 但不是模型响应（HTML/坏 JSON/供应商错误对象）。此前这类响应
+            # 可能被当成正文返回/写缓存；现在按失败记账（票已在上面结算为失败），
+            # 并像同步路径一样留一条调用形状、按尝试次数重试。
+            last_error = exc
+            _mark_endpoint("primary", False, "bad_response")
+            _record_llm_call(get_task_context(), stage=_stage, attempt=attempt,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             error_class="bad_response",
+                             end_reason=("retry" if attempt < max_attempts
+                                         else "exhausted"))
+            logger.warning("LLM async 响应不是合法模型响应，retry %d/%d",
+                           attempt, max_attempts)
+            await asyncio.sleep(1)
+            continue
+
         except httpx.HTTPStatusError as exc:
             last_error = exc
             _mark_endpoint("primary", False)
@@ -2943,7 +3152,10 @@ async def _async_chat_once(client, url: str, payload: dict, headers: dict,
         response = await client.post(url, json=_with_stream(payload, False),
                                      headers=headers)
         response.raise_for_status()
-        data = response.json()
+        # F2：先校验"明确的合法模型响应"，再结算回退票。旧实现 `response.json()`
+        # 后直接按成功结算，`{"error": ...}` 这种 200 错误对象会被记成
+        # `stream_fallback_ok`，随后才在取 choices 时炸掉（账实不符）。
+        data = _parse_async_model_response(response)
     except Exception as exc:
         if _fb_ticket:
             _budget_close(_fb_rb, _fb_ticket,
@@ -2951,11 +3163,13 @@ async def _async_chat_once(client, url: str, payload: dict, headers: dict,
                           ok=False, note="llm:nonstream_failed")
             # 逐次记录：回退那次发送失败也要留一条形状（否则"票据数 > 调用记录数"，
             # 逐条对账时会以为有一次请求没记账）
+            _http_status, _err_class = _error_shape(exc)
             _record_llm_call(get_task_context(), stage="llm", attempt=1,
                              elapsed_ms=int((time.monotonic() - _t_fb) * 1000),
                              input_chars=_fb_in,
                              max_tokens=int(payload.get("max_tokens") or 0),
-                             error_class=type(exc).__name__,
+                             http_status=_http_status,
+                             error_class=_err_class,
                              end_reason="stream_fallback_failed")
         raise
     if _fb_ticket:
@@ -3011,7 +3225,8 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
         )
     try:
         response.raise_for_status()
-        data = response.json()
+        # F2：备用端点同样只接受明确的合法模型响应（HTML/坏 JSON/error 对象 → 失败）
+        data = _parse_async_model_response(response)
     except Exception as exc:
         _budget_close(_rb, _ticket, ok=False,
                       max_tokens=int(b_payload.get("max_tokens") or 0),

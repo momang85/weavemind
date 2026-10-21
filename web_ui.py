@@ -3211,6 +3211,9 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         "status": status,
         "draft": status != DELIVERY_VERIFIED,
         "draft_reason": draft_reason,
+        # P0-5：清单也要自述"这一版正文是不是截断稿"，否则包内清单比页面"干净"
+        "truncated": bool(state.get("truncated")),
+        "truncation": state.get("truncation") or {},
         "review_valid": bool(state.get("review_valid")),
         "hard_fail": str(state.get("hard_fail") or ""),
         "working_paper": paper_meta,
@@ -5314,7 +5317,23 @@ def _get_task_page(self, p):
                         "aligned": _state.get("aligned"),
                         "accepted_body_matches": bool(_state.get("accepted_body_matches")),
                         "review_valid": bool(_state.get("review_valid")),
+                        # P0-5：截断闸门的结论必须能被页面读到（此前只在后端判、页面看不到
+                        # "为什么是草稿"），以及本版正文身份（projection）——页面/导出/包内
+                        # 清单读同一份，不再各自拼条件。
+                        "truncated": bool(_state.get("truncated")),
+                        "truncation": _state.get("truncation") or {},
+                        "projection": _state.get("projection") or {},
                     }
+                    # 研究简报面板（ResearchBriefPanel）读的是 `research`：把截断结论
+                    # 一并挂上，页面因此能明说"这份正文被判截断、只能算草稿"。
+                    if isinstance(research, dict):
+                        research["delivery"] = {
+                            "status": delivery["status"],
+                            "draft": delivery["draft"],
+                            "draft_reason": delivery["draft_reason"],
+                            "truncated": delivery["truncated"],
+                            "truncation": delivery["truncation"],
+                        }
                     # 页面里的验收结论也按**选中版本**给（同一份 payload 不得两个版本并存）
                     acceptance_bound = {
                         "overall": _state.get("acceptance_overall") or "",
@@ -5624,10 +5643,12 @@ def _research_payload(tid: str, ws) -> dict | None:
         # 工作区 `human_review.json`——**只有真实研究员的复核动作**才写它，自动流程与
         # 执行者都不写，因此缺文件（或没写批准者）一律如实显示"待复核"。
         machine = {"overall": "", "version_id": "", "bound": False}
+        current_identity = ""
         try:
             from report_version import VersionStore as _VS
             _cur = _VS(ws, tid).adopted()
             if _cur is not None:
+                current_identity = _cur.identity_id()
                 machine = {"overall": _cur.acceptance_overall(),
                            "version_id": str(_cur.version_id or ""),
                            "bound": bool(_cur.acceptance_for_this_body())}
@@ -5652,16 +5673,24 @@ def _research_payload(tid: str, ws) -> dict | None:
                 _hit = None
             out["structure_version_exists"] = _hit is not None
             out["structure_version_adopt_reason"] = str((_hit or {}).get("adopt_reason") or "")
-        human = {"status": "pending", "approver": "", "at": "", "version_id": ""}
+        human = {"status": "pending", "approver": "", "at": "", "version_id": "",
+                 "bound": False, "reason": "无研究员批准记录"}
         hp = ws / "human_review.json"
         if hp.exists():
             try:
                 h = _json.loads(hp.read_text(encoding="utf-8")) or {}
                 # 缺批准者不算已复核（fail closed）：不允许匿名/自动填写的"批准"
                 if str(h.get("status") or "") == "recorded" and str(h.get("approver") or "").strip():
-                    human = {"status": "recorded", "approver": str(h.get("approver") or ""),
+                    review_version = str(h.get("version_id") or "")
+                    review_bound = bool(current_identity and review_version == current_identity)
+                    human = {"status": "recorded" if review_bound else "pending",
+                             "approver": str(h.get("approver") or ""),
                              "at": str(h.get("at") or ""),
-                             "version_id": str(h.get("version_id") or "")}
+                             "version_id": review_version, "bound": review_bound,
+                             "reason": ("绑定当前采纳版" if review_bound else
+                                        "批准记录缺少版本身份" if not review_version else
+                                        "当前无采纳版，无法绑定批准记录" if not current_identity else
+                                        "既有批准记录不属于当前采纳版")}
             except Exception:
                 pass
         out["review"] = {"machine": machine, "human": human}

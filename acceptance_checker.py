@@ -286,6 +286,23 @@ def extract_financial_numbers(text: str) -> list[dict]:
             continue
         if _is_locator_metadata(pos, loc_spans):
             continue        # 定位串不是内容数字：单列账（见 metadata_numbers）
+        # 写作规范/公式说明里的数字不是研究读数（20261021 复验 P1-3）：
+        # 「例如「288.76 亿元」格式，禁止…（如 2.88763e+10）」「…÷ 2023 年数值 × 100%」
+        # 这类数字讲的是**怎么呈现/怎么算**，把它们算进溯源分母只会制造假缺口
+        # （真机样本里 6 个"不可溯源示例"有 4 个属于这一类）。
+        _pre = t[max(0, pos - 4):pos]
+        _quote_open = t[max(0, pos - 2):pos + 1]
+        _paren_pre = t[max(0, pos - 4):pos + 1]
+        _ls = t.rfind("\n", 0, pos)
+        _le = t.find("\n", m.end())
+        _line = t[(_ls + 1) if _ls != -1 else 0: _le if _le != -1 else len(t)]
+        _has_spec_marker = any(k in _line for k in ("例如", "示例", "格式"))
+        if re.search(r"[×÷=]\s*$", _pre):
+            continue        # 公式常量（× 100% / ÷ 2023）
+        if _has_spec_marker and "「" in _quote_open and "」" in t[m.end():m.end() + 20]:
+            continue        # 引号里的格式示例（「288.76 亿元」）
+        if _has_spec_marker and ("（如" in _paren_pre or "（例如" in _paren_pre):
+            continue        # 括号里的格式示例（（如 2.88763e+10））
         value_raw = m.group(1)
         unit_big = m.group(2) or ""
         unit_small = m.group(3) or ""
@@ -299,6 +316,10 @@ def extract_financial_numbers(text: str) -> list[dict]:
                 continue  # 前导零代码（00700）
             if re.fullmatch(r"(19|20)\d{2}", digits):
                 continue  # 纯年份
+            # A 股 6 位代码（603288）紧邻「代码」语境 → 跳过（P1-3：股票代码被当成
+            # 财务数字，构成"数字溯源率 0%"假缺口）。带单位/含小数点的读数不受影响。
+            if re.fullmatch(r"\d{6}", digits) and "代码" in t[max(0, pos - 16):m.end() + 8]:
+                continue
             if len(digits.replace(".", "")) < 4:
                 continue  # 无单位的个位数/短数，太泛
         unit = unit_big + unit_small  # 如 "亿元" "万" "%"

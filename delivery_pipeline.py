@@ -27,7 +27,8 @@ import re
 import time
 from pathlib import Path
 
-from report_version import (DELIVERY_UNKNOWN, DELIVERY_VERIFIED, VersionStore,
+from report_version import (DELIVERY_DRAFT, DELIVERY_UNKNOWN, DELIVERY_VERIFIED,
+                            VersionStore,
                             body_hash, verified_delivery)
 import workspace
 from working_paper_export import gaps_note, write_working_paper
@@ -406,21 +407,69 @@ _AUTO_NOTE_PREFIXES = (
 # ── 从编排器搬过来的纯函数（零实例依赖）────────────────────────
 
 
-def read_acceptance_summary(task_id: str) -> dict | None:
-    """读工作区的验收快照（文件口径）；没有就返回 None，不编。"""
+def read_acceptance_summary(task_id: str, *, ws_dir=None,
+                            with_authority: bool = False) -> dict | None:
+    """读工作区的验收快照（文件口径）；没有就返回 None，不编。
+
+    P0-2b（验收只允许一个权威来源）：`with_authority=True` 时在**读取时**判定这份快照
+    是不是当前采纳/交付那一版的验收，并给出唯一的权威结论：
+    - `authoritative=True`：这份就是采纳版的验收，`effective_overall`/`effective_gaps` 即它；
+    - `authoritative=False`：`effective_*` 换成**采纳版自己那份**验收（`authoritative_*`），
+      并给出 `acceptance_conflict`（两套数字各是什么、页面该认哪一套），同时留 WARNING。
+    默认 `False` 保持旧行为（`rules_identity` 每次验收都读它，不该因此刷日志）。
+    """
     try:
-        p = workspace.task_workspace(task_id) / "acceptance_report.json"
+        p = (Path(ws_dir) if ws_dir else workspace.task_workspace(task_id)) \
+            / "acceptance_report.json"
         if not p.exists():
             return None
         data = json.loads(p.read_text(encoding="utf-8"))
-        return {
+        out = {
             "overall": data.get("overall") or "",
             "gaps": data.get("gaps") or [],
             "rules_version": data.get("rules_version") or "",
             "rules_fingerprint": data.get("rules_fingerprint") or "",
             "profile": data.get("profile") or "",
             "report_sha256": data.get("report_sha256") or "",
+            # 快照自述（谁在什么时候验收了哪一版）
+            "task_id": data.get("task_id") or "",
+            "trigger": data.get("trigger") or "",
+            "body_chars": int(data.get("body_chars") or 0),
+            "is_adopted_version": data.get("is_adopted_version"),
+            "evaluated_at": data.get("evaluated_at") or "",
         }
+        if not with_authority:
+            out["effective_overall"] = out["overall"]
+            out["effective_gaps"] = list(out["gaps"])
+            return out
+        _adopted = VersionStore(Path(ws_dir) if ws_dir else
+                                workspace.task_workspace(task_id), task_id).adopted()
+        _sha = out["report_sha256"]
+        _adopted_sha = str(getattr(_adopted, "version_id", "") or "")
+        _same = bool(_sha and _adopted_sha and _sha == _adopted_sha)
+        out["adopted_body_sha256"] = _adopted_sha
+        out["authoritative"] = bool(_same or not _adopted_sha)
+        if out["authoritative"]:
+            out["effective_overall"] = out["overall"]
+            out["effective_gaps"] = list(out["gaps"])
+            return out
+        _own = dict(getattr(_adopted, "acceptance", {}) or {})
+        out["authoritative_overall"] = str(_own.get("overall") or "")
+        out["authoritative_gaps"] = list(_own.get("gaps") or [])
+        out["effective_overall"] = out["authoritative_overall"]
+        out["effective_gaps"] = list(out["authoritative_gaps"])
+        _chars_txt = (f"{out['body_chars']} 字符" if out["body_chars"]
+                      else "字符数未记录")
+        out["acceptance_conflict"] = (
+            f"工作区验收快照绑的是正文 {_sha[:12]}（{_chars_txt}，"
+            f"overall={out['overall']}，缺口 {len(out['gaps'])} 个，来自「{out['trigger']}」）；"
+            f"当前采纳/交付的那版是 {_adopted_sha[:12]}（{len(str(getattr(_adopted, 'body', '')))}"
+            f" 字符，overall={out['authoritative_overall']}，缺口 "
+            f"{len(out['authoritative_gaps'])} 个）。页面/导出/下载只认采纳版那套"
+            f"（`effective_*`），另一套只是候选稿的验收留痕。")
+        logger.warning("验收快照与采纳版不是同一版（task=%s）：%s",
+                       task_id, out["acceptance_conflict"][:260])
+        return out
     except Exception:
         return None
 
@@ -514,6 +563,79 @@ def sources_fingerprint(task_id: str, report_text: str = "") -> str:
         return ""
 
 
+def _norm_text_sha(text: str) -> str:
+    """**文本** hash（CRLF/CR 先归一成 LF）。工作区/包内文件常是 CRLF，而交付登记与
+    验收按 LF 文本算 hash；不归一就会把"同一份正文"算成两份（实测 `ed8cf52b` vs
+    `94b594a2`）。"""
+    t = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(t.encode("utf-8")).hexdigest()
+
+
+def delivery_projection(task_id: str, *, ws_dir=None) -> dict:
+    """**本版正文身份**（唯一取处）：优先交付登记，其次结构对象里盖的章。
+
+    P0-2b 的落点：装配时把身份写进 `report_versions.json.deliveries[].projection` 与
+    `report_structure.json.delivery_projection`，页面 / 下载 / 包内清单 / 状态判定都从
+    这一个函数取，不再各自数各自的字节。取不到返回 `{}`（不编）。
+    """
+    try:
+        dels = VersionStore(_ws(task_id, ws_dir), task_id).deliveries()
+        if dels:
+            proj = (dels[-1] or {}).get("projection")
+            if isinstance(proj, dict) and proj:
+                return dict(proj)
+    except Exception:                            # noqa: BLE001 - 读不到再看结构
+        pass
+    try:
+        import report_brief
+        return report_brief.read_delivery_projection(task_id, ws_dir=ws_dir)
+    except Exception:
+        return {}
+
+
+def projection_vs_package(task_id: str, *, ws_dir=None, package: str = "",
+                          md_text: str = "", md_sha256: str = "") -> dict:
+    """包内/工作区主文与**本版交付身份**是否同一份（可核对谓词，不是提示语）。
+
+    `match` 的三种成立方式（都要身份里记着的那两个 hash 之一）：
+    ① 文件**字节** hash == 登记的 `delivered_sha256`（同一份交付字节）；
+    ② 文件**文本** hash（CRLF 归一）== `delivered_sha256`；
+    ③ 文件文本 hash == `body_sha256`（主文就是这份研究正文本身，未加交付外壳）。
+    拿不到身份或拿不到文件 → `unknown`（不判死，也不冒充一致）。
+    """
+    out: dict = {"verdict": "unknown", "reason": "", "package": str(package or ""),
+                 "md_sha256": str(md_sha256 or ""), "projection": {}}
+    proj = delivery_projection(task_id, ws_dir=ws_dir)
+    out["projection"] = proj
+    if not proj:
+        out["reason"] = "没有交付身份（装配未登记 projection）：无法核对包内主文与页面同版"
+        return out
+    txt = str(md_text or "")
+    if not txt.strip() and not md_sha256:
+        out["reason"] = "没有可比对的包内主文"
+        return out
+    _deliv = str(proj.get("delivered_sha256") or "")
+    _body = str(proj.get("body_sha256") or "")
+    _txt_sha = _norm_text_sha(txt) if txt else ""
+    out.update({
+        "md_text_sha256": _txt_sha, "md_chars": len(txt),
+        "delivered_sha256": _deliv, "delivered_chars": int(proj.get("delivered_chars") or 0),
+        "body_sha256": _body, "body_chars": int(proj.get("body_chars") or 0),
+    })
+    if (md_sha256 and _deliv and md_sha256 == _deliv) \
+            or (_txt_sha and _txt_sha in (_deliv, _body)):
+        out["verdict"] = "match"
+        return out
+    _seen = md_sha256 or _txt_sha
+    out["verdict"] = "mismatch"
+    out["reason"] = (
+        f"包内 {out['package'] or 'reports/report.md'}（{_seen[:12]}，{out['md_chars']} 字符）"
+        f"不等于收尾交付正文（{_deliv[:12]}，{out['delivered_chars']} 字符），也不等于本版"
+        f"研究正文（{_body[:12]}，{out['body_chars']} 字符）：屏幕版/下载版与包内版不是同一份，"
+        f"该包不得当当前稿下载（重新导出即生成同版包）")
+    return out
+
+
 def package_statuses(task_id: str, *, ws_dir=None) -> dict:
     """工作区里的交付包**逐个**判身份：`current`（= 当前采纳稿）/ `historical` / `unknown`。
 
@@ -536,6 +658,7 @@ def package_statuses(task_id: str, *, ws_dir=None) -> dict:
     for p in sorted(ws.glob("deliverables_*.zip")):
         item = {"name": p.name, "bytes": 0, "mtime": 0.0, "identity": "",
                 "body_sha256": "", "status": "unknown", "reason": ""}
+        man: dict = {}                           # 本轮包内清单（缺清单就是空，不借上一个包）
         try:
             item["bytes"] = int(p.stat().st_size)
             item["mtime"] = float(p.stat().st_mtime)
@@ -552,6 +675,25 @@ def package_statuses(task_id: str, *, ws_dir=None) -> dict:
                         (man.get("analysis_inputs") or {}).get("recomputable"))
                 else:
                     item["reason"] = "包内没有 PACKAGE_MANIFEST.json（旧包，无法核对身份）"
+                # P0-1/P0-4：包内主文必须**就是**收尾交付的那份字节（或本版研究正文本身）。
+                # 自动打包步在装配**之前**跑，装的是当时磁盘上的 `reports/report.md`——
+                # 屏幕版/下载版与包内版因此可能各是一份（实测 ui-8b28c95ab1：页面 5825 字、
+                # 包内 23493 字节、工作区又是第三份）。这里按交付登记的身份**当场核对**。
+                if "reports/report.md" in zf.namelist():
+                    try:
+                        _raw = zf.read("reports/report.md")
+                        item["md_sha256"] = hashlib.sha256(_raw).hexdigest()
+                        item["md_chars"] = len(_raw.decode("utf-8", errors="replace"))
+                        _pv = projection_vs_package(
+                            task_id, ws_dir=ws, package="reports/report.md",
+                            md_text=_raw.decode("utf-8", errors="replace"),
+                            md_sha256=item["md_sha256"])
+                        item["projection_verdict"] = str(_pv.get("verdict") or "")
+                        if _pv.get("reason"):
+                            item["projection_reason"] = str(_pv.get("reason"))
+                    except Exception as exc:     # noqa: BLE001 - 读不出主文按未知处理
+                        item["projection_verdict"] = "unknown"
+                        item["projection_reason"] = f"包内主文不可读：{str(exc)[:60]}"
                 # R2：清单身份对得上还**不够**——同一次导出里包内冻结的选择记录也必须
                 # 是这一版（实测三一 `375af7`：manifest 23b61bee… 而包内
                 # `analysis/selection.json.adopted_identity=d290ab01…`）。旧包字节不动，
@@ -569,6 +711,9 @@ def package_statuses(task_id: str, *, ws_dir=None) -> dict:
             item["reason"] = f"包不可读：{str(exc)[:80]}"
         _sel_id = str(item.get("selection_identity") or "")
         _sel_conflict = bool(adopted_id and _sel_id and _sel_id != adopted_id)
+        # P0-1/P0-4：包内主文与本版交付身份对不上 → 屏幕版/下载版与包内版不是同一份，
+        # 该包不得当"当前稿"下载（结论在读取时按交付登记算，老包同样受约束）。
+        _proj_conflict = str(item.get("projection_verdict") or "") == "mismatch"
         if not adopted_id:
             item["status"] = "unknown"
             item["reason"] = item["reason"] or "该任务没有采纳版本，无法判定同版"
@@ -577,6 +722,10 @@ def package_statuses(task_id: str, *, ws_dir=None) -> dict:
             item["reason"] = (f"包内选择记录 {_sel_id[:12]} != 当前采纳 "
                               f"{adopted_id[:12]}：这一版导出与选择记录不同源，"
                               f"旧包保留但不得当当前稿下载（重新导出即生成同版包）")
+        elif _proj_conflict:
+            item["status"] = "historical"
+            item["reason"] = str(item.get("projection_reason")
+                                 or "包内主文与收尾交付正文不是同一份")
         elif item["identity"] and item["identity"] == adopted_id:
             item["status"] = "current"
             item["reason"] = ""
@@ -636,6 +785,32 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
         sorted(_md_candidates)[0] if _md_candidates else "")
     out["delivered_md"] = _md
     out["delivered_md_sha256"] = file_hashes.get(_md, "")
+    # P0-2b：包内清单必须带上**本版正文身份**（交付登记 projection）与"包内主文是否
+    # 就是那一份"的可核对结论。此前清单只写"打包时刻的采纳身份"，于是同一个包里
+    # "采纳身份=半截稿 / 主文字节=另一版完整稿"两件事并存却看不出矛盾（实测 ui-8b28c95ab1）。
+    try:
+        _proj = delivery_projection(task_id, ws_dir=ws)
+        out["delivery_projection"] = _proj
+        _md_text = ""
+        if _md:
+            for abs_path, arc in (files or []):
+                if str(arc) == _md:
+                    try:
+                        _md_text = _P(abs_path).read_text(encoding="utf-8")
+                    except Exception:            # noqa: BLE001 - 读不出就按 hash 判
+                        _md_text = ""
+                    break
+        _pv = projection_vs_package(task_id, ws_dir=ws, package=_md,
+                                    md_text=_md_text,
+                                    md_sha256=str(file_hashes.get(_md, "")))
+        out["delivery_projection_verdict"] = str(_pv.get("verdict") or "unknown")
+        if _pv.get("reason"):
+            out["delivery_projection_reason"] = str(_pv.get("reason"))
+        if _proj:
+            out["delivery_status"] = str(_proj.get("status") or "")
+            out["draft_reason"] = str(_proj.get("draft_reason") or "")
+    except Exception as exc:                     # noqa: BLE001 - 身份核对失败不阻断打包
+        logger.warning("包内清单：交付身份核对失败（task=%s）：%s", task_id, str(exc)[:120])
     _pdf = str(pdf_name or "")
     if not _pdf:
         # P0-f：这里**不能**取包内任意 PDF。实测样本 ui-a06a005c9b 的清单里
@@ -1029,6 +1204,22 @@ def _disk_drift(ws, frozen: dict) -> dict:
     return out
 
 
+def _exclusion_audit_members(ws) -> list:
+    """F1 剔除审计成员：工作区 `project/source_exclusions.json` → 包内
+    `audit/source_exclusions.json`（按名存在才进包，没有就返回空列表）。
+
+    单独成函数是为了能被测试直接调用并核对"确有纳入"，而不是只在长函数里
+    一行 `files.append(...)`、无法验证。
+    """
+    try:
+        p = Path(ws) / "project" / "source_exclusions.json"
+        if p.is_file() and p.stat().st_size > 0:
+            return [(p, "audit/source_exclusions.json")]
+    except Exception as exc:                     # noqa: BLE001 - 不进包不影响主链
+        logger.warning("打包：剔除审计读取失败：%s", str(exc)[:100])
+    return []
+
+
 def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
                     md_bytes: bytes = b"", pdf_bytes: bytes = b"",
                     goal: str = "") -> dict:
@@ -1384,6 +1575,10 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 files.append((_c3, f"analysis/{_c3.name}"))
         except Exception as exc:                 # noqa: BLE001 - 输入读不到就不进包
             logger.warning("打包：分析输入读取失败：%s", str(exc)[:100])
+        # F1 剔除审计（`project/source_exclusions.json`）：报告缺口行会写
+        # "剔除记录见交付包 audit/source_exclusions.json"，所以必须真有这个成员。
+        # 按名存在才进包：没有剔除记录的任务行为零变化。
+        files.extend(_exclusion_audit_members(ws))
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
         for cand_dir in (ws / "project", ws):
             if not cand_dir.is_dir():
@@ -2367,9 +2562,60 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
         except Exception:                        # noqa: BLE001 - 量不出字数不阻断验收
             pass
         # 落盘：快照（覆盖写）+ 审计事件（追加），两者都在绑定之前完成
+        #
+        # P0-2b（验收只允许一个权威来源）：快照**自己说清绑的是哪一版**；当它不是当前
+        # 采纳/交付那一版时，把采纳版自己的结论一并写成"权威那套"，并留 WARNING。
+        # 反例（实测 ui-8b28c95ab1）：页面横幅读任务行的 acceptance_json（采纳版
+        # 8fdfc0d5，4569 字，2 个缺口），工作区 acceptance_report.json 却被最后一次
+        # 验收（完整稿 94b594a2，3 个缺口）覆盖——两套数字并排显示，谁也说不清哪套算数。
         try:
-            (_ws(task_id, ws_dir) / "acceptance_report.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+            _wsx = _ws(task_id, ws_dir)
+            _snap = dict(result or {})
+            _this_sha = str(_snap.get("report_sha256") or "")
+            _adopted_now = VersionStore(_wsx, task_id).adopted()
+            _adopted_sha = str(getattr(_adopted_now, "version_id", "") or "")
+            _is_adopted = bool(_adopted_sha and _adopted_sha == _this_sha)
+            _snap.update({
+                "task_id": task_id,
+                "trigger": str(trigger or ""),
+                "body_sha256": _this_sha,
+                "body_chars": len(str(report or "")),
+                "is_adopted_version": bool(_is_adopted),
+                "adopted_body_sha256": _adopted_sha,
+                "authoritative": bool(_is_adopted or not _adopted_sha),
+            })
+            if (_adopted_now is not None and not _is_adopted
+                    and _adopted_now.acceptance_for_this_body()):
+                # 采纳/交付那一版**自己**有绑定的验收，而这份快照是给另一版写的：
+                # 两套数字从此并存（页面横幅读采纳版那套，本文件是另一套）。
+                _own = dict(_adopted_now.acceptance or {})
+                _snap["authoritative_overall"] = str(_own.get("overall") or "")
+                _snap["authoritative_gaps"] = list(_own.get("gaps") or [])
+                _snap["authoritative_report_sha256"] = _adopted_sha
+                _snap["authoritative_body_chars"] = len(str(_adopted_now.body or ""))
+                _chars_txt = (f"{len(str(report or ''))} 字符"
+                              if str(report or "") else "字符数未记录")
+                _snap["acceptance_conflict"] = (
+                    f"本文件是「{trigger or '未知来源'}」对正文 {_this_sha[:12]}"
+                    f"（{_chars_txt}）的验收：overall={_snap.get('overall')}、"
+                    f"缺口 {len(_snap.get('gaps') or [])} 个；当前采纳/交付的那版是 "
+                    f"{_adopted_sha[:12]}（{len(str(_adopted_now.body or ''))} 字符），其权威结论 "
+                    f"overall={_snap['authoritative_overall']}、缺口 "
+                    f"{len(_snap['authoritative_gaps'])} 个。页面与交付物只认权威那套。")
+                logger.warning("验收快照不是采纳版验收（task=%s）：%s",
+                               task_id, _snap["acceptance_conflict"][:260])
+            (_wsx / "acceptance_report.json").write_text(
+                json.dumps(_snap, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as exc:                 # noqa: BLE001 - 快照身份写入失败不阻断验收
+            logger.warning("验收快照身份标注失败（task=%s）：%s", task_id, str(exc)[:120])
+        # 绑定验收：**独立** try，不与上面的快照落盘共用。
+        # 20261021 回归（Lead 复核发现）：绑定代码一度被写进上面那个 `except` 的
+        # 分支体里 → 只有快照落盘**抛异常**时才会执行绑定，于是所有交付都退回
+        # "该版本没有对应它自身的验收（未知）"，页面/下载恒为未验收草稿。
+        # 参考用例 test_orchestrator_v2.test_iteration_accumulates_steps_and_uses_best_report
+        # 直接抓住了这个改动（delivery_pipeline.py 单文件还原即通过）。两件事分开 try：
+        # 快照写失败不得让验收绑不上，绑定失败也不得让快照丢失。
+        try:
             _store = VersionStore(_ws(task_id, ws_dir), task_id)
             _src_fp = sources_fingerprint(task_id, report)
             _acc = {
@@ -2631,7 +2877,32 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
                                       if _v_for_review is not None else "")
         write_review_facts(task_id, facts, ws_dir=ws_dir)
 
+    # P0-1：**正文完整性闸门**。截断的正文不得静默当作可交付：
+    # ① 页面与交付物上显式标注「正文在第 X 节截断，内容不完整」（引用块，读者第一眼可见）；
+    # ② 状态降级为未验收草稿，理由写进交付登记的结构化字段 `draft_reason`；
+    # ③ 留 WARNING 日志（`assertLogs` 可断言）。
+    # 判定对象是**研究正文**（`body`），不是加了外壳的交付字节——外壳不影响正文完整性。
+    trunc_info: dict = {}
+    try:
+        import report_brief as _rb_trunc
+        trunc_info = _rb_trunc.detect_body_truncation(body)
+    except Exception as exc:                     # noqa: BLE001 - 判据失败不阻断交付
+        logger.warning("交付装配：截断判据执行失败（task=%s）：%s", task_id, str(exc)[:120])
+
     notes: list[str] = []
+    if trunc_info.get("truncated"):
+        _trunc_sentence = str(trunc_info.get("reason") or "正文被截断，内容不完整")
+        logger.warning("交付正文**截断**（task=%s，%d 字符，节=%s）：%s", task_id,
+                       len(str(body or "")), str(trunc_info.get("section") or ""),
+                       _trunc_sentence[:200])
+        _tnote = ""
+        try:
+            import report_brief as _rb_tnote
+            _tnote = _rb_tnote.truncation_note(trunc_info)
+        except Exception:                        # noqa: BLE001
+            _tnote = f"> ⚠️ **{_trunc_sentence}**。"
+        if _tnote:
+            notes.append(_tnote)
     # 批次3b：研究状态（与数字机器验收分开的一条轴）——在验收/硬门槛之前算，注记进交付
     # 说明（MD 与 PDF 封面共用），文件落盘供页面与导出清单读
     #
@@ -2711,14 +2982,56 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     )
     if status != DELIVERY_VERIFIED and not why:
         why = review_why or "未取得该版验收"
+    # P0-1：截断稿必须**显式**判为草稿，理由就是那句标注（页面/下载/包内读同一字段）
+    trunc_draft_reason = ""
+    if trunc_info.get("truncated"):
+        trunc_draft_reason = str(trunc_info.get("reason") or "正文被截断，内容不完整")
+        status = DELIVERY_DRAFT
+        why = f"{trunc_draft_reason}：截断正文只能作未验收草稿交付，需重跑报告生成或人工补全后重新验收"
+    if status != DELIVERY_VERIFIED and not why:
+        why = review_why or "未取得该版验收"
     if status != DELIVERY_VERIFIED:
         report = with_draft_note(report, why)
+    projection = {
+        "schema": "weavemind.delivery_projection/1",
+        "body_sha256": body_hash(body),          # 本次被交付的**研究正文**字节
+        "body_chars": len(str(body or "")),
+        "delivered_sha256": body_hash(report),   # 页面投影 / 下载 / 包内主文同一份字节
+        "delivered_chars": len(report),
+        "version_id": (version.version_id if version is not None else ""),
+        "version_body_sha256": (version.version_id if version is not None else ""),
+        "identity_id": (version.identity_id() if version is not None else ""),
+        "md_relpath": "reports/report.md",
+        "truncated": bool(trunc_info.get("truncated")),
+        "draft_reason": ("" if status == DELIVERY_VERIFIED
+                         else (trunc_draft_reason or why)),
+        "status": status,
+    }
     entry = store.record_delivery(report, accepted_body=body,
-                                  ok=(status == DELIVERY_VERIFIED), reason=why)
+                                  ok=(status == DELIVERY_VERIFIED), reason=why,
+                                  draft_reason=(trunc_draft_reason or
+                                                ("" if status == DELIVERY_VERIFIED else why)),
+                                  truncated=bool(trunc_info.get("truncated")),
+                                  truncation=trunc_info, projection=projection)
+    # P0-2b：本版正文身份也盖进结构对象（页面详情/清单与正文同源，不再各读一处）
+    try:
+        import report_brief as _rb_proj
+        _st_proj_final = _rb_proj.read_structure(task_id, ws_dir=ws_dir)
+        if _st_proj_final is not None:
+            _rb_proj.stamp_delivery_projection(_st_proj_final,
+                                               entry.get("projection") or projection)
+            _rb_proj.write_structure(task_id, _st_proj_final, ws_dir=ws_dir)
+    except Exception as exc:                     # noqa: BLE001 - 身份写入失败不阻断交付
+        logger.warning("交付身份写入结构对象失败（task=%s）：%s", task_id, str(exc)[:120])
     logger.info("交付装配（task=%s）：status=%s version=%s", task_id, status,
                 str(getattr(version, "version_id", ""))[:12])
     return {
-        "report": report, "body": body, "status": status, "reason": why,
+        "report": report, "body": body, "status": status,
+        "delivery_status": status, "reason": why,
+        "draft_reason": ("" if status == DELIVERY_VERIFIED else (trunc_draft_reason or why)),
+        "truncated": bool(trunc_info.get("truncated")),
+        "truncation": trunc_info,
+        "projection": entry.get("projection") or projection,
         "hard_fail": hard_fail, "review_valid": review_ok, "review_reason": review_why,
         "identity_id": (version.identity_id() if version is not None else ""),
         "version_id": (version.version_id if version is not None else ""),
@@ -2803,15 +3116,24 @@ def delivery_state(task_id: str, delivered_text: str = "", ws_dir=None) -> dict:
     输入全部可重算或已持久化：选中版本、最后一次交付记录、评审事实（含所属版本）、
     研究硬门槛（读 `financials.json` + 契约重算，不写文件）。因此页面、导出清单、
     验收详情拿到的是同一个结论。
+
+    P0-1/P0-2b：返回里带**本版正文身份**（`projection`：交付字节 sha256/字符数 + 研究正文
+    sha256/字符数 + 选中版本身份 + 主文相对路径）、`truncated`/`truncation`（截断闸门）
+    与 `draft_reason`（结构化未交付原因）。页面、导出、包内清单、下载守卫都读这一份，
+    不再各自拼条件（"只加一句提示"不算修）。
     """
     ws = _ws(task_id, ws_dir)
     store = VersionStore(ws, task_id)
     version = store.adopted()
+    proj = delivery_projection(task_id, ws_dir=ws)
     if version is None:
         return {"status": DELIVERY_UNKNOWN, "draft": True, "verified": False,
                 "draft_reason": "无选中版本", "version_id": "", "identity_id": "",
                 "acceptance_overall": "", "accepted_body_matches": False,
-                "aligned": None, "delivered_sha256": "", "delivered_at": 0}
+                "aligned": None, "delivered_sha256": "", "delivered_at": 0,
+                "truncated": False, "truncation": {}, "projection": proj,
+                "md_file": {}}
+    trunc_info = version.truncation_info()
     facts = read_review_facts(task_id, ws_dir=ws_dir)
     review_ok, review_why = review_valid_for(version, facts)
     hard_fail = ""
@@ -2855,6 +3177,23 @@ def delivery_state(task_id: str, delivered_text: str = "", ws_dir=None) -> dict:
             elif aligned and status == DELIVERY_VERIFIED and not last.get("ok"):
                 status = "draft"
                 why = str(last.get("reason") or "收尾时已判为未验收草稿")
+    if trunc_info.get("truncated") and status == DELIVERY_VERIFIED:
+        status = "draft"
+        why = (version.truncation_reason()
+               + "：截断正文不得当作完整交付（需重跑报告生成或人工补全）")
+    # 工作区主文（包内 `reports/report.md` 的来源）与本版交付身份核对：结果如实返回
+    # （`projection_vs_package` 的 mismatch 由 `package_statuses` 落成"历史包"）。
+    md_file: dict = {}
+    try:
+        _mdp = ws / "reports" / "report.md"
+        if _mdp.is_file():
+            _md_bytes = _mdp.read_bytes()
+            md_file = projection_vs_package(
+                task_id, ws_dir=ws, package="reports/report.md",
+                md_text=_md_bytes.decode("utf-8", errors="replace"),
+                md_sha256=hashlib.sha256(_md_bytes).hexdigest())
+    except Exception as exc:                     # noqa: BLE001 - 核对失败不影响状态
+        md_file = {"verdict": "unknown", "reason": f"工作区主文核对失败：{str(exc)[:80]}"}
     return {
         "status": status, "draft": status != DELIVERY_VERIFIED,
         "verified": status == DELIVERY_VERIFIED,
@@ -2868,4 +3207,10 @@ def delivery_state(task_id: str, delivered_text: str = "", ws_dir=None) -> dict:
         "review_valid": review_ok,
         "delivered_sha256": str(last.get("delivered_sha256") or ""),
         "delivered_at": float(last.get("at") or 0),
+        # P0-1/P0-2b：截断闸门 + 本版正文身份（读取侧唯一取处）
+        "truncated": bool(trunc_info.get("truncated")),
+        "truncation": trunc_info,
+        "projection": (proj or (dict(last.get("projection") or {})
+                                if isinstance(last.get("projection"), dict) else {})),
+        "md_file": md_file,
     }

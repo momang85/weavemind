@@ -3227,6 +3227,30 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertEqual(r["metadata_count"], len(metadata_numbers(report)))
         self.assertIn("定位元数据", r["details"])
 
+    def test_spec_examples_and_stock_code_not_financial_numbers(self):
+        """P1-3（20261021 复验）：写作规范示例与股票代码不进溯源分母。
+
+        真机反例（海天味业 2023–2024，2026-10-21）：数字溯源率 0%（0/6），
+        "不可溯源示例"是 603288（股票代码）、100%（公式常量）、288.76 亿元 与
+        2.88763（写作规范里的格式示例）——这些不是研究读数，把它们算进分母
+        制造了假缺口"报告未提供可溯源数值"。这里同时断言**真实读数不受影响**。
+        """
+        from acceptance_checker import extract_financial_numbers
+
+        text = (
+            "海天味业（603288）股票代码 603288。\n"
+            "同比变化的计算公式为（2024 年数值 − 2023 年数值）÷ 2023 年数值 × 100%。\n"
+            "所有金额统一以人民币亿元呈现，保留两位小数（例如「288.76 亿元」格式），"
+            "禁止使用科学计数法形式（如 2.88763e+10）。\n"
+            "2024 年营业收入 269.01 亿元，同比增长 9.98%。"
+        )
+        vals = [(n["value"], n["unit"]) for n in extract_financial_numbers(text)]
+        self.assertIn(("269.01", "亿元"), vals)   # 真实读数保留
+        self.assertIn(("9.98", "%"), vals)
+        self.assertNotIn(("603288", ""), vals)    # 股票代码（代码语境）
+        self.assertNotIn(("288.76", "亿元"), vals)  # 引号里的格式示例
+        self.assertNotIn(("100", "%"), vals)      # 公式常量（× 100%）
+
     def test_bare_number_keeps_boundary_after_thousands_separator(self):
         """无单位大数：来源写千分位且与相邻数字连排时仍要匹配，且不得跨值误配。
 

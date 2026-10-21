@@ -332,6 +332,127 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         return "\n".join(out).strip()
 
     @staticmethod
+    def _excluded_from_instruction(instruction: str) -> set[str]:
+        """从指令的 `[已剔除来源]` 块读出被剔除的 URL（F1 剔除审计下发口）。
+
+        与 `_strip_rejected_sources` 的分工：后者靠**正文自己的剔除声明**（模型可能
+        不写域名，只有"3 条均无关已剔除"这种计数式声明，正则取不到 URL 就什么也删
+        不了）；这里拿的是编排器**逐条判定**的结果，是确定性的剔除名单。
+        """
+        text = str(instruction or "")
+        m = re.search(r"\[已剔除来源\](.*?)(?:\n\s*\n\[|\Z)", text, re.S)
+        if not m:
+            return set()
+        out: set[str] = set()
+        for u in re.findall(r"https?://[^\s\)\]\"'，。；]+", m.group(1)):
+            out.add(u.rstrip(").,;:！？。；").lower())
+        return out
+
+    @staticmethod
+    def _drop_excluded_urls(text: str, excluded: set[str]) -> tuple[str, int]:
+        """把被剔除 URL 从来源清单类附录里删掉（含 `- [url](url)` 与表格行），
+        并把正文里出现的同一批 URL 摘掉（只摘 URL，不删句子）。
+
+        为什么正文也要摘：验收口径是"无关 URL 在正文与正式引用中为零"。
+        但正文里可能是一句有信息量的话，所以**不整句删**——
+        `[文字](url)` 退化成 `文字`，裸 URL 换成一句可核查的替代说明。
+        """
+        if not text or not excluded:
+            return text, 0
+        lines = str(text).split("\n")
+        out: list[str] = []
+        removed = 0
+        for line in lines:
+            low = line.lower()
+            if not any(u in low for u in excluded):
+                out.append(line)
+                continue
+            hm = re.match(r"^(#{1,6})\s+(.+)$", line)
+            if hm:
+                out.append(line)                 # 标题里的 URL 不动（极罕见）
+                continue
+            stripped = line.strip()
+            is_entry = (stripped.startswith(("-", "*", "+", "|"))
+                        or bool(re.match(r"^\d{1,2}[.、)]", stripped)))
+            if is_entry:
+                # 清单/表格行：整行就是这条来源，直接去掉
+                removed += 1
+                continue
+            # 散文行：只摘 URL，保留文字
+            fixed = line
+            for u in sorted(excluded, key=len, reverse=True):
+                if u not in fixed.lower():
+                    continue
+                # `[文字](url)` → `文字`
+                fixed = re.sub(
+                    r"\[([^\]]*)\]\(" + re.escape(u) + r"\)", r"\1", fixed,
+                    flags=re.IGNORECASE)
+                # 剩余的裸 URL → 明确标注（不静默留空）
+                fixed = re.sub(re.escape(u), "（该来源已按来源纪律剔除）", fixed,
+                               flags=re.IGNORECASE)
+            if fixed != line:
+                removed += 1
+            out.append(fixed)
+        return "\n".join(out), removed
+
+    @staticmethod
+    def compose_source_appendix(instruction: str) -> str:
+        """生成自动追加的 `## 数据来源` 附录文本（**生产路径唯一实现**）。
+
+        `execute()` 直接调用它，测试也调它——避免"测试里重写一遍推导"这种
+        看起来绿、实际没验到生产代码的假回归。返回以 `\\n\\n## 数据来源` 开头
+        的文本；没有来源也没有剔除记录时返回空串（不追加）。
+        """
+        src_urls: list[str] = []
+        m = re.search(r"\[数据来源\](.*)", str(instruction or ""), re.S)
+        if m:
+            for u in re.findall(r"https?://[^\s\)\]]+", m.group(1)):
+                if u not in src_urls:
+                    src_urls.append(u)
+        # F1：剔除名单里的 URL 一律不进自动附录（候选 ≠ 采用）。只删"已判无关"
+        # 的那几条，合法采用来源原样保留。
+        excluded = ReportGeneratorWorker._excluded_from_instruction(instruction)
+        if excluded:
+            _before = len(src_urls)
+            kept: list[str] = []
+            for u in src_urls:
+                norm = u.rstrip(").,;:！？。；").lower()
+                # 同时按"恰好等于"和"被剔除 URL 是其前缀"两种形态判：
+                # `[n] url)` 这类被标点收尾的写法也要能匹配上
+                if norm in excluded or any(norm.startswith(e) for e in excluded):
+                    continue
+                kept.append(u)
+            src_urls = kept
+            if _before != len(src_urls):
+                logger.info("auto 数据来源 appendix: dropped %d excluded source(s)",
+                            _before - len(src_urls))
+        if src_urls:
+            return ("\n\n## 数据来源\n\n"
+                    + "\n".join(f"- [{u}]({u})" for u in src_urls[:15]))
+        if excluded:
+            # 有剔除记录但没有可用来源：如实例外缺口，不伪造引用。
+            # 指引只指向**真实存在**的工件（工作区 + 交付包内的
+            # `audit/source_exclusions.json`），不指向未实现的任务详情入口。
+            return ("\n\n## 数据来源\n\n"
+                    "- 本次无采用的外部来源（检索候选均与标的无关，已按来源纪律剔除；"
+                    "剔除记录见交付包 `audit/source_exclusions.json`）。")
+        return ""
+
+    @classmethod
+    def finalize_source_hygiene(cls, report: str, instruction: str) -> tuple[str, int]:
+        """成稿收尾的来源卫生（**生产路径唯一实现**，`execute()` 调它）。
+
+        顺序：① 删掉"正文自己声明已剔除"的附录条目（既有 P2-2 逻辑）；
+        ② 按编排器下发的确定性剔除名单摘掉 URL（附录整行删、散文只摘 URL）。
+        返回 `(文本, 摘除计数)`。
+        """
+        text = cls._strip_rejected_sources(report)
+        excluded = cls._excluded_from_instruction(instruction)
+        if not excluded:
+            return text, 0
+        return cls._drop_excluded_urls(text, excluded)
+
+    @staticmethod
     def _strip_rejected_sources(report: str) -> str:
         """P2-2 来源卫生：正文声明已剔除/排除的域名/URL 不得再出现在来源附录。
 
@@ -840,12 +961,14 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 system=system, prompt=user, max_attempts=2, max_tokens=8192,
             )
             report = report.strip()
+            _short_retried = False
             if self._report_too_short(report):
                 # 记录原始输出，裁剪提示词后重试一次（max_tokens 保持/增大，不缩小）
                 logger.warning(
                     "Report LLM output too short (%d chars): %r",
                     len(report), report[:200],
                 )
+                _short_retried = True
                 trimmed = self._trim_prompt_for_report(user)
                 logger.info(
                     "Report prompt trimmed for retry: %d -> %d chars",
@@ -865,6 +988,47 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     raise RuntimeError("Generated report too short after retry")
             if not report.startswith("#"):
                 report = "# 报告\n\n" + report
+
+            # P0-1：正文**截断闸门**（判在一切追加之前——`## 数据来源`/图表/缺口说明都会
+            # 追加在截断点之后，把"末尾悬空"掩盖成完整）。实测 ui-8b28c95ab1：模型输出
+            # 4569 字符、停在「…不得以「经营活动现金流入小计」或「」，`end_reason` 还是
+            # 'ok'，于是被当成正常成稿采纳、交付，且没有任何一处标注。
+            _rb_mod = None
+            trunc_info: dict = {}
+            try:
+                import report_brief as _rb_mod          # noqa: PLC0415 - 叶子模块，避免环
+                trunc_info = _rb_mod.detect_body_truncation(report)
+            except Exception as exc:                     # noqa: BLE001 - 判不出不阻断出稿
+                _rb_mod = None
+                logger.warning("Report truncation check failed (task=%s): %s",
+                               task_id, str(exc)[:120])
+            if trunc_info.get("truncated"):
+                logger.warning(
+                    "报告正文**截断**（task=%s，%d 字符，第 %s 节）：%s",
+                    task_id, len(report), str(trunc_info.get("section") or ""),
+                    str(trunc_info.get("reason") or "")[:200])
+                # 先给模型一次机会：裁短提示词重出（不缩 max_tokens）；重出仍截断则如实标注
+                if _rb_mod is not None and not _short_retried:
+                    try:
+                        _trimmed = self._trim_prompt_for_report(user)
+                        _report2 = str(await self._call_llm(
+                            system=system, prompt=_trimmed,
+                            max_attempts=2, max_tokens=8192) or "").strip()
+                        _t2 = (_rb_mod.detect_body_truncation(_report2)
+                               if _report2 else {})
+                        if (_report2 and not _t2.get("truncated")
+                                and not self._report_too_short(_report2)):
+                            logger.info("报告重出后正文完整（task=%s：%d → %d 字符）",
+                                        task_id, len(report), len(_report2))
+                            report = (_report2 if _report2.startswith("#")
+                                      else "# 报告\n\n" + _report2)
+                            trunc_info = _t2
+                        else:
+                            logger.warning("报告重出后仍截断（task=%s）：%s",
+                                           task_id, str(_t2.get("reason") or "")[:160])
+                    except Exception as exc:             # noqa: BLE001 - 重出失败保留原稿
+                        logger.warning("Report regeneration after truncation failed "
+                                       "(task=%s): %s", task_id, str(exc)[:120])
 
             # 报告完整性守门（F1 改造）：不再用"规模/玩家/趋势"这类**行业调研模板关键词**
             # 判断内容是否足够（套在公司财务研究上会误触发，把过程痕迹补进正文）。改为
@@ -896,18 +1060,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                         logger.warning("Report has isolated material: gap noted (task=%s)",
                                        task_id)
 
-            # 数据来源附录：从指令中的 [数据来源] 块提取 URL 并去重
-            src_urls: list[str] = []
-            m = re.search(r"\[数据来源\](.*)", str(instruction), re.S)
-            if m:
-                for u in re.findall(r"https?://[^\s\)\]]+", m.group(1)):
-                    if u not in src_urls:
-                        src_urls.append(u)
-            if src_urls:
-                report += (
-                    "\n\n## 数据来源\n\n"
-                    + "\n".join(f"- [{u}]({u})" for u in src_urls[:15])
-                )
+            # 数据来源附录：由 `compose_source_appendix` 生成（生产唯一实现）
+            report += ReportGeneratorWorker.compose_source_appendix(instruction)
             # 图表内联嵌入：按主题把图表插到对应小节之后（紧贴需要可视化的文字）
             if charts:
                 report = self._embed_charts_inline(report, charts, manifests)
@@ -943,16 +1097,56 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     report = report[: _m2.start()] + _note + report[_m2.start():]
                 else:
                     report = _note + report
-            # P2-2 来源卫生：正文剔除声明与来源附录强一致（删除附录中被剔除条目）
-            report = self._strip_rejected_sources(report)
+            # 来源卫生收尾（生产唯一实现：`finalize_source_hygiene`）——
+            # ①正文剔除声明与附录强一致（P2-2）；②编排器逐条判定的剔除名单同样生效
+            # （模型只写"已剔除"计数、不写域名时，①取不到任何 URL，必须靠②兜底）
+            report, _n_drop = ReportGeneratorWorker.finalize_source_hygiene(
+                report, instruction)
+            if _n_drop:
+                logger.info("excluded sources removed from final report: %d", _n_drop)
 
             rpath = report_dir / "report.md"
+            if trunc_info.get("truncated"):
+                _tn = ""
+                if _rb_mod is not None:
+                    try:
+                        _tn = _rb_mod.truncation_note(trunc_info)
+                    except Exception:                    # noqa: BLE001
+                        _tn = ""
+                report += "\n\n" + (_tn or
+                                    f"> ⚠️ **正文截断，内容不完整**："
+                                    f"{str(trunc_info.get('reason') or '')}") + "\n"
+            # P0-1 止损：**截断稿不得覆盖工作区里更完整的 `report.md`**（主路径此前
+            # 无条件覆盖；18:53 那次就是这样把残稿写成了"当前稿"）。
+            if trunc_info.get("truncated") and rpath.is_file():
+                try:
+                    _old = rpath.read_text(encoding="utf-8")
+                    _old_trunc = (bool(_rb_mod.is_body_truncated(_old))
+                                  if _rb_mod is not None else False)
+                    if len(_old) > len(report) and not _old_trunc:
+                        logger.warning(
+                            "保留更完整的 report.md（旧 %d 字符 > 截断新稿 %d 字符，"
+                            "task=%s）：截断稿不覆盖", len(_old), len(report), task_id)
+                        return json.dumps({
+                            "status": "success",
+                            "report_path": str(rpath),
+                            "charts": len(charts),
+                            "datasets": len(data_csvs),
+                            "kept_existing": True,
+                            "truncated": True,
+                            "truncation": trunc_info,
+                        }, ensure_ascii=False)
+                except Exception as exc:                 # noqa: BLE001 - 比不了就照写
+                    logger.warning("截断止损比对失败（task=%s）：%s",
+                                   task_id, str(exc)[:120])
             _info = self._write_report_files(report_dir, report, ws_dir=ws)
             return json.dumps({
                 "status": "success",
                 "report_path": str(rpath),
                 "charts": len(charts),
                 "datasets": len(data_csvs),
+                "truncated": bool(trunc_info.get("truncated")),
+                "truncation": trunc_info,
                 **_info,
             }, ensure_ascii=False)
         except Exception as exc:
@@ -999,8 +1193,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 report = ReportGeneratorWorker._grade_charts(
                     report, charts, {}, str(instruction))
             report = self._strip_reflection_residue(report)
-            # P2-2 来源卫生：兜底报告同样保证剔除声明与附录一致
-            report = self._strip_rejected_sources(report)
+            # 兜底报告同样走生产唯一收尾（剔除声明 + 确定性剔除名单）
+            report, _n_drop2 = ReportGeneratorWorker.finalize_source_hygiene(
+                report, instruction)
+            if _n_drop2:
+                logger.info("excluded sources removed from fallback report: %d",
+                            _n_drop2)
             report = ReportGeneratorWorker._fix_source_urls(report)
             try:
                 rpath = report_dir / "report.md"

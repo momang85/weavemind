@@ -4593,6 +4593,231 @@ def _disclaimer(structure: dict, task_id: str | None = None) -> str:
                 "据此操作风险自担。")
 
 
+# ── 正文完整性：截断闸门（P0-1 / P0-2b）────────────────────────────────────
+#
+# 背景（2026-10-21 实机 `ui-8b28c95ab1`）：报告生成步的模型输出被长度上限截断——
+# 正文停在半句「…不得以「经营活动现金流入小计」或「」，§1.4 承诺的"第五章…第十章 +
+# 文末附录/参考来源/免责声明"全都没写。`report_quality.compare_versions` 只按"验收缺口
+# 更少"比较（半截稿 2 个缺口 vs 完整稿 3 个），把半截稿采纳为 selected：页面/下载/包内
+# 从此是三份不同的正文，且**没有任何一处**标注"这份正文被截断"。
+#
+# 判据（都可核对，不靠猜；`finish_reason` 只在拿得到时才作为证据）：
+#   ① `finish_reason == "length"`——调用方拿得到就传。workers 拿不到（`_call_llm`
+#      只回文本），所以②③④必须能独立成立；
+#   ② 结构承诺未兑现：声明"第二章至第十章"却只写到第四章；声明文末设
+#      「附录/参考来源/免责声明」却一处都没有；
+#   ③ 正文主体末尾悬空：最后一行内容停在未闭合的「『（《【" 或 `**`/`` ` ``，或停在
+#      连接词/顿号上（或、及、与、和、不得以…）；
+#   ④ 正文主体分隔符整体不配对（「」『』（）【】 或 `**` 数为奇）。
+#
+# 判定：①单独成立即截断；②单独成立即截断；③与④同时成立即截断。三者都不成立才算完整。
+# 短正文（< `TRUNCATION_MIN_CHARS`）不跑启发式，避免误伤摘要/测试夹具。
+
+TRUNCATION_MIN_CHARS = 400
+_APPENDIX_HEAD_RE = re.compile(
+    r"(?m)^#{1,4}\s*(?:数据来源(?:摘要)?|参考来源|来源清单|参考资料|来源附录|"
+    r"附录[^\n]{0,24}|免责声明|核查细节|风险提示)\s*$")
+_IMAGE_ONLY_RE = re.compile(r"^\s*!\[[^\]]*\]\([^)]*\)\s*$")
+_HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+# 本模块自己盖的截断标注（`truncation_note`）：判据必须先把它切掉，否则
+# 「标注写在截断点之后」会把截断证据补成完整——闸门自证失效。
+_NOTE_MARK_RE = re.compile(r"(?m)^>\s*⚠️\s*\*\*正文")
+_HEADING_RE = re.compile(r"(?m)^#{1,4}[ \t]+(.+?)[ \t]*$")
+_CHAPTER_RE = re.compile(r"第\s*([一二三四五六七八九十]{1,3})\s*章")
+_CHAPTER_HEADING_RE = re.compile(
+    r"(?m)^#{1,4}[ \t]+(?:第\s*)?([一二三四五六七八九十]{1,3})\s*[、.．章节]")
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7,
+           "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+# 承诺句的上下文词：只有"在讲结构/目录/文末"的句子里数承诺，避免把正文里的
+# "第三章的做法"当成章节承诺。
+_PROMISE_CTX = ("结构", "章节", "目录", "文末", "全文", "依次", "分别")
+# 末尾悬空的连接词/停顿符（中文写句不会停在这里）
+_DANGLING_TAIL = ("或", "及", "与", "和", "、", "，", ",", "：", ":", "；", ";",
+                  "的", "是", "为", "以", "对", "把", "在", "从", "由", "据", "如",
+                  "按", "含", "包括", "以及", "不得以", "例如", "即", "则", "且",
+                  "但", "而", "比如", "系", "应", "需", "将", "若", "当", "被")
+_UNCLOSED_TAIL = ("「", "『", "（", "(", "【", "《", "“", "**", "`", "|")
+
+
+def _main_body(text: str) -> str:
+    """正文主体：切掉**自动追加**的附录级章节（数据来源/参考来源/附录/免责声明…）。
+
+    必须切：生成器会在截断点**之后**再追加 `## 数据来源` 与图表行，只按整篇末尾判
+    "是否悬空"会把截断判成完整（实测样本正是这样）。
+    也要切掉**本模块自己盖的截断标注**（`truncation_note`）：标注落在截断点之后，
+    不切掉会把"末尾悬空"补成完整，闸门自己把自己的证据抹了。
+    """
+    s = str(text or "")
+    cut = len(s)
+    m = _APPENDIX_HEAD_RE.search(s)
+    if m:
+        cut = min(cut, m.start())
+    n = _NOTE_MARK_RE.search(s)
+    if n:
+        cut = min(cut, n.start())
+    return s[:cut]
+
+
+def _last_content_line(main: str) -> str:
+    """正文主体的最后一行**实质内容**（跳过空行/图片行/分隔线/纯图表引用）。"""
+    for ln in reversed(str(main or "").splitlines()):
+        s = ln.strip()
+        if not s or _IMAGE_ONLY_RE.match(s) or _HR_RE.match(s):
+            continue
+        return s
+    return ""
+
+
+def _last_heading_label(main: str) -> str:
+    """正文主体最后一个标题的编号（`4.1`、`四`…）；取不到就用标题文本。"""
+    heads = _HEADING_RE.findall(str(main or ""))
+    if not heads:
+        return ""
+    last = str(heads[-1]).strip()
+    m = re.match(r"^(?:第\s*)?([0-9]+(?:\.[0-9]+)*|[一二三四五六七八九十]{1,3})\s*[、.．章节]?", last)
+    if m:
+        return m.group(1)
+    return last[:24]
+
+
+def _delimiter_imbalance(main: str) -> dict:
+    """正文主体分隔符配对情况（差值为 0 才配对；`**`/反引号按奇偶）。"""
+    t = str(main or "")
+    pairs = {"「": "」", "『": "』", "（": "）", "【": "】", "《": "》"}
+    out: dict = {}
+    for op, cl in pairs.items():
+        diff = t.count(op) - t.count(cl)
+        if diff:
+            out[f"{op}{cl}"] = diff
+    if t.count("**") % 2:
+        out["**"] = t.count("**")
+    if t.count("`") % 2:
+        out["`"] = t.count("`")
+    return out
+
+
+def _promise_gap(main: str, text: str) -> dict:
+    """结构承诺 vs 实际标题：声明到第 N 章却只写到第 M 章、承诺的章节一处没有。"""
+    heads_text = str(text or "")
+    declared: set[int] = set()
+    promised_sections: set[str] = set()
+    for ln in str(main or "").splitlines():
+        if not any(c in ln for c in _PROMISE_CTX):
+            continue
+        for rom in _CHAPTER_RE.findall(ln):
+            if rom in _CN_NUM:
+                declared.add(_CN_NUM[rom])
+        if "文末" in ln or "附录" in ln or "声明" in ln or "参考来源" in ln:
+            for name in ("附录", "参考来源", "免责声明", "关键数据一览表"):
+                if name in ln:
+                    promised_sections.add(name)
+    actual = {_CN_NUM[r] for r in _CHAPTER_HEADING_RE.findall(heads_text)
+              if r in _CN_NUM}
+    head_names = "｜".join(_HEADING_RE.findall(heads_text))
+    missing = sorted(n for n in promised_sections if n not in head_names)
+    declared_max = max(declared) if declared else 0
+    actual_max = max(actual) if actual else 0
+    return {"declared_chapters": sorted(declared), "actual_chapters": sorted(actual),
+            "declared_max": declared_max, "actual_max": actual_max,
+            "chapter_gap": (declared_max - actual_max) if declared_max else 0,
+            "promised_sections": sorted(promised_sections), "missing_sections": missing}
+
+
+def detect_body_truncation(text: str, *, finish_reason: str = "") -> dict:
+    """判这份正文是不是**被截断**的（不完整）。返回证据字典，绝不改正文。
+
+    返回：`{"truncated", "reason", "section", "signals", "evidence"}`。
+    调用方（装配/版本登记/worker）据此：不得静默采纳、必须标注、必须降级为草稿。
+    """
+    body = str(text or "")
+    fr = str(finish_reason or "")
+    signals: list[str] = []
+    if fr == "length":
+        signals.append("finish_reason=length")
+    main = _main_body(body)
+    tail = _last_content_line(main)
+    imbalance = _delimiter_imbalance(main)
+    gap = _promise_gap(main, body)
+    section = _last_heading_label(main)
+    evidence: dict = {"body_chars": len(body), "main_chars": len(main),
+                      "finish_reason": fr, "tail": tail[-120:],
+                      "imbalance": imbalance, "section": section, **gap}
+    if len(body) >= TRUNCATION_MIN_CHARS:
+        if gap["chapter_gap"] >= 2:
+            signals.append(f"结构承诺未兑现：声明到第 {gap['declared_max']} 章，"
+                           f"实际只到第 {gap['actual_max']} 章")
+        if len(gap["missing_sections"]) >= 2:
+            signals.append("承诺的文末章节缺失：" + "、".join(gap["missing_sections"]))
+        tail_dangling = bool(tail) and (
+            tail.endswith(_UNCLOSED_TAIL) or tail.endswith(_DANGLING_TAIL)
+            or bool(tail.count("**") % 2) or bool(tail.count("`") % 2))
+        if tail_dangling:
+            signals.append(f"正文主体末尾悬空：{tail[-40:]!r}")
+        if imbalance:
+            signals.append("分隔符不配对：" + "、".join(
+                f"{k}{v:+d}" for k, v in imbalance.items()))
+        # ③与④必须同时成立（只有末尾悬空或只有一处不配对都可能是文风，不算截断）
+        heuristic = bool(gap["chapter_gap"] >= 2
+                         or len(gap["missing_sections"]) >= 2
+                         or (tail_dangling and bool(imbalance)))
+    else:
+        heuristic = False
+    truncated = bool(fr == "length" or heuristic)
+    if truncated:
+        why = signals[0] if signals else "正文被截断"
+        reason = f"正文在第 {section} 节截断，内容不完整" if section else \
+            "正文被截断，内容不完整"
+        reason += f"（{why}）"
+    else:
+        reason = ""
+    return {"truncated": truncated, "reason": reason, "section": section,
+            "signals": signals, "evidence": evidence}
+
+
+def is_body_truncated(text: str, *, finish_reason: str = "") -> bool:
+    """便捷谓词（只关心真假时用）。"""
+    return bool(detect_body_truncation(text, finish_reason=finish_reason).get("truncated"))
+
+
+def truncation_sentence(info: dict) -> str:
+    """一句话结论（写进 `delivery.draft_reason` / 验收 / 日志）。"""
+    if not isinstance(info, dict) or not info.get("truncated"):
+        return ""
+    sec = str(info.get("section") or "")
+    return (f"正文在第 {sec} 节截断，内容不完整" if sec
+            else "正文被截断，内容不完整")
+
+
+def truncation_note(info: dict) -> str:
+    """页面与交付物上的**显式标注**（引用块，读者第一眼就能看见）。"""
+    if not isinstance(info, dict) or not info.get("truncated"):
+        return ""
+    why = "；".join(str(s) for s in (info.get("signals") or [])[:3])
+    return (f"> ⚠️ **{truncation_sentence(info)}**——{why or '正文未写完'}。\n"
+            "> 本版正文不完整，只能作未验收草稿交付；"
+            "请重跑报告生成（或人工补全）后重新验收，不得当作完整交付。")
+
+
+def stamp_delivery_projection(structure: dict, projection: dict) -> dict:
+    """把**本版交付正文身份**盖进结构对象（`report_structure.json`）。
+
+    为什么盖：结构与正文可能来自两次装配（修订/候选采纳），页面按结构展示、按 DB 投影
+    展示正文——两边只有认同一份身份，读者看到的才是同一版。身份 = 交付字节 sha256 +
+    字符数 + 研究正文 sha256 + 选中版本身份 + 主文相对路径。
+    """
+    if not isinstance(structure, dict) or not isinstance(projection, dict):
+        return structure
+    structure["delivery_projection"] = dict(projection)
+    return structure
+
+
+def read_delivery_projection(task_id: str, *, ws_dir=None) -> dict:
+    """读结构对象里记着的交付正文身份（没有就返回 `{}`，不编）。"""
+    st = read_structure(task_id, ws_dir=ws_dir)
+    proj = (st or {}).get("delivery_projection")
+    return dict(proj) if isinstance(proj, dict) else {}
+
+
 def write_structure(task_id: str, structure: dict, *, ws_dir=None) -> None:
     """落盘结构化对象（页面/清单可读；失败只记日志）。"""
     try:

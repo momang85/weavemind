@@ -354,6 +354,18 @@ def clean_search_text(text: str) -> str:
     return t.strip()
 
 
+# 年份必须带数字边界：裸 `\d{4}` 会把 6 位证券代码（600887）切出前 4 位（6008）。
+# 实机反例（2026-10-22，任务 ui-b23642e5de，检索伊利股份 600887）：关键词变体变成
+# `6008 2023 2024 2025 …`，Bing 据此返回 SKF 深沟球轴承 6008、Windows 事件日志 6008
+# 等无关结果；`_query_tokens` 的年份集合同样把 6008 当"查询年份"，让垃圾结果白得分。
+_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+def _year_tokens(text: str) -> list[str]:
+    """4 位年份（1900–2099）：两侧不能是数字，避免从证券代码/金额里切出假年份。"""
+    return _YEAR_RE.findall(str(text or ""))
+
+
 def extract_keywords(text: str, policy: SearchQualityPolicy | None = None) -> str:
     """核心搜索词：去指令包装与停用词、保留年份，按停用词切出完整词段
     （避免 2-4 字滑窗把"新能源汽车/固态电池"拆成碎片）。"""
@@ -371,7 +383,7 @@ def extract_keywords(text: str, policy: SearchQualityPolicy | None = None) -> st
         for w in re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", t)
         if w.lower() not in pol.en_stop
     ]
-    years = re.findall(r"\d{4}", t)
+    years = _year_tokens(t)
     merged = list(dict.fromkeys(years + zh + en))
     return " ".join(merged)[:150]
 
@@ -505,7 +517,7 @@ def _query_tokens(query: str) -> tuple[set[str], set[str], set[str]]:
         for size in (4, 3, 2):
             if len(run) >= size:
                 tokens.update(run[i:i + size] for i in range(len(run) - size + 1))
-    year_tokens = {y for y in re.findall(r"\d{4}", clean)}
+    year_tokens = set(_year_tokens(clean))
     en_tokens = {w.lower() for w in re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", clean)}
     return tokens, year_tokens, en_tokens
 

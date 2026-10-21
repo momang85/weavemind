@@ -517,6 +517,41 @@ def _anchor_in(text: str, anchor: str) -> bool:
     return anchor in text
 
 
+# 包装词片段：出现在 4 字滑窗里就说明这个窗不是主题词（"研究海天"不是公司名）
+_STRONG_GATE_STOPS = (
+    "任务目标", "用户目标", "原始指令", "验收", "输出", "生成", "完成", "要求",
+    "研究", "分析", "总结", "梳理", "评估", "调研", "对比", "一下", "情况",
+)
+
+
+def _strong_subject_tokens(goal: str) -> tuple[str, ...]:
+    """目标强主题 token：连续中文段的 4 字滑窗（剔除含包装词片段的窗）。
+
+    用途：热词/来源的"完整公司名"级门控——2 字锚点（海天）分不清
+    「海天味业」与「海天」的汉语词典页（clean_data 实机反例，20261021 复验
+    P1-9）。取不到（短目标/无长词段）时返回空，调用方退回锚点门控。"""
+    # 顺序必须是**首次出现顺序**，不能是字母序：目标通常以「研究<公司名>…」开头，
+    # 按码点排序后截断会把公司名本身丢掉。实机反例（20261022 复验 (f)）：
+    # 目标「研究贵州茅台 2023 与 2024 两个年度的营业收入…」产出 42 个窗口，
+    # 字母序里「贵州茅台」排第 39，`[:12]` 恰好把它截掉 → 公司名级门控形同失效，
+    # 无来源（贵州省政府网等无关页）只能靠更弱的通用片段碰巧挡住。
+    # 上限同时放宽到 24：4 字窗总量本就有限，多留几个不会显著变慢，
+    # 但能保证开头的实体名一定在集合里。
+    out: list[str] = []
+    seen: set[str] = set()
+    for run in re.findall(r"[\u4e00-\u9fff]+", str(goal or "")):
+        if len(run) < 4:
+            continue
+        for i in range(len(run) - 3):
+            tok = run[i:i + 4]
+            if any(w in tok for w in _STRONG_GATE_STOPS):
+                continue
+            if tok not in seen:
+                seen.add(tok)
+                out.append(tok)
+    return tuple(out[:24])
+
+
 def _entity_names(goal: str) -> tuple[str, ...]:
     """目标实体：芯片类用别名表；其他主题用目标核心词（≥2 字、非停用词）。"""
     g = str(goal or "").lower()
@@ -620,6 +655,12 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
         if m:
             domains[m.group(1).replace("www.", "")] += 1
     topic_terms = Counter()
+    # 公司研究目标：热词只统计含**完整公司名级 token** 的文档。实机反例（20261021
+    # 复验 P1-9）：「海天」二字锚点放进了一个汉语词典页（hanyuguoxue.com/cidian/…），
+    # 热词图变成 任务/游戏/玩家/意思…——词频回答的是"这份词典页讲什么"，不是
+    # "目标公司讲什么"。锚点是 2 字 bigram，分不清「海天味业」与「海天」的意思；
+    # 4 字滑窗（海天味业）是更强的门控。取不到强 token（短目标）时维持锚点门控。
+    strong = _strong_subject_tokens(goal)
     for d in docs:
         text = _doc_text(d)
         # 结构化数据源的快照是**原始 JSON**（含接口字段名如 TOTALOPER_RATIO / _PK）：
@@ -630,6 +671,8 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
             continue
         tl = text.lower()
         if not any(_anchor_in(tl, a) for a in anchors):
+            continue
+        if strong and not any(s in text or s in tl for s in strong):
             continue
         for w in _tokenize(text):
             topic_terms[w] += 1

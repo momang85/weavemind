@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 import signal
 import time
@@ -37,6 +38,37 @@ from redis.retry import Retry as _Retry  # noqa: E402
 _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 
 logger = logging.getLogger(__name__)
+
+
+def percentile_nearest_rank(values, q: float = 0.95, positive_only: bool = True):
+    """最近秩法（nearest-rank）分位数；无有效样本返回 None。
+
+    默认 `positive_only=True` 丢弃 <=0 的值：本仓把"延迟 0 秒"当作**无数据哨兵**
+    （调用点的注释：「只认 >0 的有效值」，否则"没有数据"会伪装成"0 秒完成"）。
+    把它做进本函数而不是只留在调用点，是为了调用点将来漏写过滤时也不会被污染。
+    为什么单独抽出来：原实现是 `sorted(v)[int(len(v) * 0.95) - 1]`，**低一个秩**。
+    两个下标只有在 `len(v) * 0.95` 恰好是整数（len 为 20 的倍数）时才相同：
+
+        n   int(n*.95)-1   ceil(n*.95)-1   原实现实际取到
+        2        0               1        最小值（P95 应等于最大值）
+        3        1               2        中位数
+        9        7               8        第二大
+       20       18              18        一致
+
+    样本越小低估越严重（n=2 时把最小值当 P95）。`-1` 恒等于 `0` 只是 n=1 时的
+    巧合（`int(0.95)-1 == -1` 取到唯一元素），不是设计。
+    这里改用最近秩定义 `ceil(n*q)-1`，并对下标做钳制，n=1 时仍取该唯一样本。
+    """
+    def _usable(v) -> bool:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False
+        return v > 0 if positive_only else True
+
+    vals = sorted(v for v in values if _usable(v))
+    if not vals:
+        return None
+    idx = math.ceil(len(vals) * q) - 1
+    return vals[max(0, min(idx, len(vals) - 1))]
 
 # 输出文件。SUMMARY_FILE 与 web_ui._METRICS_SUMMARY 读同一环境变量、
 # 同一默认值（模块目录）——写读两端必须同源，否则容器里会出现
@@ -579,8 +611,9 @@ class MetricsCollector:
             latencies = [t.get("latency", 0) for t in self._recent_tasks
                          if isinstance(t.get("latency"), (int, float))
                          and t.get("latency") > 0]
-            p95 = (sorted(latencies)[int(len(latencies) * 0.95) - 1]
-                   if latencies else None)
+            # 最近秩法（见 percentile_nearest_rank 的说明）；原 `int(len*0.95)-1`
+            # 在样本数不是 20 的倍数时低一个秩，n=2 时会把最小值当 P95。
+            p95 = percentile_nearest_rank(latencies)
             # Redis 可达性一次判定，决定两处的"真 0"与"不可用(null)"之分：
             # - search_engine_health：不可达 → 空 dict（原行为）
             # - cost_usd_total：get_monthly_spend 在 Redis 不在时降级返回 0.0
