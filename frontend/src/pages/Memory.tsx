@@ -3,7 +3,9 @@ import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCi
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
 import { apiOutcome, readApiOutcome } from '../lib/apiResult'
-import { formatLocalTime } from '../lib/format'
+import { formatLocalTimeLabel, formatLocalTimeShort } from '../lib/timeText'
+import { auditMemorySummary } from '../lib/memorySummary'
+import { localizeEvolutionSummary, scoreMapText } from '../lib/evolutionText'
 
 interface MemoryHealth {
   injections: number
@@ -177,6 +179,14 @@ export default function Memory() {
   // 降级口径：embedding 不可用时命中率改按关键词兜底统计，避免误读成"没有经验"
   const mode: 'vector' | 'literal' | 'unavailable' = health.retrieval_mode ?? 'unavailable'
 
+  // S3：自述由 LLM 生成、数字措辞不稳定（实机把 464 条对话写成「464 项任务」）。
+  // 这里把自述里的数字主张与本页**实取**口径逐个对照，把结论写在自述下方；
+  // 不修改自述正文（那是模型输出，前端改写等于篡改来源）。
+  const summaryAudit = auditMemorySummary(summary, {
+    conversations: stats.conversations || health.conversation_count || 0,
+    strategies: stats.strategies || health.strategy_count || 0,
+  })
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
@@ -226,10 +236,12 @@ export default function Memory() {
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-violet-400 font-bold text-lg">{health.strategy_count}</div>
             <div className="text-slate-500 text-xs mt-0.5">策略条数</div>
+            <div className="text-slate-600 text-xs mt-0.5">记忆库策略集合条数（/api/memory），与下方「策略」chip 同源</div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-amber-400 font-bold text-lg">{health.conversation_count}</div>
             <div className="text-slate-500 text-xs mt-0.5">对话条数</div>
+            <div className="text-slate-600 text-xs mt-0.5">记忆库对话集合条数（/api/memory）；不是任务数——任务总数见「指标看板」</div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-slate-200 font-bold text-lg">{health.expired_purged}</div>
@@ -262,7 +274,21 @@ export default function Memory() {
             {summaryError}
           </p>
         )}
-        <p className="text-xs text-slate-600 mt-2">基于真实记忆数据生成，可直接用于发布到社交媒体。</p>
+        {summaryAudit.warnings.length > 0 && (
+          <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 space-y-1">
+            <div className="font-medium">自述数字核对：发现 {summaryAudit.warnings.length} 处对不上（自述由 LLM 生成，数字不被本页背书）</div>
+            {summaryAudit.warnings.map((w, i) => <div key={i}>· {w}</div>)}
+          </div>
+        )}
+        {summaryAudit.warnings.length === 0 && summaryAudit.confirmations.length > 0 && (
+          <div className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-300 space-y-1">
+            {summaryAudit.confirmations.map((c, i) => <div key={i}>· {c}</div>)}
+          </div>
+        )}
+        <p className="text-xs text-slate-500 mt-2">{summaryAudit.authorityNote}</p>
+        <p className={`text-xs mt-1 ${summaryAudit.warnings.length > 0 ? 'text-amber-400/90' : 'text-slate-600'}`}>
+          {summaryAudit.publishNote}
+        </p>
       </div>
 
       {/* 记忆库 */}
@@ -284,10 +310,16 @@ export default function Memory() {
                 {convs.length === 0 && <div className="text-slate-600 text-xs">暂无</div>}
                 {convs.map((c, i) => (
                   <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-amber-400/80 text-xs">目标</span>
-                      <span className="text-slate-300 text-xs truncate flex-1">{c.metadata.goal || (c.content || '').slice(0, 60)}</span>
-                      {c.metadata.timestamp && <span className="text-slate-600 text-xs">{String(c.metadata.timestamp).slice(0, 16)}</span>}
+                    <div className="flex items-start gap-2">
+                      <span className="text-amber-400/80 text-xs shrink-0">目标</span>
+                      <span className="text-slate-300 text-xs flex-1 break-words whitespace-pre-wrap">
+                        {c.metadata.goal || c.content || '未记录目标'}
+                      </span>
+                      {c.metadata.timestamp && (
+                        <span className="text-slate-600 text-xs shrink-0 whitespace-nowrap">
+                          {formatLocalTimeShort(c.metadata.timestamp)}
+                        </span>
+                      )}
                       {c.id && (
                         <button onClick={() => del('conversations', [c.id!])}
                           disabled={!!busyAction || demoMode}
@@ -309,7 +341,9 @@ export default function Memory() {
                     <button onClick={() => toggle('s' + i)}
                       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-800/60">
                       {expanded['s' + i] ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
-                      <span className="text-violet-300 text-xs truncate flex-1">{String(s.metadata.goal_keywords || '').slice(0, 60) || '策略'}</span>
+                      <span className="text-violet-300 text-xs flex-1 break-words">
+                        {String(s.metadata.goal_keywords || '').trim() || '未记录关键词'}
+                      </span>
                       {s.metadata.step_count && chip(`${s.metadata.step_count} 步`, 'bg-slate-700/50 text-slate-400')}
                       {s.id && (
                         <button onClick={() => del('strategies', [s.id!])}
@@ -351,7 +385,7 @@ export default function Memory() {
                   {chip(p.agent_type || 'search_agent', 'bg-slate-700/50 text-slate-400')}
                   {p.temperature != null && chip('温度 ' + p.temperature, 'bg-slate-700/50 text-slate-400')}
                   {p.max_sources != null && chip('源数 ' + p.max_sources, 'bg-slate-700/50 text-slate-400')}
-                  {p.timestamp && <span className="text-slate-600 text-xs ml-auto">{formatLocalTime(p.timestamp)}</span>}
+                  {p.timestamp && <span className="text-slate-600 text-xs ml-auto">{formatLocalTimeLabel(p.timestamp)}</span>}
                 </div>
                 <div className="mt-2 text-xs text-slate-400">
                   摘要提示：<span className="text-slate-300">{p.summarization_prompt || '—'}</span>
@@ -405,8 +439,12 @@ export default function Memory() {
                   className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-800/60">
                   <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="text-slate-300 text-xs font-medium truncate">{r.summary || '进化轮次'}</div>
-                    {r.timestamp && <div className="text-slate-600 text-xs">{formatLocalTime(r.timestamp)}</div>}
+                    <div className="text-slate-300 text-xs font-medium break-words">
+                      {localizeEvolutionSummary(r.summary) || '进化轮次（后端未回传摘要）'}
+                    </div>
+                    {r.timestamp && (
+                      <div className="text-slate-600 text-xs">{formatLocalTimeLabel(r.timestamp)}</div>
+                    )}
                   </div>
                   {r.stable ? chip('稳定', 'bg-emerald-500/15 text-emerald-400') : chip('不稳定', 'bg-amber-500/15 text-amber-400')}
                   {r.deployed ? chip('已部署', 'bg-cyan-500/15 text-cyan-400') : chip('未部署', 'bg-slate-700/50 text-slate-400')}
@@ -416,23 +454,48 @@ export default function Memory() {
                 {expanded['r' + i] && (
                   <div className="px-4 pb-4 border-t border-slate-800">
                     {(r.scoreboard && Object.keys(r.scoreboard).length > 0) && (
-                      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-                        {Object.entries(r.scoreboard).map(([k, v]) => (
-                          <div key={k} className="bg-slate-800/60 rounded-lg p-2 text-center">
-                            <div className="text-cyan-400 font-bold text-sm">{v}</div>
-                            <div className="text-slate-500 text-xs truncate">{k}</div>
-                          </div>
-                        ))}
+                      <div className="mt-3">
+                        <div className="text-xs text-slate-500 mb-1">
+                          各策略累计得分（取自 /api/evolution 的 scoreboard；评分口径由后端进化竞技场给出，本页不解释分值含义）
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          {Object.entries(r.scoreboard).map(([k, v]) => (
+                            <div key={k} className="bg-slate-800/60 rounded-lg p-2 text-center">
+                              <div className="text-cyan-400 font-bold text-sm">{v}</div>
+                              <div className="text-slate-500 text-xs break-words">{k}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(r.win_counts && Object.keys(r.win_counts).length > 0) && (
+                      <div className="mt-2 text-xs text-slate-500">
+                        取胜次数：{scoreMapText(r.win_counts) || '未取得'}
                       </div>
                     )}
                     <div className="mt-3 space-y-1.5">
                       {(r.rankings || []).map((rk, j) => (
-                        <div key={j} className="flex items-center gap-2 text-xs bg-slate-800/40 rounded-lg px-3 py-1.5">
-                          {rk.winner ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-slate-600 shrink-0" />}
-                          <span className="text-slate-400 truncate flex-1">{(rk.task || '').slice(0, 60)}</span>
-                          <span className="text-violet-400 shrink-0">{(rk.ranking || []).slice(0, 3).join(' → ') || rk.winner}</span>
+                        <div key={j} className="text-xs bg-slate-800/40 rounded-lg px-3 py-2">
+                          <div className="flex items-start gap-2">
+                            {rk.winner
+                              ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                              : <XCircle className="w-3.5 h-3.5 text-slate-600 shrink-0 mt-0.5" />}
+                            <span className="text-slate-300 flex-1 break-words">
+                              任务：{rk.task || '未记录任务'}
+                            </span>
+                          </div>
+                          <div className="mt-1 pl-5 text-slate-400 break-words">
+                            排名：{(rk.ranking || []).join(' → ') || rk.winner || '未取得'}
+                          </div>
                           {rk.scores && Object.keys(rk.scores).length > 0 && (
-                            <span className="text-slate-600 shrink-0">{JSON.stringify(rk.scores)}</span>
+                            <div className="mt-1 pl-5 text-slate-500 break-words">
+                              各方案得分：{scoreMapText(rk.scores)}
+                            </div>
+                          )}
+                          {rk.reason && (
+                            <div className="mt-1 pl-5 text-slate-500 break-words">
+                              评审理由：{rk.reason}
+                            </div>
                           )}
                         </div>
                       ))}

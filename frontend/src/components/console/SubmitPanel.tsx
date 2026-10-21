@@ -46,6 +46,7 @@ export default memo(function SubmitPanel({
   userContext, setUserContext, importMsg, setImportMsg,
   isRunning, demoMode, activeConversationId, lastGoal, reportSummary, status,
   taskId, etaText, elapsedText, onSubmit, onNewConversation,
+  formCollapsedByDefault,
 }: {
   goal: string
   setGoal: (v: string) => void
@@ -70,6 +71,8 @@ export default memo(function SubmitPanel({
   elapsedText?: string | null
   onSubmit: (goalOverride?: string, fields?: ResearchFields | null) => void
   onNewConversation: () => void
+  /** P2-4：?task=<id> 或已在跟踪某个任务时，研究表单默认折叠（第一屏先给任务本身） */
+  formCollapsedByDefault?: boolean
 }) {
   const [showContext, setShowContext] = useState(false)
   const [templates, setTemplates] = useState<any[]>([])
@@ -190,9 +193,11 @@ export default memo(function SubmitPanel({
       </div>
       {qa && <QuickAnswerCard qa={qa} onClose={() => setQa(null)} />}
 
-      {/* S2：研究一家公司（首发路径的默认入口）——只拼目标，不绕过自由输入框 */}
+      {/* S2：研究一家公司（首发路径的默认入口）——只拼目标，不绕过自由输入框。
+          P2-4：打开已有任务（?task=<id> 或本会话已提交）时默认收起，第一屏先给任务与报告。 */}
       <ResearchQuickForm
         disabled={isRunning || demoMode}
+        defaultOpen={!formCollapsedByDefault}
         onReady={(goalText, fields) => { setGoal(goalText); setResearchFields(fields) }} />
 
       {/* 输入区 */}
@@ -202,7 +207,7 @@ export default memo(function SubmitPanel({
         <textarea value={goal}
           onChange={e => { setGoal(e.target.value); if (researchFields) setResearchFields(null) }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit(undefined, researchFields) } }}
-          placeholder={demoMode ? 'Demo mode' : 'Enter a task for your AI team...'}
+          placeholder={demoMode ? '演示模式：不可提交真实任务' : '给 AI 团队下达研究任务…（例：研究贵州茅台 2023/2024 年营业收入与归母净利润）'}
           disabled={isRunning || demoMode}
           rows={1}
           className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
@@ -227,7 +232,7 @@ export default memo(function SubmitPanel({
           </select>
           <input value={project}
             onChange={e => setProject(e.target.value)}
-            placeholder="项目 (default)"
+            placeholder="项目（default）"
             title="任务所属项目（F1 多项目工作区）"
             className="hidden sm:block w-28 bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-300 placeholder-slate-600 shrink-0 focus:outline-none focus:border-cyan-500" />
           <label className="flex items-center gap-1.5 px-2 py-2 text-xs text-slate-400 cursor-pointer shrink-0">
@@ -239,7 +244,7 @@ export default memo(function SubmitPanel({
           <button onClick={() => onSubmit(undefined, researchFields)} disabled={isRunning || demoMode || !goal.trim()}
             title={demoMode ? '演示模式下不可提交真实任务' : '提交任务（Enter）'}
             className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
-            {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
+            {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> 执行中…</>) : (<><Sparkles className="w-4 h-4" /> 执行</>)}
           </button>
           {isRunning && taskId && (
             <button onClick={stopTask} disabled={stopping || demoMode}
@@ -321,16 +326,18 @@ export default memo(function SubmitPanel({
  * 只做一件事——把表单拼成**符合契约的目标**写进输入框（用户仍可继续手改），
  * 缺字段就把缺口显示出来，**不拼一个含糊的目标**提交（身份/期间不靠猜）。
  */
-function ResearchQuickForm({ disabled, onReady }: {
+function ResearchQuickForm({ disabled, onReady, defaultOpen = true }: {
   disabled: boolean
   onReady: (goal: string, fields: ResearchFields | null) => void
+  /** P2-4：已打开任务时默认收起（保留展开入口）；无任务时保持现状=展开 */
+  defaultOpen?: boolean
 }) {
   const [form, setForm] = useState<ResearchForm>({
     company: '', companyId: '', market: '', yearFrom: '', yearTo: '',
     caliber: '合并', asOf: '', materials: '', perspective: 'equity',
   })
   const [gaps, setGaps] = useState<string[]>([])
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(defaultOpen)
   const preview = buildResearchGoal(form)
 
   const fill = () => {

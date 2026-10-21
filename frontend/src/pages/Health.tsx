@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Clock, TrendingUp, Shield, Activity, Play, Heart, Skull, FlaskConical, Plus, Cpu, RefreshCw, AlertTriangle } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
+import { getAuthUser } from '../auth'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
+import { eventTypeLabel, formatEventTime, readableEventMessage } from '../lib/healthEvents'
 
 interface HealthEvent {
   id: string; timestamp: string
@@ -30,7 +32,7 @@ const typeConf: Record<string,{icon:typeof Plus;color:string;bg:string;border:st
 function formatUptime(sec: number): string {
   if (!sec || sec < 0) return '-'
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
+  return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分`
 }
 
 export default function HealthPage() {
@@ -42,6 +44,24 @@ export default function HealthPage() {
   const [events, setEvents] = useState<HealthEvent[]>(DEMO_EVENTS)
   const [live, setLive] = useState(false)
   const [loadError, setLoadError] = useState(false)
+  // 代码执行沙箱（/api/health.code_sandbox）：与「进化沙箱」是两回事，过去本页完全没有它，
+  // 于是 docker 隔离不可用、代码执行被拒绝时页面照样全绿。
+  const [sandbox, setSandbox] = useState<{ available: boolean; reason: string; note: string } | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    fetch('/api/health').then(r => r.json()).then(d => {
+      if (!alive) return
+      const cs = d?.code_sandbox
+      if (!cs) return
+      setSandbox({
+        available: cs.execution_available !== false,
+        reason: String(cs.isolation_reason || '').trim(),
+        note: String(cs.isolation_note || '').trim(),
+      })
+    }).catch(() => { /* 拿不到就不显示这一行，不编造 */ })
+    return () => { alive = false }
+  }, [])
 
   const loadEvents = useCallback(async () => {
     try {
@@ -80,19 +100,19 @@ export default function HealthPage() {
 
   const triggerEvolution = async () => {
     const id = 'man-' + Date.now()
-    setEvents(prev => [{ id, timestamp: new Date().toLocaleTimeString(), type: 'evolution', message: 'Triggering evolution...' }, ...prev])
+    setEvents(prev => [{ id, timestamp: new Date().toLocaleTimeString(), type: 'evolution', message: '正在触发进化…' }, ...prev])
     try {
       const res = await fetch('/api/evolution/trigger', { method: 'POST' })
       const data = await res.json()
       setEvents(prev => prev.map(e => e.id === id
-        ? { ...e, message: data.status === 'triggered' ? 'Evolution started' : 'Failed: ' + (data.message || '') }
+        ? { ...e, message: data.status === 'triggered' ? '进化轮次已启动' : '失败：' + (data.message || '') }
         : e))
     } catch {
-      setEvents(prev => prev.map(e => e.id === id ? { ...e, message: 'Failed - backend unreachable' } : e))
+      setEvents(prev => prev.map(e => e.id === id ? { ...e, message: '失败——后端不可达' } : e))
     }
   }
 
-  const lastEvolution = events.find(e => e.type === 'evolution' && !e.message.startsWith('Triggering'))
+  const lastEvolution = events.find(e => e.type === 'evolution' && !e.message.startsWith('正在触发'))
   const guardianOk = connected && events.some(e => e.type === 'guardian' || e.type === 'recovery' || e.type === 'crash')
 
   return (
@@ -105,10 +125,10 @@ export default function HealthPage() {
       )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { icon: Clock, label: 'Uptime', value: formatUptime(uptime), color: 'text-cyan-400' },
-          { icon: TrendingUp, label: 'Tasks Today', value: String(tasksToday), color: 'text-emerald-400' },
-          { icon: Shield, label: 'Survival Rate', value: `${survival}%`, color: 'text-violet-400' },
-          { icon: Cpu, label: 'LLM Tokens', value: tokenLabel, color: 'text-amber-400' },
+          { icon: Clock, label: '运行时长', value: formatUptime(uptime), color: 'text-cyan-400' },
+          { icon: TrendingUp, label: '今日任务', value: String(tasksToday), color: 'text-emerald-400' },
+          { icon: Shield, label: '存活率', value: `${survival}%`, color: 'text-violet-400' },
+          { icon: Cpu, label: '模型 Token', value: tokenLabel, color: 'text-amber-400' },
         ].map(m => (
           <div key={m.label} className="bg-slate-900 border border-slate-800 rounded-xl p-5">
             <div className="flex items-center gap-2 text-slate-500 text-xs mb-3"><m.icon className="w-4 h-4" />{m.label}</div>
@@ -120,9 +140,9 @@ export default function HealthPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 sm:gap-5">
         <div className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
-            <div className="flex items-center gap-2 text-sm text-slate-300 font-medium"><Activity className="w-4 h-4 text-cyan-400" />Event Timeline</div>
+            <div className="flex items-center gap-2 text-sm text-slate-300 font-medium"><Activity className="w-4 h-4 text-cyan-400" />事件时间线</div>
             <span className={`text-xs ${loadError ? 'text-amber-400' : 'text-slate-600'}`}>
-              {loadError ? '后端不可达 · 演示数据' : (live ? 'Live' : 'Demo')}
+              {loadError ? '后端不可达 · 演示数据' : (live ? '实时' : '演示')}
             </span>
           </div>
           <div className="divide-y divide-slate-800/50 max-h-[500px] overflow-y-auto">
@@ -134,11 +154,11 @@ export default function HealthPage() {
                   <Icon className={`w-4 h-4 ${cfg.color} shrink-0 mt-0.5`} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-mono text-slate-600">{e.timestamp}</span>
+                      <span className="text-xs font-mono text-slate-600" title={e.timestamp}>{formatEventTime(e.timestamp)}</span>
                       {e.agent && <span className="text-xs text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">{e.agent}</span>}
-                      <span className="text-xs uppercase text-slate-600">{e.type}</span>
+                      <span className="text-xs text-slate-600">{eventTypeLabel(e.type)}</span>
                     </div>
-                    <p className="text-sm text-slate-400 mt-0.5">{e.message}</p>
+                    <p className="text-sm text-slate-400 mt-0.5">{readableEventMessage(e.message)}</p>
                   </div>
                 </div>
               )
@@ -148,23 +168,40 @@ export default function HealthPage() {
 
         <div className="col-span-2 space-y-5">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <h3 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-4"><Heart className="w-4 h-4 text-rose-400" />Health Checks</h3>
+            <h3 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-4"><Heart className="w-4 h-4 text-rose-400" />健康检查</h3>
             {[
-              { label: 'Orchestrator', ok: connected, icon: Cpu },
-              { label: 'Worker Pool', ok: agents.length > 0, icon: Shield },
-              { label: 'Guardian', ok: guardianOk, icon: RefreshCw },
+              { label: '编排器', ok: connected, icon: Cpu },
+              { label: 'Worker 池', ok: agents.length > 0, icon: Shield },
+              { label: '守护进程', ok: guardianOk, icon: RefreshCw },
             ].map(c => (
               <div key={c.label} className="flex items-center justify-between py-2.5 border-b border-slate-800/50 last:border-0">
                 <div className="flex items-center gap-2 text-sm"><c.icon className={`w-4 h-4 ${c.ok ? 'text-emerald-400' : 'text-red-400'}`} /><span className="text-slate-400">{c.label}</span></div>
-                <span className={`text-xs font-medium ${c.ok ? 'text-emerald-400' : 'text-red-400'}`}>{c.ok ? 'OK' : 'DOWN'}</span>
+                <span className={`text-xs font-medium ${c.ok ? 'text-emerald-400' : 'text-red-400'}`}>{c.ok ? '正常' : '异常'}</span>
               </div>
             ))}
+            <div className="flex items-start justify-between gap-3 py-2.5">
+              <div className="flex items-start gap-2 text-sm">
+                <FlaskConical className={`w-4 h-4 mt-0.5 ${sandbox ? (sandbox.available ? 'text-emerald-400' : 'text-red-400') : 'text-slate-600'}`} />
+                <div>
+                  <div className="text-slate-400">代码执行沙箱</div>
+                  {sandbox && !sandbox.available && (
+                    <div className="text-xs text-amber-400/90 mt-0.5">
+                      {sandbox.reason || '容器隔离不可用'}——代码执行会被拒绝（工作台与其余功能不受影响）
+                    </div>
+                  )}
+                </div>
+              </div>
+              <span className={`text-xs font-medium shrink-0 ${!sandbox ? 'text-slate-600' : sandbox.available ? 'text-emerald-400' : 'text-red-400'}`}>
+                {!sandbox ? '未取得' : sandbox.available ? '正常' : '不可用'}
+              </span>
+            </div>
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
             <h3 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-4"><FlaskConical className="w-4 h-4 text-violet-400" />进化沙箱</h3>
             <div className="space-y-3 text-sm">
-              {[['上次运行', lastEvolution ? String(lastEvolution.timestamp).slice(0, 19) : '—'], ['状态', lastEvolution ? '已完成' : '空闲']].map(([k, v]) => (
+              {[['上次运行', lastEvolution ? (formatEventTime(lastEvolution.timestamp) || '未取得') : '从未运行'],
+                 ['状态', lastEvolution ? '已完成' : '空闲']].map(([k, v]) => (
                 <div key={k} className="flex justify-between"><span className="text-slate-500">{k}</span><span className="text-slate-300">{v}</span></div>
               ))}
             </div>
@@ -173,7 +210,7 @@ export default function HealthPage() {
               className="mt-4 w-full flex items-center justify-center gap-2 py-2.5 bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 rounded-lg text-sm font-medium transition-colors border border-violet-500/20 disabled:opacity-40">
               <Play className="w-3.5 h-3.5" />触发一轮进化
             </button>
-            <p className="text-xs text-slate-600 mt-2 text-center">需要管理员确认</p>
+            <p className="text-xs text-slate-600 mt-2 text-center">{getAuthUser()?.role === 'admin' ? '仅管理员可触发；会真实消耗模型额度' : '需要管理员权限'}</p>
           </div>
         </div>
       </div>

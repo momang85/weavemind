@@ -12,6 +12,7 @@ import {
   ChevronDown, ChevronRight, AlertTriangle, CheckCircle2,
 } from 'lucide-react'
 import { Card, SectionTitle, Alert, EmptyState } from '../components/ui'
+import { humanReviewLabel, researchStateLabel } from '../lib/statusMeta'
 
 type Role = 'financial' | 'market' | 'events' | 'calendar' | 'credit_labels' | 'fraud_labels'
 /** 特殊用途标记：整份替换模板的真实研究规格（spec.json），不继承样例的 synthetic/元数据。 */
@@ -624,8 +625,8 @@ export default function ResearchStudy() {
 
       <Alert tone="warn" title="先看清这份产物的性质">
         <div className="space-y-1">
-          <div>① 内置样例公司/证券代码/财务/新闻/行情/日历/标签**全部为模拟**：只验证流程，不证明收益或风险模型有效性。</div>
-          <div>② 输出是**内部研究草稿**，人工未复核；**不自动采纳**、不进 MD/PDF/ZIP 交付包、不对外分发。</div>
+          <div>① 内置样例公司/证券代码/财务/新闻/行情/日历/标签<b className="text-slate-200 font-semibold">全部为模拟</b>：只验证流程，不证明收益或风险模型有效性。</div>
+          <div>② 输出是<b className="text-slate-200 font-semibold">内部研究草稿</b>，人工未复核；<b className="text-slate-200 font-semibold">不自动采纳</b>、不进 MD/PDF/ZIP 交付包、不对外分发。</div>
           <div>③ 学校/供应商的“允许查看”不等于商业使用或云端处理授权；许可状态在本入口一律未核实。</div>
         </div>
       </Alert>
@@ -699,7 +700,7 @@ export default function ResearchStudy() {
               disabled={!!specFileName()}
               className="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 disabled:opacity-50" />
           </label>
-          <div className="text-xs text-slate-400">预览后需逐个勾选确认的**文件内主体**
+          <div className="text-xs text-slate-400">预览后需逐个勾选确认的<b className="text-slate-200 font-semibold">文件内主体</b>
             <div className="mt-1 text-slate-500">公司身份只从文件读，不按请求里的名字替换材料</div>
           </div>
         </div>
@@ -816,7 +817,7 @@ export default function ResearchStudy() {
           <div className="mt-4 space-y-3">
             <Alert tone={run.status === 'exists' ? 'warn' : 'info'} title={run.note}>
               <div>研究ID：<span className="font-mono">{String(run.study_id ?? '').slice(0, 16)}…</span>；
-                模拟数据：{String(run.synthetic)}；研究状态 {run.research_state} / 人工 {run.human_review}</div>
+                模拟数据：{run.synthetic ? '是（模拟）' : '否（真实）'}；研究状态 {researchStateLabel(run.research_state)} / 人工 {humanReviewLabel(run.human_review)}</div>
               <div>目录：<span className="font-mono">{run.dir}</span></div>
               <div>外部交付：{JSON.stringify(run.external_delivery ?? {})}</div>
               {run.restore_basis && (
@@ -927,7 +928,7 @@ export default function ResearchStudy() {
                 结果哈希 <span className="font-mono">{String(selStudy.result_hash ?? '').slice(0, 16)}…</span></div>
               <div>{selStudy.name || '—'}</div>
               <div>特征截止 {selStudy.feature_cutoff || '—'} · 评价截止 {selStudy.evaluation_as_of || '—'}；
-                研究状态 {selStudy.research_state || '—'} / 人工 {selStudy.human_review || '—'}</div>
+                研究状态 {researchStateLabel(selStudy.research_state)} / 人工 {humanReviewLabel(selStudy.human_review)}</div>
               <div>模型周期 {((selStudy.spec?.financial ?? {}).periods ?? []).join('、') || '—'}；
                 主体 {(selStudy.subjects ?? []).join('、') || '—'}</div>
             </div>
@@ -966,10 +967,10 @@ export default function ResearchStudy() {
                     <div>人工复核：<b className="text-amber-300">{report.states.human?.status ?? '—'}</b>
                       <span className="text-slate-500">（{report.states.human?.basis ?? ''}）</span></div>
                     <div className="text-slate-500">研究目录自身状态：
-                      {String(report.study_catalog_research_state ?? '—')}（只描述该研究目录，不代替本版报告的研究状态）</div>
+                      {report.study_catalog_research_state ? researchStateLabel(report.study_catalog_research_state) : '—'}（只描述该研究目录，不代替本版报告的研究状态）</div>
                   </div>
                 ) : (
-                  <div>研究状态 {report.research_state} / 人工 {report.human_review}；
+                  <div>研究状态 {researchStateLabel(report.research_state)} / 人工 {humanReviewLabel(report.human_review)}；
                     机器验收 {String((report.acceptance ?? {})?.status ?? report.acceptance ?? '—')}</div>
                 )}
                 <div>外部交付 {JSON.stringify(report.external_delivery ?? {})}</div>
@@ -1293,8 +1294,8 @@ export default function ResearchStudy() {
                     <td>{(s.subjects ?? []).join('、') || '—'}</td>
                     <td>{s.feature_cutoff || '—'}</td>
                     <td>{s.synthetic ? '模拟' : '真实'}</td>
-                    <td>{s.research_state || '—'}</td>
-                    <td>{s.human_review || '—'}</td>
+                    <td>{researchStateLabel(s.research_state)}</td>
+                    <td>{humanReviewLabel(s.human_review)}</td>
                     <td className="text-right tabular-nums align-top">
                       <details>
                         <summary className="cursor-pointer list-none">{(s.artifacts ?? []).length} 件</summary>

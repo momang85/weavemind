@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Save, RotateCcw, Key, Cpu, Clock, Shield, Server, Bell, CalendarClock, Plus, Trash2, Activity, Users, AlertTriangle, CheckCircle2, PlugZap } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
-import { resultLabel } from '../lib/statusMeta'
+import {
+  groupDegradedRequirements, requirementFieldLabel,
+} from '../lib/depHealth'
+import { balanceStatusText, roleLabel, scheduledResultLabel } from '../lib/settingsText'
+import { formatLocalTimeLabel } from '../lib/timeText'
 import { LoadingBlock } from '../components/ui'
 
 // ── T1 通知配置 ───────────────────────────────────────────────
@@ -114,18 +118,18 @@ function ScheduledJobsSection() {
             onChange={e => act('update', { job: { ...j, enabled: e.target.checked }, name: j.name })}
             className="accent-cyan-500 disabled:opacity-40" />
           <div className="flex-1 min-w-0">
-            <div className="text-sm text-slate-200 truncate">{j.name}
+            <div className="text-sm text-slate-200 break-words">{j.name}
               <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400">{j.cron ? `每日 ${j.cron}` : `每 ${j.interval_minutes} 分钟`}</span>
               <span className="ml-2 text-xs px-2 py-0.5 rounded bg-violet-500/10 text-violet-400">{j.project}</span>
             </div>
-            <div className="text-xs text-slate-500 truncate mt-1">{j.goal}</div>
+            <div className="text-xs text-slate-500 break-words mt-1">{j.goal}</div>
             {(() => {
               const rec = lastFire(j.name)
               if (!rec) return null
               const bad = rec.result === 'error'
               return (
                 <div className={`text-xs mt-1 ${bad ? 'text-red-400' : 'text-slate-600'}`}>
-                  上次：{rec.time || '-'} · {resultLabel(rec.result)}
+                  上次：{rec.time ? formatLocalTimeLabel(rec.time) : '未知（本次运行内尚无该任务的触发记录）'} · {scheduledResultLabel(rec.result)}
                   {rec.task_id ? ` · ${rec.task_id}` : ''}
                   {rec.detail ? `（${rec.detail}）` : ''}
                 </div>
@@ -360,15 +364,24 @@ export default function SettingsPage() {
   }
 
   const problemCount = (req?.degraded?.length || 0) + (req?.missing_required?.length || 0)
+  // 降级项按**相同原因**合并：实机上 3 个字段共用同一条 400（embedding 端点），
+  // 旧实现逐字段直出原始 JSON，看起来像 3 个不同故障。
+  const allEntries = (req?.sections || []).flatMap(s => s.entries)
+  const issueGroups = groupDegradedRequirements(
+    (req?.degraded || []).map(p => {
+      const e = allEntries.find(x => x.path === p)
+      return { path: p, label: e?.label, reason: e?.health_reason }
+    }),
+  )
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-slate-200 font-semibold text-lg">Settings</h1>
+        <h1 className="text-slate-200 font-semibold text-lg">设置</h1>
         <div className="flex items-center gap-3">
           <button onClick={() => { setValues(loadedRef.current); setDirty(new Set()); setError(''); setIssues([]) }}
             className="flex items-center gap-2 px-4 py-2 text-sm text-slate-400 hover:text-slate-300 bg-slate-800/50 hover:bg-slate-800 rounded-lg transition-colors border border-slate-700/50">
-            <RotateCcw className="w-4 h-4" /> Reset
+            <RotateCcw className="w-4 h-4" /> 重置
           </button>
           <button onClick={save} disabled={demoMode}
             title={demoMode ? '演示模式下已停用（保存会真实改写配置）' : '保存配置（写回 config.json）'}
@@ -387,22 +400,46 @@ export default function SettingsPage() {
       <section className={`border rounded-xl p-5 space-y-3 ${problemCount > 0 ? 'bg-red-500/5 border-red-500/30' : 'bg-emerald-500/5 border-emerald-500/20'}`}>
         <h2 className="flex items-center gap-2 text-sm font-medium text-slate-200">
           {problemCount > 0 ? <AlertTriangle className="w-4 h-4 text-red-400" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
-          {problemCount > 0 ? `需要处理：${problemCount} 项` : '所有必需的端点与依赖均正常'}
+          {problemCount > 0
+            ? `需要处理：${problemCount} 项配置${issueGroups.length > 0 ? `（由 ${issueGroups.length} 个原因引起）` : ''}`
+            : '所有必需的端点与依赖均正常'}
         </h2>
-        {req?.degraded?.length ? (
-          <div className="text-xs text-red-300 space-y-1">
-            {req.degraded.map(p => {
-              const entry = req.sections.flatMap(s => s.entries).find(e => e.path === p)
-              return <div key={p}>· {entry?.label || p}（{p}）：{entry?.health_reason?.slice(0, 120) || '异常'}</div>
-            })}
+        {issueGroups.length > 0 && (
+          <div className="text-xs text-red-300 space-y-3">
+            {issueGroups.map(g => (
+              <div key={g.key} className="border border-red-500/20 rounded-lg px-3 py-2 space-y-1">
+                <div className="text-red-200">结论：{g.view.conclusion}</div>
+                <div className="text-red-300/90">建议：{g.view.advice}</div>
+                <div className="text-slate-400">
+                  受影响 {g.fields.length} 项配置：{g.fields.join('、')}
+                </div>
+                <details className="text-slate-400">
+                  <summary className="cursor-pointer select-none">查看服务端原始报文（原样，不做截断）</summary>
+                  <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-slate-500">
+                    {g.view.raw || '（服务端未回传 health_reason）'}
+                  </pre>
+                  {g.view.rawNote && <div className="mt-1 text-amber-300/90">{g.view.rawNote}</div>}
+                </details>
+              </div>
+            ))}
+          </div>
+        )}
+        {req?.missing_required?.length ? (
+          <div className="text-xs text-amber-300">
+            · 必需项未配置（{req.missing_required.length} 项）：
+            {req.missing_required
+              .map(p => requirementFieldLabel(allEntries.find(e => e.path === p)?.label, p))
+              .join('、')}
           </div>
         ) : null}
-        {req?.missing_required?.length ? (
-          <div className="text-xs text-amber-300">· 必需项未配置：{req.missing_required.join('、')}</div>
-        ) : null}
         <div className="text-xs text-slate-500">
-          余额：主端点 {req?.balance?.primary?.reason || '-'} · 备用 {req?.balance?.backup?.reason || '-'}
+          余额：主端点 {balanceStatusText(req?.balance?.primary?.ok, req?.balance?.primary?.reason)}
+          {' · '}备用 {balanceStatusText(req?.balance?.backup?.ok, req?.balance?.backup?.reason)}
           {req?.budget?.limit_usd ? ` · 本月已用 $${req.budget.spend_usd ?? 0} / $${req.budget.limit_usd}` : ''}
+          <span className="text-slate-600">
+            （口径：主/备为 LLM 端点预检结果——能否连通、鉴权是否通过、额度是否够用，不是金额读数；
+            「本月已用」取 Redis llm_usage_month 月度台账，与指标页「本月累计成本」同本账，不是历史总额）
+          </span>
         </div>
       </section>
 
@@ -437,7 +474,9 @@ export default function SettingsPage() {
             {testResult[testable || ''] && (
               <div className={`text-xs rounded-lg px-3 py-2 ${testResult[testable || ''].ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>
                 {testResult[testable || ''].ok ? '连通正常' : '异常'} · {testResult[testable || ''].latency_ms}ms
-                {testResult[testable || ''].reason ? ` · ${testResult[testable || ''].reason}` : ''}
+                {testResult[testable || ''].reason
+                  ? ` · ${balanceStatusText(testResult[testable || ''].ok, testResult[testable || ''].reason)}`
+                  : ''}
               </div>
             )}
             {groups.length > 0 ? groups.map(g => (
@@ -498,16 +537,18 @@ function UsersSection() {
           <div className="flex-1 min-w-0">
             <div className="text-sm text-slate-200">
               {u.username}
-              <span className={`ml-2 text-xs px-2 py-0.5 rounded ${u.role === 'admin' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-slate-700/40 text-slate-400'}`}>{u.role}</span>
+              <span className={`ml-2 text-xs px-2 py-0.5 rounded ${u.role === 'admin' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-slate-700/40 text-slate-400'}`}>{roleLabel(u.role)}</span>
             </div>
-            <div className="text-xs text-slate-600 mt-1">创建于 {u.created_at || '-'}</div>
+            <div className="text-xs text-slate-600 mt-1">
+              创建于 {u.created_at ? formatLocalTimeLabel(u.created_at) : '未知（服务端未记录创建时间）'}
+            </div>
           </div>
           <select value={u.role} disabled={demoMode}
             title={demoMode ? '演示模式下已停用（会真实改用户权限）' : '修改该用户角色'}
             onChange={e => act('POST', '/api/users', { username: u.username, role: e.target.value })}
             className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 disabled:opacity-40">
-            <option value="admin">admin</option>
-            <option value="viewer">viewer</option>
+            <option value="admin">管理员</option>
+            <option value="viewer">只读用户</option>
           </select>
           <button onClick={() => {
             const pwd = window.prompt(`为 ${u.username} 设置新密码（至少 8 位）`)
@@ -531,8 +572,8 @@ function UsersSection() {
           className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200" />
         <select value={form.role} onChange={e => setForm({ ...form, role: e.target.value })}
           className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200">
-          <option value="viewer">viewer</option>
-          <option value="admin">admin</option>
+          <option value="viewer">只读用户</option>
+          <option value="admin">管理员</option>
         </select>
         <button onClick={async () => {
           const ok = await act('POST', '/api/users', form)

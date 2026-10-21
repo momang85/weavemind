@@ -8,6 +8,22 @@ import { normalizeDeliverySummary } from '../lib/format'
 import { formatLocalTime } from '../lib/format'
 import { requestResume, resumeBlockedReason, resumeButtonState, resumeVisible, beginResumeNote, applyResumeResult, type ResumeNote } from '../lib/resume'
 
+/** 后端列表接口的单页条数上限（web_ui.py `_list_tasks(50)` / `_list_conversations(50)`）。 */
+const LIST_LIMIT = 50
+
+/** 命中上限时如实告知"只显示了最近 N 条"，并指向能看到总条数的地方。 */
+function ListLimitNote({ shown, noun }: { shown: number; noun: string }) {
+  if (shown < LIST_LIMIT) return (
+    <p className="text-xs text-slate-600 px-1">共 {shown} 条{noun}。</p>
+  )
+  return (
+    <p className="text-xs text-amber-400/80 px-1">
+      只显示最近 {LIST_LIMIT} 条{noun}（按时间倒序）——更早的记录没有列在这里，
+      并不代表已丢失；完整条数见「指标看板」的「总任务数」。
+    </p>
+  )
+}
+
 export default function History() {
   const [mode, setMode] = useState<'conv' | 'tasks'>('conv')
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
@@ -131,22 +147,23 @@ export default function History() {
 
       {mode === 'conv' && (
         <div className="space-y-3">
+          {conversations.length > 0 && <ListLimitNote shown={conversations.length} noun="对话" />}
           {conversations.length === 0 && (
             <EmptyState title="暂无对话记录"
               description="在任务控制台提交一个任务后，这里会出现对话与报告入口；也可以点右上「任务」按单次任务查看。" />
           )}
           {conversations.map(c => (
             <div key={c.conversation_id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-              <div className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-slate-800/30 transition-colors">
+              <div className="w-full flex flex-wrap items-center gap-x-3 gap-y-2 px-4 sm:px-5 py-4 text-left hover:bg-slate-800/30 transition-colors">
                 <button onClick={() => expandConversation(c.conversation_id)}
-                  className="flex items-center gap-3 flex-1 min-w-0">
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1.5 flex-1 min-w-0 text-left">
                   {expanded.has(c.conversation_id)
                     ? <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
                     : <ChevronRight className="w-4 h-4 text-slate-500 shrink-0" />}
                   <MessagesSquare className="w-4 h-4 text-violet-400 shrink-0" />
-                  <span className="flex-1 text-slate-300 text-sm truncate">{c.title || '(空对话)'}</span>
+                  <span className="flex-1 min-w-[9rem] text-slate-300 text-sm truncate">{c.title || '(空对话)'}</span>
                   <span className="text-slate-600 text-xs shrink-0">{c.message_count} 条消息</span>
-                  <StatusBadge status={c.last_status || 'PENDING'} />
+                  <span className="shrink-0"><StatusBadge status={c.last_status || 'PENDING'} /></span>
                   <span className="text-slate-600 text-xs shrink-0">
                     {formatLocalTime(c.last_updated)}
                   </span>
@@ -194,6 +211,7 @@ export default function History() {
 
       {mode === 'tasks' && (
         <div className="space-y-3">
+          {tasks.length > 0 && <ListLimitNote shown={tasks.length} noun="任务" />}
           {tasks.length === 0 ? (
             <EmptyState title="暂无任务记录"
               description="提交任务后，这里按单次任务列出状态、报告与验收缺口。" />
@@ -202,19 +220,19 @@ export default function History() {
               <div key={t.task_id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
                 <button
                   onClick={() => toggle('task-' + t.task_id)}
-                  className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-slate-800/30 transition-colors"
+                  className="w-full flex flex-wrap items-center gap-x-3 gap-y-2 px-4 sm:px-5 py-4 text-left hover:bg-slate-800/30 transition-colors"
                 >
                   {expanded.has('task-' + t.task_id)
-                    ? <ChevronDown className="w-4 h-4 text-slate-500" />
-                    : <ChevronRight className="w-4 h-4 text-slate-500" />}
-                  <FileText className="w-4 h-4 text-cyan-400" />
-                  <span className="flex-1 text-slate-300 text-sm truncate">{t.goal}</span>
+                    ? <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
+                    : <ChevronRight className="w-4 h-4 text-slate-500 shrink-0" />}
+                  <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span className="flex-1 min-w-[9rem] text-slate-300 text-sm truncate">{t.goal}</span>
                   {t.project && (
                     <span className="text-xs px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 shrink-0">
                       {t.project}
                     </span>
                   )}
-                  <StatusBadge status={t.status} />
+                  <span className="shrink-0"><StatusBadge status={t.status} /></span>
                   <span className="text-slate-600 text-xs">{formatLocalTime(t.created_at)}</span>
                 </button>
                 {expanded.has('task-' + t.task_id) && (

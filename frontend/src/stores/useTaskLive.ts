@@ -153,6 +153,25 @@ export function useTaskLive(taskId: string | null) {
             ? { overall: d.acceptance.overall || d.status, gaps: d.acceptance.gaps }
             : undefined,
         }
+        // P0-4/P1-8：SSE/快照里没有 export / elapsed_sec / search_coverage（快照是任务行投影，
+        // 不是任务页 payload）。不补这几项：导出面板读不到包名会误报"暂无交付包"，
+        // 统计条会把跑了 23 分钟的任务写成"耗时 0s"、拿不到检索降级数。
+        try {
+          const r2 = await fetch('/task/' + taskId)
+          if (r2.ok) {
+            const dd = await r2.json()
+            reportObj.export = dd.export ?? null
+            if (typeof dd.elapsed_sec === 'number') {
+              reportObj.elapsedSec = dd.elapsed_sec
+              reportObj.stats.duration = dd.elapsed_sec
+            }
+            reportObj.searchCoverage = dd.search_coverage ?? null
+            reportObj.research = dd.research ?? null
+            if (!reportObj.acceptance && dd.acceptance && Array.isArray(dd.acceptance.gaps)) {
+              reportObj.acceptance = { overall: dd.acceptance.overall || dd.status, gaps: dd.acceptance.gaps }
+            }
+          }
+        } catch { /* 任务详情读不到：导出面板按"文件逐个下载"的口径显示，不误报有包 */ }
         try {
           const dl = await (await fetch('/api/task/' + taskId + '/deliverables')).json()
           reportObj.files = (dl.files ?? []).map((f: any) => ({ name: f.name, size: f.size, kind: f.kind }))

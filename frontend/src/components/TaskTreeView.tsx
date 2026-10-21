@@ -1,4 +1,4 @@
-import { useState, memo } from 'react'
+import { useState, memo, useMemo } from 'react'
 import { TaskNode } from '../stores/types'
 import {
   CheckCircle2, XCircle, Circle, Loader2, AlertTriangle,
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { stepStatusMeta } from '../lib/statusMeta'
 import { gateSkipReason, isGateSkipDisplay, GATE_SKIP_LABEL } from '../lib/stepSkip'
+import { foldPlanDescriptions } from '../lib/planText'
 
 // 步骤状态：颜色来自 lib/statusMeta（唯一实现），图标仍由本组件选择（图标是 UI 关注点）
 const statusConfig = {
@@ -56,15 +57,22 @@ function ReplanPopover({ history }: { history: TaskNode[][] }) {
 }
 
 const TreeNode = memo(function TreeNode({
-  node, depth = 0, maxVisible = 2, onSelect, editable = false, onMove, onDelete
+  node, depth = 0, maxVisible = 2, onSelect, editable = false, onMove, onDelete, label, hint
 }: {
   node: TaskNode; depth: number; maxVisible: number; onSelect?: (node: TaskNode) => void
   editable?: boolean; onMove?: (id: string, dir: -1 | 1) => void; onDelete?: (id: string) => void
+  /** P2-4b：折叠后的行名（能力动作：该步关键动作）；不传则显示原始 name */
+  label?: string
+  /** P2-4b：悬停可看的完整原文（被折叠的共用说明仍可查） */
+  hint?: string
 }) {
   const [expanded, setExpanded] = useState(depth < maxVisible)
   const hasChildren = node.children.length > 0
   const cfg = statusConfig[node.status]
   const isRoot = depth === 0
+  // P2-4b：本层各步共用的说明只显示一处；行名换成「能力动作：该步关键动作」。
+  // 完整原文保留在 title（hint）里，不做信息删除。
+  const fold = useMemo(() => foldPlanDescriptions(node.children), [node.children])
 
   return (
     <div className="relative">
@@ -116,8 +124,9 @@ const TreeNode = memo(function TreeNode({
           </span>
         )}
 
-        <span className={`truncate text-sm ${isRoot ? 'text-slate-100 font-semibold' : cfg.text}`}>
-          {node.name}
+        <span className={`truncate text-sm ${isRoot ? 'text-slate-100 font-semibold' : cfg.text}`}
+          title={hint || label || node.name}>
+          {label || node.name}
         </span>
 
         {node.agent_id && (
@@ -145,6 +154,14 @@ const TreeNode = memo(function TreeNode({
       {hasChildren && expanded && (
         <div className="relative" style={{ marginLeft: 16 }}>
           <div className="absolute left-[2px] top-0 bottom-0 w-px bg-slate-700" />
+          {/* P2-4b：被折叠的共用说明在这里只显示一处（原文可悬停/换行看全） */}
+          {fold.shared.map((s, i) => (
+            <div key={'shared-' + i} style={{ paddingLeft: 20 }}
+              className="text-[11px] text-slate-500 break-words max-h-12 overflow-y-auto pb-1"
+              title={s.text}>
+              共用说明（{s.count} 步相同，已折叠到这一处）：{s.text}
+            </div>
+          ))}
           {node.children.map((child, i) => (
             <div key={child.id} className="relative" style={{ paddingLeft: 20 }}>
               <svg className="absolute left-[3px] top-4 w-[17px] h-px" style={{ overflow: 'visible' }}>
@@ -159,7 +176,8 @@ const TreeNode = memo(function TreeNode({
                      style={{ height: 'calc(1rem + 2px)' }} />
               )}
               <TreeNode node={child} depth={depth + 1} maxVisible={maxVisible} onSelect={onSelect}
-                editable={editable} onMove={onMove} onDelete={onDelete} />
+                editable={editable} onMove={onMove} onDelete={onDelete}
+                label={fold.children[i]?.name} hint={fold.children[i]?.description} />
             </div>
           ))}
         </div>

@@ -11,11 +11,15 @@
 
 import { useState } from 'react'
 import type { ResearchBrief, ExportState } from '../stores/types'
+import { briefPackageLine, type PackageResolution } from '../lib/packageState'
+import { quoteForPanel } from '../lib/quoteText'
 
 interface Props {
   taskId?: string
   research?: ResearchBrief | null
   exportState?: ExportState | null
+  /** P0-4：包口径的唯一判定（resolvePackage 结果）；给了它，「导出」小节就不再自己判 */
+  packageRes?: PackageResolution | null
   onRevised?: () => void
 }
 
@@ -23,7 +27,9 @@ const box = 'bg-slate-900 border border-slate-800 rounded-xl p-3'
 const h = 'text-xs font-medium text-slate-300 mb-1.5'
 const li = 'text-xs text-slate-400 leading-relaxed'
 
-export default function ResearchBriefPanel({ taskId, research, exportState, onRevised }: Props) {
+export default function ResearchBriefPanel({
+  taskId, research, exportState, packageRes, onRevised,
+}: Props) {
   const [editing, setEditing] = useState(false)
   const [body, setBody] = useState('')
   const [find, setFind] = useState('')
@@ -231,7 +237,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
                     : c.status === 'unsupported' ? '无底稿事实支持'
                     : c.status === 'partially_supported' ? '部分支持（有断言未对上底稿）'
                     : '待核查'}
-                  {c.type === 'target_claim' ? '（目标类判断）' : ''}：{String(c.text || '').slice(0, 60)}
+                  {c.type === 'target_claim' ? '（目标类判断）' : ''}：{quoteForPanel(String(c.text || ''), 60)}
                   {c.reason ? `——${c.reason}` : ''}
                 </li>
               ))}
@@ -281,10 +287,28 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
                 </li>
               )
             })()}
-            {rv.human?.status === 'recorded'
+            {rv.human?.status === 'recorded' && rv.human.bound === true
               ? <li>· 人工复核：{rv.human.approver} 于 {rv.human.at || '时间未记录'} 批准
                   {rv.human.version_id ? `（版本 ${String(rv.human.version_id).slice(0, 12)}）` : ''}</li>
-              : <li className="text-amber-400">· 人工复核：待复核（无研究员批准记录）——机器重验通过不代表已复核</li>}
+              : rv.human?.approver
+                ? <li className="text-amber-400">· 人工复核：本版待复核（{rv.human.reason || '既有批准未绑定本版'}）；
+                    历史记录：{rv.human.approver} 于 {rv.human.at || '时间未记录'} 批准
+                    {rv.human.version_id ? `（版本 ${String(rv.human.version_id).slice(0, 12)}）` : ''}
+                    ——机器重验通过不代表已复核</li>
+                : <li className="text-amber-400">· 人工复核：待复核（无研究员批准记录）——机器重验通过不代表已复核</li>}
+            {/* P0-5：截断闸门的结论必须**看得见**——此前只有后端判定，页面只说"草稿"，
+                用户看不出"正文其实是断的、这份不能当完整交付"。 */}
+            {research.delivery?.truncated && (
+              <li className="text-amber-400">
+                · 正文被判截断（{String(research.delivery.truncation?.section || '末节')}）：
+                {research.delivery.truncation?.reason
+                  || research.delivery.draft_reason
+                  || '内容不完整'}
+                ——本次交付只能算草稿，截断稿不会覆盖更完整的 report.md
+                {research.delivery.truncation?.evidence?.body_chars
+                  ? `（正文 ${research.delivery.truncation.evidence.body_chars} 字符）` : ''}
+              </li>
+            )}
           </ul>
           {!editing ? (
             <button type="button" onClick={() => setEditing(true)}
@@ -322,9 +346,13 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
           <div className={h}>导出</div>
           <ul className={li}>
             <li>· Markdown / PDF 按<span className="text-slate-300">当前版本</span>导出（响应头带版本号）</li>
-            {exportState.package
-              ? <li>· 交付包 {exportState.package}（生成于 {exportState.package_generated_at || '未知时间'}）</li>
-              : <li>· 暂无交付包</li>}
+            {/* P0-4：这一行与导出面板/分析工作台同源（packageRes 由 ReportViewer 用
+                resolvePackage 算好传下来）；没有 packageRes 的老调用才退回本地字段。 */}
+            <li>{packageRes
+              ? `· ${briefPackageLine(packageRes, exportState.package_generated_at)}`
+              : (exportState.package
+                ? `· 交付包 ${exportState.package}（生成于 ${exportState.package_generated_at || '未知时间'}）`
+                : '· 包判定未取到（既没有 export.package 也没有传入的解析结果）')}</li>
             {exportState.package && (() => {
               // 版本对比统一用正文版号（与复核栏"本版"同一口径）；
               // 老后端没有这两个字段时退回谱系标识。

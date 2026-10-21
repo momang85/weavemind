@@ -4,6 +4,7 @@ import {
   FlaskConical, Sparkles, Cpu, Filter, Activity
 } from 'lucide-react'
 import AgentTopology from '../components/AgentTopology'
+import { CAPABILITY_ZH, agentDisplayName, agentRawId } from '../lib/agentLabel'
 import { AgentInfo } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
 import { agentStatusDotClass, agentStatusLabel } from '../lib/statusMeta'
@@ -29,8 +30,8 @@ function timeAgo(iso: string) {
   const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
   if (sec < 5) return '刚刚'
   if (sec < 60) return `${sec} 秒前`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return `${Math.floor(sec / 3600)}h ago`
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`
+  return `${Math.floor(sec / 3600)} 小时前`
 }
 
 // 状态语义（含 Agent 运行状态）统一走 lib/statusMeta，本页不再自建色板与英文标签
@@ -77,7 +78,10 @@ function AgentCard({
         </div>
 
         {/* Name */}
-        <h3 className="text-slate-200 font-semibold text-sm mb-2">{agent.agent_id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</h3>
+        <h3 className="text-slate-200 font-semibold text-sm mb-2">{agentDisplayName(agent)}</h3>
+        <div className="text-[10px] font-mono text-slate-600 mb-2" title="运行标识（队列与白名单按它匹配）">
+          {agentRawId(agent)}
+        </div>
 
         {/* Capability badges */}
         <div className="flex flex-wrap gap-1.5 mb-3">
@@ -89,7 +93,7 @@ function AgentCard({
         {/* Load + heartbeat */}
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span className="flex items-center gap-1">
-            <Cpu className="w-3 h-3" /> {load}/{maxLoad}
+            <Cpu className="w-3 h-3" /> 并发 {load}/{maxLoad}
           </span>
           <span className="flex items-center gap-1">
             <Clock className="w-3 h-3" /> {timeAgo(agent.last_heartbeat)}
@@ -117,15 +121,15 @@ function AgentCard({
         <div className="px-5 pb-4 border-t border-slate-800 animate-fade-in">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4 text-center">
             <div className="bg-slate-800/50 rounded-lg p-2.5">
-              <div className="text-emerald-400 font-bold text-lg">{agent.successRate ?? 0}%</div>
+              <div className="text-emerald-400 font-bold text-lg">{agent.successRate == null ? '未取得' : `${agent.successRate}%`}</div>
               <div className="text-slate-500 text-xs">成功率</div>
             </div>
             <div className="bg-slate-800/50 rounded-lg p-2.5">
               <div className="text-cyan-400 font-bold text-lg">{agent.tasks?.length ?? 0}</div>
-              <div className="text-slate-500 text-xs">任务数</div>
+              <div className="text-slate-500 text-xs">本页列出的任务数</div>
             </div>
             <div className="bg-slate-800/50 rounded-lg p-2.5">
-              <div className="text-violet-400 font-bold text-lg">{agent.avgTime ?? '-'}s</div>
+              <div className="text-violet-400 font-bold text-lg">{agent.avgTime == null ? '未取得' : `${agent.avgTime} 秒`}</div>
               <div className="text-slate-500 text-xs">平均耗时</div>
             </div>
           </div>
@@ -250,7 +254,7 @@ export default function AgentsPage() {
       {/* Topology */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
         <h2 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-3">
-          <Activity className="w-4 h-4 text-cyan-400" /> Agent Topology
+          <Activity className="w-4 h-4 text-cyan-400" /> 智能体拓扑
         </h2>
         <AgentTopology />
       </div>
@@ -312,23 +316,26 @@ export default function AgentsPage() {
       </div>
 
       {/* Search + Filter */}
-      <div className="flex gap-3">
-        <div className="flex-1 relative">
+      <div className="flex flex-wrap gap-2 sm:gap-3">
+        <div className="flex-1 min-w-[12rem] relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search agents..."
+            placeholder="搜索智能体…"
             className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-10 pr-4 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
           />
         </div>
         {allCaps.map(cap => (
           <button key={cap} onClick={() => setFilter(filter === cap ? null : cap)}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono transition-colors ${
+            // 中文能力名（与卡片标题同口径）；原始能力 id 放 title，排查时仍拿得到。
+            // 此前直接显示 `code_execution` / `data_analyzer` 等英文枚举，整页中文里的刺点。
+            title={`能力标识：${cap}`}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors ${
               filter === cap ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' :
               'bg-slate-900 border border-slate-800 text-slate-500 hover:text-slate-300'
             }`}>
-            <Filter className="w-3 h-3" /> {cap}
+            <Filter className="w-3 h-3" /> {CAPABILITY_ZH[cap] || cap}
           </button>
         ))}
       </div>
@@ -354,7 +361,7 @@ export default function AgentsPage() {
 
       {!connected && (
         <div className="text-center text-red-400 text-sm py-4 bg-red-500/10 rounded-xl">
-          后端断连 — 每2秒轮询
+          后端断连 — 每 3 秒自动重试
         </div>
       )}
     </div>

@@ -81,6 +81,8 @@ export interface TaskNode {
   agent_id?: string
   children: TaskNode[]
   result?: any
+  /** P2-4b：行名被折叠后，这里的完整原文供悬停查看（不删信息）。 */
+  description?: string
   replanHistory?: TaskNode[][]
   started_at?: string
   completed_at?: string
@@ -172,6 +174,20 @@ export interface ResearchBrief {
   }
   /** 面板（结构对象）绑定的版本；与当前选中版本不一致时页面必须提示 */
   structure_version?: string
+  /** P0-5：交付状态（与 `/task/<id>` 的 `delivery` 同一个读取口径）。
+   *  截断稿（正文停在半句/结构承诺未兑现）必须让用户在页面上看见"为什么只能算草稿"。 */
+  delivery?: {
+    status?: string
+    draft?: boolean
+    draft_reason?: string
+    truncated?: boolean
+    truncation?: {
+      reason?: string
+      section?: string
+      signals?: string[]
+      evidence?: { body_chars?: number; main_chars?: number }
+    }
+  }
   /** 批次3b：研究状态（与数字机器验收分开的一条轴）。 */
   research_state?: {
     state?: string
@@ -198,7 +214,7 @@ export interface ResearchBrief {
    *  研究员复核后才会是 recorded，缺记录一律 pending（不允许自动填批准）。 */
   review?: {
     machine?: { overall?: string; version_id?: string; bound?: boolean }
-    human?: { status?: string; approver?: string; at?: string; version_id?: string }
+    human?: { status?: string; approver?: string; at?: string; version_id?: string; bound?: boolean; reason?: string }
   }
 }
 
@@ -229,6 +245,20 @@ export interface TaskReport {
   acceptance?: { overall?: string; gaps?: string[] }
   research?: ResearchBrief | null
   export?: ExportState | null
+  /** 任务详情 payload 的 `elapsed_sec`：后端记的真实耗时（秒）。
+   *  P1-8：`stats.duration` 是前端 `Date.now()-startedAt` 的兜底值——重开已完成任务时是 0s，
+   *  不能拿它当"耗时"展示；有 elapsed_sec 时以它为准。 */
+  elapsedSec?: number | null
+  /** 任务详情 payload 的 `search_coverage`（无检索步时为 null）：
+   *  P1-8 的 Steps 口径要能写出"含 N 降级"，必须拿到这份汇总。 */
+  searchCoverage?: {
+    total_search_steps?: number
+    ok_steps?: number
+    degraded_steps?: number
+    incomplete_steps?: number
+    zero_source_steps?: number
+    coverage_rate?: number
+  } | null
 }
 
 export interface EndpointDiversity {

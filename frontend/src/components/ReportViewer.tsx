@@ -34,6 +34,14 @@ import {
 import { WorkingPaperPanel } from './WorkingPaperPanel'
 import ResearchBriefPanel from './ResearchBriefPanel'
 import AnalysisWorkbenchPanel from './AnalysisWorkbenchPanel'
+import { parseTopStatsWithSource, topStatsCardMeta } from '../lib/topStats'
+import { reportStatsView } from '../lib/reportStats'
+import { rewriteE2eVerdict } from '../lib/e2eVerdict'
+import { usePackageState } from '../lib/analysisState'
+import {
+  PACKAGE_LOADING_NOTE, exportPanelNote,
+} from '../lib/packageState'
+import { analysisBlockReason } from '../lib/actionable'
 
 /* ===================== 报告结构化解析（纯函数，无新增依赖） ===================== */
 
@@ -250,127 +258,12 @@ function parseDisclaimer(md: string): DisclaimerResult {
   return { rest, disclaimer: text }
 }
 
-/* ───────────────── 结论卡 / 图表 / 证据指纹（F3a） ───────────────── */
-
-interface TopStat { k: string; v: string }
-
-/** 结论卡的**来源**：`metrics`=报告正文的『财务对照』表（表头含"指标"）；
- *  `first_table`=退回到正文里第一张表（**未必是财务/结论表**，标签必须如实说明）；
- *  `none`=正文没有可提取的表。 */
-export type TopStatsSource = 'metrics' | 'first_table' | 'none'
-
-/** 结论卡解析结果：数值卡 + 来源 + **用到的期间** + 表内单位。
- *
- *  期间与单位必须一起返回：卡片只给一个读数而不说这是哪一期，读者会把旧值当成
- *  当前值（实机反例：冻结样本『财务对照』表头是 `指标 | 2023 | 2024 | …`，
- *  裸取第 1 列 → 置顶显示的是 **2023** 的读数，且不带年份）。
+/* ───────────────── 结论卡 / 图表 / 证据指纹（F3a） ─────────────────
+ * P1-2：结论卡的取表判定与卡头文案整体搬到 lib/topStats.ts（纯函数可测）：
+ *   - 『财务对照』表判定不再只看"表头含指标"（『数据来源摘要』表头是 `指标|值`，曾被误判）；
+ *   - 卡头标题/说明由 topStatsCardMeta 按 source 生成——内容是什么，卡头就说什么；
+ *   - 值单元格不再 truncate（P1-2：`1（由非检索模型完成，来源可能为…` 被截断）。
  */
-export interface TopStatsResult {
-  stats: TopStat[]
-  source: TopStatsSource
-  periods: string[]
-  unit: string
-}
-
-const PERIOD_HEADER_RE = /^(20\d{2})\s*(?:年|年度|年报|A|H[12]|Q[1-4])?$/
-
-/** 表头单元格 → 期间标签（`2024`/`2024年` → `2024年`）；不是期间列返回空串。 */
-export function periodOfHeader(cell: unknown): string {
-  const c = String(cell ?? '').trim().replace(/\*\*/g, '')
-    .replace(/[（(][^）)]*[）)]/g, '').replace(/\s+/g, '')
-  const m = PERIOD_HEADER_RE.exec(c)
-  return m ? `${m[1]}年` : ''
-}
-
-/** 正文里声明的金额单位（`单位：亿元`）；读不到就是空串，不猜。 */
-export function reportUnitOf(md: string): string {
-  const m = /单位\s*[:：]\s*([^\s；;，,）)]{1,8})/.exec(String(md || ''))
-  return m ? m[1].trim() : ''
-}
-
-/** 表 → 结论卡：**明确年份**、最新期间在前，不裸取首数值列。
- *
- *  旧实现取"第 0/1 列"：`指标 | 2023 | 2024 | 口径 | 来源` 的第一数值列是 **2023**
- *  （较旧那期），无标签置顶看起来像当前值。现在每张卡的标题写明期间，
- *  期间列按年份从新到旧排；没有可识别期间列时才退回"指标 + 第一非指标列"。
- */
-export function topStatsOfTable(
-  table: string[][], maxCards = 8,
-): { stats: TopStat[]; periods: string[] } {
-  const hdr = (table && table[0]) || []
-  const rows = (table || []).slice(1)
-  if (!hdr.length || !rows.length) return { stats: [], periods: [] }
-  let kIdx = hdr.findIndex(h => h.includes('指标') || h.includes('数值'))
-  if (kIdx < 0) kIdx = 0
-  let periodCols = hdr
-    .map((h, i): [number, string] => [i, periodOfHeader(h)])
-    .filter(([i, p]) => !!p && i !== kIdx)
-  if (periodCols.length) {
-    periodCols = [...periodCols].sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0))
-    const periods = periodCols.map(([, p]) => p)
-    const stats: TopStat[] = []
-    for (const r of rows) {
-      const name = (r.length > kIdx ? r[kIdx] : '').slice(0, 24)
-      for (const [i, p] of periodCols) {
-        const v = r.length > i ? String(r[i] ?? '').trim() : ''
-        if (v && v !== '—') {
-          stats.push({ k: `${name} · ${p}`, v: v.slice(0, 32) })
-          if (stats.length >= maxCards) return { stats, periods }
-        }
-      }
-    }
-    return { stats, periods }
-  }
-  let vIdx = hdr.findIndex(h => h.includes('数值'))
-  if (vIdx < 0) vIdx = Math.min(1, hdr.length - 1)
-  if (vIdx === kIdx) vIdx = Math.min(kIdx + 1, hdr.length - 1)
-  return {
-    stats: rows
-      .filter(r => r.length > vIdx && String(r[vIdx] ?? '').trim())
-      .map(r => ({ k: (r.length > kIdx ? r[kIdx] : '').slice(0, 24),
-                   v: String(r[vIdx]).slice(0, 32) })),
-    periods: [],
-  }
-}
-
-/** 正文表格 → 结论卡（键截 24 字、值截 32 字）。
- *
- *  与分享页 `web_ui._share_page_structured` 同口径：**优先取表头含"指标"的那张**
- *  （=财务对照）；取不到才退回第一张，并由调用方按 `source` 如实标注来源，
- *  不把任何一张表都说成"结论"。研究简报里『实物量（吨）』『收入构成（元）』排在
- *  『财务对照』之前，于是"结论速览"曾把 **吨位**当成结论显示（实机截图：白酒销售量/
- *  生产量/库存量）——数字没错、**卡片名与内容不符**。
- */
-export function parseTopStatsWithSource(md: string): TopStatsResult {
-  const tables: string[][][] = []
-  let cur: string[][] = []
-  let header: string[] = []
-  for (const line of md.split('\n')) {
-    const t = line.trim()
-    if (!t.startsWith('|')) {
-      if (cur.length) { tables.push(cur); cur = [] }
-      header = []
-      continue
-    }
-    const cells = t.replace(/^\|+|\|+$/g, '').split('|').map(c => c.trim())
-    if (cells.every(c => !c || /^[-:\s—]*$/.test(c))) continue
-    if (!header.length) { header = cells; cur = [cells] } else if (cur.length < 5) cur.push(cells)
-  }
-  if (cur.length) tables.push(cur)
-  const unit = reportUnitOf(md)
-  if (!tables.length) return { stats: [], source: 'none', periods: [], unit }
-  const metrics = tables.find(t => (t[0] || []).some(h => h.includes('指标')))
-  const chosen = metrics || tables[0]
-  const res = topStatsOfTable(chosen)
-  if (!res.stats.length && !metrics) return { stats: [], source: 'none', periods: [], unit }
-  return { stats: res.stats, source: metrics ? 'metrics' : 'first_table',
-           periods: res.periods, unit }
-}
-
-/** 兼容包装：只要统计值（旧调用方）。 */
-export function parseTopStats(md: string): TopStat[] {
-  return parseTopStatsWithSource(md).stats
-}
 
 /** "补充图表（未达发布标准）"章节下的图片地址集合 —— 这些图不是发布级，需标"草稿级"。 */
 export function draftChartSrcs(md: string): string[] {
@@ -653,12 +546,29 @@ export default memo(function ReportViewer() {
         final_report: d.report || cur.final_report,
         research: d.research ?? cur.research,
         export: d.export ?? cur.export,
+        // P0-4：SSE 终态快照里没有 export/elapsed_sec/search_coverage（快照是任务行投影），
+        // 不补这几项，导出面板会读不到包名而误报"暂无交付包"、统计条会拿前端自算的 0s。
+        elapsedSec: typeof d.elapsed_sec === 'number' ? d.elapsed_sec : (cur.elapsedSec ?? null),
+        searchCoverage: d.search_coverage ?? cur.searchCoverage ?? null,
         acceptance: d.acceptance && Array.isArray(d.acceptance.gaps)
           ? { overall: d.acceptance.overall || d.status, gaps: d.acceptance.gaps }
           : cur.acceptance,
       })
     } catch { /* 重取失败保留旧视图，面板会显示提交结果 */ }
   }
+  // P0-4/P1-8：若手上的报告缺口径字段（export/elapsed_sec/search_coverage），
+  // 打开时补拉一次任务详情；三样齐了就不重复出网（实时终态与历史查看两条路径都已带上）。
+  const detailSyncedFor = useRef<string | null>(null)
+  useEffect(() => {
+    const tid = taskIdForFiles
+    if (!tid || detailSyncedFor.current === tid) return
+    detailSyncedFor.current = tid
+    const cur = useTaskStore.getState().report
+    if (cur && cur.export !== undefined && cur.elapsedSec !== undefined
+        && cur.searchCoverage !== undefined) return
+    void reloadTask(tid)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdForFiles])
   const [showLogs, setShowLogs] = useState(false)
   // E1 溯源页：POST /api/verify 的三档分类结果
   const [verifyData, setVerifyData] = useState<any>(null)
@@ -862,7 +772,9 @@ export default memo(function ReportViewer() {
   // （原为渲染期直跑，每次日志推送/3s 轮询都全量重解析）
   const parsed = useMemo(() => {
     if (!report) return null
-    const rawMd = stripOuterFence(report.final_report || '')
+    // P1-7：贯通测试小计的口径重写（`结果: 1/1 项通过` + 三条 SKIP → `0 项通过 · 3 项跳过`）。
+    // 只改展示文本，不动后端给的验收结论；没有跳过/失败时原文不变。
+    const rawMd = rewriteE2eVerdict(stripOuterFence(report.final_report || ''))
     const freshness = parseFreshness(rawMd)
     const sourcesResult = parseSources(rawMd)
     const disclaimerResult = parseDisclaimer(sourcesResult.rest)
@@ -875,7 +787,8 @@ export default memo(function ReportViewer() {
       bodyMd,
       toc,
       sourceItems: sourcesResult.sources?.items ?? [],
-      // 结论卡：优先取正文『财务对照』表（表头含"指标"）；退回首表时由 source 如实标注
+      // 结论卡：优先取正文『财务对照』表（判定见 lib/topStats.isComparisonTableHeader）；
+      // 退回首表时由 source 如实标注
       ...(() => {
         const r = parseTopStatsWithSource(rawMd)
         return { topStats: r.stats, topStatsSource: r.source,
@@ -884,14 +797,41 @@ export default memo(function ReportViewer() {
     }
   }, [report])
 
+  // P0-4：交付包口径的唯一来源——分析工作台接口 + 任务详情 payload 一起喂给
+  // resolvePackage（同一个纯函数、同一组输入），导出面板与分析工作台因此不可能各说一套。
+  // 注意 hook 必须在 `if (!report) return null` 之前调用（Hooks 规则）。
+  const pkg = usePackageState(taskIdForFiles, report?.export?.package)
+  const exportPkgAt = report?.export?.package_generated_at
+  // P0-4：简报面板的"交付包"一行也走同一份解析结果（不再各自读一个字段）
+  const resolvedExportState = pkg.res.hasPackage && report?.export?.package !== pkg.res.name
+    ? { ...(report?.export || {}), package: pkg.res.name }
+    : report?.export
+  // P0-6：后端判定的"无法离线补算"原因（原文）——必须显式提示，不可忽略
+  const blockReason = analysisBlockReason(pkg.panel.data)
+  // P1-2：卡头标题/说明与内容同源
+  const topMeta = topStatsCardMeta({
+    source: parsed?.topStatsSource ?? 'none',
+    periods: parsed?.topStatsPeriods ?? [],
+    unit: parsed?.topStatsUnit ?? '',
+  })
+
   if (!report) return null
 
   const s = report.stats || { totalSteps: report.steps?.length ?? 0, successSteps: 0, failedSteps: 0, duration: 0 }
-  const rate = s.totalSteps > 0 ? Math.round((s.successSteps / s.totalSteps) * 100) : 100
+  // P1-8：统计条口径（耗时取真实 elapsed_sec；成功率写明是"步骤执行"；跳过/降级显式列出）
+  const statsView = reportStatsView({
+    summary: report.summary,
+    acceptanceOverall: report.acceptance?.overall,
+    stats: s,
+    elapsedSec: report.elapsedSec,
+    steps: report.steps,
+    searchCoverage: report.searchCoverage,
+    filesCount: report.files?.length ?? 0,
+  })
   // 验收器统计（与报告页可信度卡同一份数据；未加载时为 null，渲染端据此显示"未知"而非 0）
   const accTrace = accData?.checks?.number_traceability || null
   const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems,
-          topStats, topStatsSource, topStatsPeriods, topStatsUnit } = parsed!
+          topStats } = parsed!
 
   const scrollToHeading = (id: string) => scrollToId(id)
 
@@ -983,7 +923,7 @@ export default memo(function ReportViewer() {
         }
       } catch { /* 用内存稿（下面标注版本未知） */ }
     }
-    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Report</title>
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>研究报告</title>
 <style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;color:#1a1a2e;line-height:1.8}
 h1,h2{color:#16213e} pre{background:#f5f5f5;padding:16px;border-radius:8px;overflow-x:auto}
 code{background:#f0f0f0;padding:2px 6px;border-radius:4px} table{border-collapse:collapse;width:100%}
@@ -1021,29 +961,22 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
   return (
     <div id="report-viewer" className="animate-fade-in space-y-5 scroll-mt-6">
-      {/* F3a 数据卡：优先取正文『财务对照』表（表头含"指标"）；退回首表时如实标注来源 */}
-      {topStats.length > 0 ? (
+      {/* F3a 数据卡：优先取正文『财务对照』表（判定见 lib/topStats）；退回首表时如实标注来源。
+          P1-2：卡头与内容同源（topStatsCardMeta）；四格完整显示，不再截断。 */}
+      {topStats.length > 0 && topMeta.title ? (
         <div className="rounded-xl border border-cyan-500/20 bg-slate-900 p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <Award className="h-4 w-4 text-cyan-400" />
-            <span className="text-sm font-semibold text-cyan-400">
-              {topStatsSource === 'metrics' ? '关键数据速览' : '正文首表前 4 行'}
-            </span>
+            <span className="text-sm font-semibold text-cyan-400">{topMeta.title}</span>
             <span className="text-xs text-slate-500">
-              {topStatsSource === 'metrics'
-                ? `取自报告正文『财务对照』表（指标 × 期间${
-                    topStatsPeriods.length ? `：${topStatsPeriods.join('、')}` : ''
-                  } × 口径 × 来源）${
-                    topStatsUnit ? `；表内单位 ${topStatsUnit}（行内自带单位的以其为准）` : ''
-                  }`
-                : '报告正文里没有『财务对照』表：这里原样列出第一张表前 4 行，未判定为结论'}
+              {topMeta.detail}
             </span>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {topStats.map((it, i) => (
               <div key={i} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
-                <div className="truncate text-xs text-slate-400" title={it.k}>{it.k}</div>
-                <div className="mt-0.5 truncate font-semibold text-slate-100" title={it.v}>{it.v}</div>
+                <div className="break-words text-xs text-slate-400" title={it.k}>{it.k}</div>
+                <div className="mt-0.5 break-words font-semibold text-slate-100" title={it.v}>{it.v}</div>
               </div>
             ))}
           </div>
@@ -1077,31 +1010,55 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       ) : null}
 
       {/* Stats bar */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {[
-          { icon: Clock, label: '耗时', value: `${s.duration}s`, color: 'text-slate-400' },
-          { icon: CheckCircle2, label: '成功率', value: `${rate}%`, color: 'text-emerald-400' },
-          { icon: Award, label: 'Steps', value: `${s.successSteps}/${s.totalSteps}`, color: 'text-cyan-400' },
-          { icon: Zap, label: 'Files', value: `${report.files?.length ?? 0}`, color: 'text-violet-400' },
-        ].map(item => (
-          <div key={item.label} className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-center">
-            <item.icon className={`w-5 h-5 mx-auto mb-2 ${item.color}`} />
-            <div className={`text-xl font-bold ${item.color}`}>{item.value}</div>
-            <div className="text-slate-500 text-xs">{item.label}</div>
-          </div>
-        ))}
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            { icon: Clock, label: '耗时', value: statsView.elapsed, color: 'text-slate-400' },
+            { icon: CheckCircle2, label: statsView.rateLabel, value: statsView.rateValue, color: 'text-emerald-400' },
+            { icon: Award, label: 'Steps', value: statsView.steps, color: 'text-cyan-400' },
+            { icon: Zap, label: 'Files', value: statsView.files, color: 'text-violet-400' },
+          ].map(item => (
+            <div key={item.label} className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-center">
+              <item.icon className={`w-5 h-5 mx-auto mb-2 ${item.color}`} />
+              <div className={`text-xl font-bold ${item.color}`}>{item.value}</div>
+              <div className="text-slate-500 text-xs">{item.label}</div>
+            </div>
+          ))}
+        </div>
+        {/* P1-8：成功率与验收结论的关系必须写出来——不允许"100% 成功"与"验收未通过"并排且无解释 */}
+        <div className={`text-xs leading-relaxed ${statsView.acceptance.failed ? 'text-amber-400' : 'text-slate-500'}`}>
+          机器验收结论：<span className="font-medium">{statsView.acceptance.overall}</span>。{statsView.note}
+        </div>
       </div>
 
+      {/* P0-6：后端判定"无法离线补算/缺事实来源"时，把后端原文提到状态区显式展示。
+          橙色、不可关闭（无 dismiss 入口）、文案逐字用后端 reason，不自己编。 */}
+      {blockReason ? (
+        <div role="alert"
+          className="flex items-start gap-2.5 rounded-xl border-2 border-amber-500/60 bg-amber-500/10 px-4 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <div className="space-y-1">
+            <div className="text-xs font-semibold uppercase tracking-wide text-amber-500">
+              后端原文（分析工作台判定）
+            </div>
+            <div className="text-sm leading-relaxed text-amber-200">{blockReason}</div>
+          </div>
+        </div>
+      ) : null}
+
       {/* F3-B：研究简报面板——关键发现 → 缺口 → 证据 → 修改/重验 → 导出版本绑定。
-          放在正文之前：金融读者先看结论与缺口，再决定要不要改、怎么导。 */}
+          放在正文之前：金融读者先看结论与缺口，再决定要不要改、怎么导。
+          P0-4：把任务详情里的包名一起传下去，工作台与导出面板共用同一个解析结果。 */}
       <AnalysisWorkbenchPanel
-        taskId={report.taskId || null}
-        onAdopted={() => { if (report.taskId) void reloadTask(report.taskId) }}
+        taskId={taskIdForFiles}
+        exportPackage={report.export?.package}
+        onAdopted={() => { if (taskIdForFiles) void reloadTask(taskIdForFiles) }}
       />
       <ResearchBriefPanel
         taskId={report.taskId}
         research={report.research}
-        exportState={report.export}
+        exportState={resolvedExportState}
+        packageRes={pkg.res}
         onRevised={() => { if (report.taskId) void reloadTask(report.taskId) }}
       />
 
@@ -1488,9 +1445,11 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             <Package className="w-4 h-4" /> 生成文件 ({report.files.length}) {expandedFiles ? '收起' : '展开'}
           </button>
         )}
-        {report.export?.package && taskIdForFiles ? (
-          <a href={`/files/${encodeURIComponent(taskIdForFiles)}/${encodeURIComponent(report.export.package)}`}
-            download={report.export.package}
+        {/* P0-4：包名一律取 usePackageState 的解析结果（同一函数、同一组输入 →
+            与「分析工作台」底部那行必然一致）；只有两个来源都为空才是"确实没有包"。 */}
+        {pkg.res.hasPackage && taskIdForFiles ? (
+          <a href={`/files/${encodeURIComponent(taskIdForFiles)}/${encodeURIComponent(pkg.res.name)}`}
+            download={pkg.res.name}
             className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
             <Package className="w-4 h-4" /> 下载交付包 zip
           </a>
@@ -1524,12 +1483,10 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           </button>
         ) : null}
         <span className="basis-full text-xs leading-relaxed text-slate-500">
-          {report.export?.package
-            ? `交付包 ${report.export.package}（生成于 ${report.export.package_generated_at || '未知时间'}）按登录会话放行下载；`
-              + '包可能早于最近一次修订，正文里的图表与"生成文件"列表始终按当前版本导出。'
-              + '修订后用"按当前版本重新导出"生成新包（旧包保留不动）。'
-            : '本次任务暂无交付包（打包步骤未产出 deliverables_*.zip）；当前按文件逐个下载——'
-              + '上方"生成文件"列表与正文里的图表都带下载按钮。'}
+          {pkg.loading && !pkg.res.hasPackage ? PACKAGE_LOADING_NOTE
+            : (pkg.panel.status === 'error' && !pkg.res.hasPackage)
+              ? `交付包状态未知（分析状态读取失败：${pkg.panel.error || '未知原因'}）——读取失败不等于没有包，请重试`
+              : exportPanelNote(pkg.res, exportPkgAt)}
         </span>
         {repackMsg ? (
           <span className="basis-full text-xs text-slate-400">{repackMsg}</span>

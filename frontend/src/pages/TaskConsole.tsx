@@ -12,6 +12,7 @@ import { resolveSubmissionKey } from '../lib/submissionKey'
 import { requestResume } from '../lib/resume'
 import { actionIntent, actionableTone, shouldShowActionable } from '../lib/actionable'
 import { stepDisplayStatus } from '../lib/stepSkip'
+import { shouldCollapseResearchForm } from '../lib/consoleLayout'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
 
@@ -65,6 +66,10 @@ export default function TaskConsole() {
   const [importMsg, setImportMsg] = useState<{ name: string; note: string }[]>([])
   // P0-1：SUCCESS_WITH_ISSUES 的验收缺口明细（按任务缓存，点击展开）
   const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
+  // P2-4：URL 深链 ?task=<id>（首帧就决定研究表单是否折叠，避免"先展开再收起"的闪动）
+  const [deepTaskId, setDeepTaskId] = useState<string>(() => {
+    try { return (new URLSearchParams(window.location.search).get('task') || '').trim() } catch { return '' }
+  })
   // C3/H3b：同一次提交的幂等键（重复点击/失败重试复用；成功后清空）
   const pendingSubmission = useRef<{ sig: string; key: string } | null>(null)
   // C3：后端给的可行动状态（未接收/待消费/执行中/待材料/明确失败/已完成）
@@ -85,6 +90,7 @@ export default function TaskConsole() {
     // 因此一直无法进行）。深链比会话更具体，优先于 `conv`。
     const deepTask = (params.get('task') || '').trim()
     if (deepTask) {
+      setDeepTaskId(deepTask)
       useTaskStore.setState({ currentTaskId: deepTask })
       return
     }
@@ -352,6 +358,10 @@ export default function TaskConsole() {
       const res = await fetch('/task/' + tid)
       const d = await res.json()
       const steps = d.steps ?? []
+      // P1-8：耗时取**后端记的** elapsed_sec；前端自算的 (now - startedAt) 只在
+      // 后端没给时兜底（重开已完成任务时它是 0s，实测把 23 分钟的任务写成"耗时 0s"）。
+      const elapsed = typeof d.elapsed_sec === 'number' ? d.elapsed_sec : null
+      const fallback = Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000))
       const reportObj: TaskReport = {
         summary: d.status || 'SUCCESS',
         taskId: tid,
@@ -359,11 +369,16 @@ export default function TaskConsole() {
           totalSteps: steps.length,
           successSteps: steps.filter((s: any) => s.result?.status === 'SUCCESS').length,
           failedSteps: steps.filter((s: any) => s.result?.status === 'FAILED').length,
-          duration: Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000)),
+          duration: elapsed ?? fallback,
         },
+        elapsedSec: elapsed,
+        // P1-8：Steps 口径要写"含 N 跳过、M 降级"，降级数取后端 search_coverage
+        searchCoverage: d.search_coverage ?? null,
         steps: steps.map((s: any) => ({
           step_id: s.step_id || '', capability: s.capability || '',
-          name: s.instruction || 'Step', status: (s.result?.status || 'pending').toLowerCase(),
+          name: s.instruction || 'Step',
+          // 与实时通道/计划树同一套显示状态（S1 门禁跳过 → skipped，真失败仍 failed）
+          status: stepDisplayStatus(s),
         })),
         final_report: d.report || d.final_report || '',
         // F3-B：研究简报的结构化对象与导出版本绑定——结果页据此呈现
@@ -501,6 +516,11 @@ export default function TaskConsole() {
         activeConversationId={activeConversationId}
         lastGoal={lastGoal} reportSummary={report?.summary} status={status}
         taskId={taskId} etaText={etaText} elapsedText={elapsedText}
+        // P2-4：已打开任务（?task=<id> 或本会话已提交/恢复跟踪）时研究表单默认收起，
+        // 第一屏先给任务本身；无任务时保持展开（不改变首次使用的路径）。
+        formCollapsedByDefault={shouldCollapseResearchForm({
+          deepTaskId, currentTaskId: taskId,
+        })}
         onSubmit={submit} onNewConversation={newConversation} />
 
       {/* C3：一句话说清"现在是什么状态、你该做什么"。未知/等材料这类中性状态

@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Calculator, Download, GitCompare, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { useAnalysisPanel, usePackageState } from '../lib/analysisState'
+import { packageLine } from '../lib/packageState'
 
 /**
  * 分析工作台（K3 + L0-b）：**看分析卡与原始依据 → 选哪一条运行进正文 → 改允许改的假设 →
@@ -74,25 +76,38 @@ const fmt = (v: unknown, unit = '') => {
   return n === null ? '—' : `${n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}${unit}`
 }
 
-export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
+export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopted }: {
   taskId: string | null
+  /** P0-4：任务详情 payload 里的 `export.package`——与本面板的 analysis 状态一起喂给
+   *  usePackageState（同一个纯函数、同一组输入），「导出与复核」面板因此与本行必然一致。 */
+  exportPackage?: string
   onAdopted?: () => void
 }) {
-  const [state, setState] = useState<AnalysisState | null>(null)
+  // P0-4：分析状态**只有一份**（lib/analysisState 的模块级缓存）——
+  // 此前本面板自己 fetch 一份、导出面板读另一份，同一屏上才会出现
+  // 「当前包: deliverables_*.zip」与「本次任务暂无交付包」并存。
+  const { data, status: loadState, error: loadErr, reload } = useAnalysisPanel(taskId)
+  const pkg = usePackageState(taskId, exportPackage)
   const [modelId, setModelId] = useState('')
   const [params, setParams] = useState<Record<string, string>>({})
   const [chosenRunId, setChosenRunId] = useState('')
   const [diff, setDiff] = useState<DiffRow[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
-  // U90-B：读取态（loading/ok/error）——读失败不得被表述成"没有可复算输入"
-  const [loadState, setLoadState] = useState<'loading' | 'ok' | 'error'>('loading')
-  const [loadErr, setLoadErr] = useState('')
+  // 复算出的**新运行**在本地并入展示（服务端 payload 不动，采纳后由 reload 换成服务端清单）
+  const [localRuns, setLocalRuns] = useState<Run[]>([])
+  const state = useMemo<AnalysisState | null>(() => {
+    const base = (data || null) as AnalysisState | null
+    if (!base) return null
+    if (!localRuns.length) return base
+    const kept = (base.runs || []).filter(r => !localRuns.some(lr => lr.run_id && lr.run_id === r.run_id))
+    return { ...base, runs: [...kept, ...localRuns] }
+  }, [data, localRuns])
 
   // 任务切换必须**重置**草稿与比较状态（L0-b-5）：否则会把上一个任务的假设/差异
   // 显示在新任务上，读者以为那是本任务的读数。
   useEffect(() => {
-    setState(null); setModelId(''); setParams({}); setChosenRunId('')
+    setLocalRuns([]); setModelId(''); setParams({}); setChosenRunId('')
     setDiff(null); setMsg(null)
   }, [taskId])
 
@@ -160,41 +175,25 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
     return base
   }, [])
 
-  const load = useCallback(async () => {
-    // U90-B：读失败/读超时**不能**被说成"该任务还没有可复算输入"——那是两回事，用户会据此
-    // 误判任务状态。这里显式区分 loading/ok/error，并给重试入口。
-    if (!taskId) return
-    setLoadState('loading'); setLoadErr('')
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), 12000)
-    try {
-      const res = await fetch(`/api/task/${taskId}/analysis`, { signal: ac.signal })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const d = await res.json()
-      setState(d)
-      setLoadState('ok')
-      const runs: Run[] = (d?.runs || []).filter(
-        (r: Run) => !String(r.model_id || '').startsWith('ratio:'),
-      )
-      const first = runs[0]
-      if (first) {
-        const mid = String(first.model_id || '')
-        setModelId(mid)
-        const sameModel = runs.filter((r) => String(r.model_id || '') === mid)
-        // 默认选中"进正文的那一条"（有选择记录时）；没有就取该模型第一条运行
-        const sel = sameModel.find((r) => r.selected) || sameModel[0]
-        setChosenRunId(String(sel?.run_id || ''))
-        setParams(paramsFor(sel))
-      }
-    } catch (e: any) {
-      setLoadErr(e?.name === 'AbortError' ? '读取超时（12 秒无响应）' : String(e?.message || e))
-      setLoadState('error')
-    } finally {
-      clearTimeout(timer)
-    }
-  }, [taskId, paramsFor])
-
-  useEffect(() => { void load() }, [load])
+  // 读取成功后**初始化一次**选择：默认选中"进正文的那一条"（有选择记录时），
+  // 没有就取该模型第一条运行。用 ref 记住已初始化过的那份服务端 payload ——
+  // 复算只往 localRuns 里加东西，不能把用户刚改的参数草稿重置回去（X0）。
+  const initedFor = useRef<unknown>(null)
+  useEffect(() => {
+    if (!data?.ok || initedFor.current === data) return
+    initedFor.current = data
+    const runs: Run[] = (data?.runs || []).filter(
+      (r: Run) => !String(r.model_id || '').startsWith('ratio:'),
+    )
+    const first = runs[0]
+    if (!first) return
+    const mid = String(first.model_id || '')
+    setModelId(mid)
+    const sameModel = runs.filter((r) => String(r.model_id || '') === mid)
+    const sel = sameModel.find((r) => r.selected) || sameModel[0]
+    setChosenRunId(String(sel?.run_id || ''))
+    setParams(paramsFor(sel))
+  }, [data, paramsFor])
 
   // U90-C：**补算分析输入**——工作区留有本次任务的事实来源（研究底稿/财务载荷）而
   // 分析步没跑（或历史工作区被清理后重新落地）时，按现有事实确定性冻结数据集并复算
@@ -221,7 +220,7 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
             + (gaps.length ? `；资料不足的模型如实留缺口：${gaps.join('；')}` : ''),
         })
       }
-      await load(); onAdopted?.()
+      await reload(); onAdopted?.()
     } catch (e: any) {
       setMsg({ kind: 'err', text: `补算失败：${String(e?.message || e)}` })
     } finally { setBusy(false) }
@@ -276,11 +275,8 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
         selection_state: 'recomputed',
       }
       if (newRun.run_id) {
-        setState((prev) => {
-          if (!prev) return prev
-          const runs = (prev.runs || []).filter((r) => r.run_id !== newRun.run_id)
-          return { ...prev, runs: [...runs, newRun] }
-        })
+        // 只并入本地展示（服务端 payload 不动）：保留当前模型选择与参数草稿，选中新运行
+        setLocalRuns((prev) => [...prev.filter((r) => r.run_id !== newRun.run_id), newRun])
         setChosenRunId(newRun.run_id)
         // 参数草稿保持用户刚输入的值（不要被"运行自带参数"覆盖回去）
         setParams((prev) => ({ ...prev }))
@@ -307,7 +303,7 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
       } else {
         setMsg({ kind: 'ok', text: `已采纳：报告身份 ${ident.slice(0, 12) || '—'}；可导出当前包` })
       }
-      await load(); onAdopted?.()
+      await reload(); onAdopted?.()
     } catch (e: any) {
       setMsg({ kind: 'err', text: `采纳失败：${String(e?.message || e)}` })
     } finally { setBusy(false) }
@@ -319,7 +315,8 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
     // 没有当前包时先按当前版本**生成**一个；生成失败/仍为空 → 不打开任何目录。
     try {
       setBusy(true)
-      let name = String(state?.current_package || '')
+      // P0-4：包名取 usePackageState 的解析结果（与「导出与复核」面板同一函数、同一输入）
+      let name = String(pkg.res.name || '')
       if (!name) {
         const res = await fetch(`/api/task/${taskId}/package`, { method: 'POST' })
         const d = await res.json()
@@ -328,7 +325,7 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
           return
         }
         name = String(d.package)
-        await load()
+        await reload()
       }
       if (!name) { setMsg({ kind: 'err', text: '没有与采纳稿同版的当前包，未打开任何目录' }); return }
       window.open(`/files/${encodeURIComponent(taskId)}/${encodeURIComponent(name)}`, '_blank')
@@ -356,7 +353,7 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
             <TriangleAlert className="w-3.5 h-3.5 mt-0.5" />
             <span>分析状态读取失败：{loadErr || '连接中断'}（这不代表本任务没有可复算输入）</span>
           </span>
-          <button onClick={() => void load()}
+          <button onClick={() => void reload()}
             className="text-xs px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 shrink-0">
             重试
           </button>
@@ -588,12 +585,10 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
           {msg.text}
         </div>
       )}
+      {/* P0-4：这一行与「导出与复核」面板的说明来自**同一次 resolvePackage 调用**
+          （packageLine / exportPanelNote 同一模块），两边不可能再各说一套。 */}
       <div className="text-xs text-slate-500">
-        {state?.current_package
-          ? `当前包：${state.current_package}（与采纳稿同版才可下载）`
-          : (state?.adopted_identity
-            ? `尚无与当前采纳稿（${String(state.adopted_identity).slice(0, 12)}）同版的包：点"导出当前包"会先生成`
-            : (state?.package_note ? `交付包：${state.package_note}` : ''))}
+        {packageLine(pkg.res, { adoptedIdentity: state?.adopted_identity })}
       </div>
     </div>
   )

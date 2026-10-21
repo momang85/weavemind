@@ -339,13 +339,13 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
           <button onClick={() => previewCandidate()}
             disabled={disabled || busy || !taskId}
             className="px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40">
-            预览/比较候选
+            预览候选正文
           </button>
           <button onClick={() => queryOp(op || undefined)}
             disabled={disabled || busy || !taskId}
             className="px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-300 disabled:opacity-40"
-            title="按 operation id 查回上次候选操作的结果；不传则查最近一次">
-            查回上次操作
+            title="查看上次候选操作的结果；不传 operation id 则查最近一次">
+            查看上次操作
           </button>
           {admittedCount === 0 && (
             <span className="text-slate-600">还没有已准入的材料</span>

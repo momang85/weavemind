@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
+import { formatLocalTimeLabel } from '../lib/timeText'
+import { lessonTruncatedNote, skillLessonView } from '../lib/skillLessons'
 import { Layers, RefreshCw } from 'lucide-react'
 
 interface Skill { name: string; description: string; owner?: string; version?: string; applies?: string[]; lessons?: any[] }
@@ -39,7 +41,7 @@ export default function Skills() {
             <div className="flex items-center gap-2 mb-1">
               <span className="text-cyan-400 text-sm font-semibold">{s.name}</span>
               {s.version && <span className="text-xs text-slate-600">v{s.version}</span>}
-              {s.owner && <span className="text-xs text-slate-500">owner: {s.owner}</span>}
+              {s.owner && <span className="text-xs text-slate-500">负责方：{s.owner}</span>}
             </div>
             <div className="text-slate-400 text-xs mb-2">{s.description}</div>
             {s.applies && s.applies.length > 0 && (
@@ -52,11 +54,35 @@ export default function Skills() {
             {s.lessons && s.lessons.length > 0 && (
               <div className="mt-2 pt-2 border-t border-slate-800">
                 <div className="text-xs text-amber-500 mb-1">自动沉淀教训</div>
-                {s.lessons.map((l, i) => (
-                  <div key={i} className="text-xs text-slate-500 mb-1">
-                    {String(l.issue || '').slice(0, 80)}
-                  </div>
-                ))}
+                {s.lessons.map((l, i) => {
+                  // 正文完整显示（旧实现 slice(0, 80) 会切成断句且不加省略号）：
+                  // 按分号拆成多条并列问题，逐条折行，不硬截断。
+                  const view = skillLessonView(l)
+                  const truncatedNote = lessonTruncatedNote(view)
+                  return (
+                    <div key={l.id || i} className="text-xs text-slate-500 mb-2">
+                      {view.scopeNote && (
+                        <div className="mb-0.5 text-slate-600">（{view.scopeNote}）</div>
+                      )}
+                      {view.segments.length > 1 ? (
+                        <ul className="list-disc list-inside space-y-0.5">
+                          {view.segments.map((seg, j) => (
+                            <li key={j} className="break-words">{seg}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="break-words whitespace-pre-wrap">{view.segments[0] || '（这条教训没有正文）'}</div>
+                      )}
+                      {view.tailNote && (
+                        <div className="mt-0.5 text-amber-400/90">{view.tailNote}</div>
+                      )}
+                      <div className="mt-0.5 text-slate-600">
+                        共 {view.length} 字{truncatedNote}
+                        {l.ts ? ` · 记于 ${formatLocalTimeLabel(l.ts)}` : ''}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>

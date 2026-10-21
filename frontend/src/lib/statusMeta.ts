@@ -102,21 +102,40 @@ export function agentStatusDotClass(status?: string): string {
   return 'w-2 h-2 rounded-full bg-emerald-400'
 }
 
-/** 审计日志 / 定时任务等"结果"字段（ok / fail / error / denied）→ 中文与颜色。 */
+/**
+ * 审计日志 / 定时任务等"结果"字段 → 中文与颜色。
+ *
+ * 审计接口实际用的是 `allow` / `deny`（实机反例 2026-10-22：`/audit` 的「结果」列
+ * 原样显示英文 `allow`），旧映射只认 `ok/success/fail/failed/error/denied`，
+ * 于是审计页面上出现英文原值，同一产品的其它页面却写「成功/失败/拒绝」。
+ */
 export function resultLabel(raw?: string): string {
   const r = String(raw || '').trim().toLowerCase()
-  if (r === 'ok' || r === 'success') return '成功'
+  if (r === 'ok' || r === 'success' || r === 'allow' || r === 'allowed' || r === 'pass') return '成功'
   if (r === 'fail' || r === 'failed' || r === 'error') return '失败'
-  if (r === 'denied') return '拒绝'
+  if (r === 'denied' || r === 'deny') return '拒绝'
   return raw ? String(raw) : '—'
 }
 
 export function resultClass(raw?: string): string {
   const r = String(raw || '').trim().toLowerCase()
-  if (r === 'ok' || r === 'success') return 'text-emerald-400'
+  if (r === 'ok' || r === 'success' || r === 'allow' || r === 'allowed' || r === 'pass') return 'text-emerald-400'
   if (r === 'fail' || r === 'failed' || r === 'error') return 'text-red-400'
-  if (r === 'denied') return 'text-amber-400'
+  if (r === 'denied' || r === 'deny') return 'text-amber-400'
   return 'text-slate-400'
+}
+
+/** 审计「详情」里的原始英文 errno 片段 → 中文；识别不了就原样返回，不编。 */
+export function auditDetailLabel(raw?: string): string {
+  let s = String(raw || '').trim()
+  if (!s) return s
+  s = s.replace(/^\|+\s*/, '')                                   // 去掉前导竖线
+  s = s.replace(/\[Errno\s+\d+\]\s*/gi, '')                     // 去掉裸 errno
+  s = s.replace(/getaddrinfo failed/gi, '域名解析失败（本机 DNS 无法解析该域名）')
+  s = s.replace(/timed out|timeout/gi, '连接超时')
+  s = s.replace(/Connection refused/gi, '连接被拒绝（目标端口无服务）')
+  s = s.replace(/SSL[^，。;]*certificate[^，。;]*/gi, '证书校验失败')
+  return s
 }
 
 /** 是否"已完成"（终态）——决定是否展示报告/重跑等操作。 */
@@ -135,4 +154,39 @@ export function statusHint(raw?: string): string {
     case 'queued': return '已受理，等待执行'
     default: return ''
   }
+}
+
+
+/**
+ * 研究状态 / 人工复核枚举 → 中文。
+ *
+ * 实机反例（2026-10-22）：本地研究试验页的表格里「状态」列显示 `research_draft`、
+ * 「人工」列显示 `unreviewed`，而**同一张表**的「模拟/真实」列却是中文，反差明显。
+ * 取值以 `delivery_pipeline.RESEARCH_DRAFT/RESEARCH_READY` 与
+ * `research_report_adapter.py` 写出的 `human_review` 为准；未知值原样返回（不编）。
+ */
+const RESEARCH_STATE_ZH: Record<string, string> = {
+  research_ready: '研究就绪',
+  research_draft: '研究草稿',
+  limited_experience: '受限体验',
+}
+
+const HUMAN_REVIEW_ZH: Record<string, string> = {
+  unreviewed: '未复核',
+  pending: '待复核',
+  pending_review: '待复核',
+  reviewed: '已复核',
+  human_reviewed: '已人工复核',
+}
+
+export function researchStateLabel(raw?: string): string {
+  const v = String(raw || '').trim()
+  if (!v) return '—'
+  return RESEARCH_STATE_ZH[v.toLowerCase()] || v
+}
+
+export function humanReviewLabel(raw?: string): string {
+  const v = String(raw || '').trim()
+  if (!v) return '—'
+  return HUMAN_REVIEW_ZH[v.toLowerCase()] || v
 }

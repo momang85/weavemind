@@ -25,10 +25,14 @@ export function SectionTitle({ icon, title, extra }: {
   icon?: ReactNode; title: string; extra?: ReactNode
 }) {
   return (
-    <div className="flex items-center gap-2 mb-3">
-      {icon}
-      <h2 className="text-sm font-medium text-ink-muted">{title}</h2>
-      {extra && <div className="ml-auto text-xs text-ink-faint">{extra}</div>}
+    // 窄屏改为上下两行：此前标题与说明共用一行（`ml-auto`），375 宽下说明被压到
+    // 约 50px，逐字折行成「数值句从 / ModelRun 读 / 数装配」几乎不可读（20261022 复验）。
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2 mb-3">
+      <div className="flex items-center gap-2 min-w-0">
+        {icon}
+        <h2 className="text-sm font-medium text-ink-muted">{title}</h2>
+      </div>
+      {extra && <div className="text-xs text-ink-faint sm:ml-auto sm:text-right sm:max-w-[60%]">{extra}</div>}
     </div>
   )
 }
