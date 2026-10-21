@@ -2,6 +2,8 @@
 // 实机反例（2026-10-22 核查 recheck/settings.txt:28,393-405）：
 //   `余额：主端点 ok · 备用 unreachable`、角色徽章 `admin` / `viewer`、`创建于 -`。
 
+import { resultLabel } from './statusMeta.ts'
+
 /** 上游端点状态：把后端 reason 的英文枚举翻成中文；识别不了的如实标注，不猜。 */
 export function balanceStatusText(ok: unknown, reason?: string | null): string {
   const raw = String(reason ?? '').trim()
@@ -34,11 +36,19 @@ export function roleLabel(role?: string | null): string {
 /**
  * 定时任务「上次」结果的枚举 → 中文（真机反例 2026-10-22：`· submitted` 直出）。
  * 后端只产生两种值（scheduled_jobs.py:262,266）：`submitted` / `error`。
- * 公用的 resultLabel（statusMeta.ts）只认 ok/fail/deny 一族，不覆盖这里的枚举。
+ *
+ * **状态→文案只有一套实现**：本函数只补 `submitted` 这一个本域特有取值，
+ * 其余（error/fail/ok/deny…）一律委托 `statusMeta.resultLabel`——
+ * 免得同一产品里"提交失败/失败/失败(err)"各写各的（前端守卫
+ * `test_status_bearing_files_use_shared_implementation` 就是拦这个）。
  */
 export function scheduledResultLabel(raw?: string | null): string {
   const r = String(raw ?? '').trim().toLowerCase()
+  if (!r) return '无记录'
   if (r === 'submitted') return '已提交入队'
+  // 本域把 error 说成"提交失败"（比通用的"失败"更准确：失败的是**提交**这一步）
   if (r === 'error') return '提交失败'
-  return r ? `未知结果（原文：${r}）` : '无记录'
+  const known = resultLabel(r)
+  // resultLabel 对不认识的枚举原样返回；这里把"未知原文"标出来，不冒充已识别
+  return known === r ? `未知结果（原文：${r}）` : known
 }

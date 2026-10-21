@@ -113,15 +113,32 @@ class TestNoDeadDeclarations(unittest.TestCase):
         self.assertEqual(unused, [], f"这些颜色令牌零引用（死令牌）：{unused}")
 
 
+# 允许的"统一实现"入口：statusMeta / StatusBadge 本体，或**经 statusMeta 派生**的
+# 域文案模块（settingsText 只补"已提交入队"这类本域取值，其余委托 resultLabel）。
+# 下面 test_shared_text_modules_derive_from_status_meta 保证这个白名单不是后门。
+SHARED_STATUS_IMPLS = ("statusMeta", "StatusBadge", "settingsText")
+
+
 class TestStatusSemanticsUnified(unittest.TestCase):
     def test_status_bearing_files_use_shared_implementation(self):
         missing = []
         for rel in STATUS_BEARING:
             text = (SRC / rel).read_text(encoding="utf-8")
-            if not any(k in text for k in ("statusMeta", "StatusBadge")):
+            if not any(k in text for k in SHARED_STATUS_IMPLS):
                 missing.append(rel)
         self.assertEqual(missing, [],
-                         f"这些文件展示任务状态但没走统一实现（statusMeta/StatusBadge）：{missing}")
+                         f"这些文件展示任务状态但没走统一实现"
+                         f"（{"/".join(SHARED_STATUS_IMPLS)}）：{missing}")
+
+    def test_shared_text_modules_derive_from_status_meta(self):
+        """白名单里的域文案模块必须真的派生自 statusMeta，不得自成第二套映射。"""
+        p = SRC / "lib" / "settingsText.ts"
+        self.assertTrue(p.is_file())
+        src = p.read_text(encoding="utf-8")
+        # 扩展名可带 `.ts`（ESM 测试解析需要），两种写法都算派生
+        self.assertRegex(src, r"from '\./statusMeta(\.ts)?'",
+                         "settingsText 必须复用 statusMeta 的映射，不能另写一套状态文案")
+        self.assertIn("resultLabel(", src)
 
     def test_no_raw_status_enum_rendered_in_jsx_text(self):
         """禁止在 JSX 文本位直接渲染后端英文枚举（如 >{m.status}<）。"""
@@ -150,10 +167,17 @@ class TestK3AnalysisWorkbenchWiring(unittest.TestCase):
         self.assertIn("<AnalysisWorkbenchPanel", viewer)
 
     def test_panel_calls_the_recompute_and_adopt_endpoints(self):
+        # 读分析状态的 fetch 已抽到 lib/analysisState.ts（模块级缓存，供面板与导出面板共用），
+        # 所以断言面 = 面板 + 该模块：接口仍被调用、面板仍依赖它。
         src = self.PANEL.read_text(encoding="utf-8")
-        self.assertIn("/analysis/recompute", src, "面板没有接确定性复算接口")
-        self.assertIn("/analysis/adopt", src, "面板没有接显式采纳接口")
-        self.assertIn("/analysis`", src, "面板没有读分析状态（可用模型与允许改的假设）")
+        state_src = (SRC / "lib" / "analysisState.ts")
+        combined = src + "\n" + (state_src.read_text(encoding="utf-8")
+                                  if state_src.is_file() else "")
+        self.assertIn("/analysis/recompute", combined, "面板没有接确定性复算接口")
+        self.assertIn("/analysis/adopt", combined, "面板没有接显式采纳接口")
+        self.assertIn("/analysis`", combined, "面板没有读分析状态（可用模型与允许改的假设）")
+        self.assertIn("useAnalysisPanel", src,
+                      "面板必须通过共用的状态模块读分析（否则又会出现两套状态）")
 
     def test_panel_states_the_three_disciplines(self):
         src = self.PANEL.read_text(encoding="utf-8")
@@ -535,10 +559,23 @@ class TestOverlaysEscapeTransformedAncestors(unittest.TestCase):
 
 
 class TestReportPageWiring(unittest.TestCase):
-    """报告页必须渲染后端**早就在返回**的证据字段（F3a 之前这些字段一个都没上屏）。"""
+    """报告页必须渲染后端**早就在返回**的证据字段（F3a 之前这些字段一个都没上屏）。
+
+    说明：结论卡的取表/卡头逻辑已抽到 `frontend/src/lib/topStats.ts`（纯函数、可单测）。
+    守卫的意图是"这件事在产品里被实现了"，不是"必须写在某一个文件里"，所以断言面
+    包含页面本身 **与其抽取模块**；抽走实现不该让守卫误报，也不该让它失效。
+    """
+
+    def _impl_text(self) -> str:
+        parts = [(SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")]
+        for extra in ("lib/topStats.ts", "lib/reportStats.ts"):
+            p = SRC / extra
+            if p.is_file():
+                parts.append(p.read_text(encoding="utf-8"))
+        return "\n".join(parts)
 
     def setUp(self):
-        self.text = (SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")
+        self.text = self._impl_text()
 
     def test_traceability_fields_rendered(self):
         for field in ("covered_ratio", "amount_rate", "untraceable", "unverifiable_count"):

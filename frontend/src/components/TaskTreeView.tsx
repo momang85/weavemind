@@ -157,7 +157,7 @@ const TreeNode = memo(function TreeNode({
           {/* P2-4b：被折叠的共用说明在这里只显示一处（原文可悬停/换行看全） */}
           {fold.shared.map((s, i) => (
             <div key={'shared-' + i} style={{ paddingLeft: 20 }}
-              className="text-[11px] text-slate-500 break-words max-h-12 overflow-y-auto pb-1"
+              className="text-xs text-slate-500 break-words max-h-12 overflow-y-auto pb-1"
               title={s.text}>
               共用说明（{s.count} 步相同，已折叠到这一处）：{s.text}
             </div>

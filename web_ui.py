@@ -1272,6 +1272,67 @@ def _map_event_type(t: str) -> str:
         return "guardian"
     return "guardian"
 
+def _status_aux_snapshots() -> dict:
+    """`_system_status` 的**降级面**快照：Redis / 检索 / 行情源 / 预算 / 依赖 / 沙箱。
+
+    这些只依赖进程内状态与只读探测，**不依赖数据库**——所以正常路径与兜底路径
+    必须用同一份实现。此前兜底路径整段跳过它们，导致数据库不可读时
+    （例如**全新检出还没有 agents 表**，正是新用户首次启动的状态）健康页反而丢掉
+    Redis 降级、依赖健康这些最该展示的信息，接口形状也与正常返回不同
+    （消费方直接 `st["redis"]` 就 KeyError，CI 的
+    `test_task20_redis_degradation` 就是这样暴露的）。
+    """
+    out: dict = {}
+    # Redis 健康快照（可用性 + 降级持续时长）
+    try:
+        import redis_health as _redis_health
+        out["redis"] = _redis_health.status_snapshot()
+    except Exception as exc:
+        logging.getLogger("web_ui").warning("Redis 健康快照失败：%s", str(exc)[:120])
+        out["redis"] = {}
+    # 检索健康（Redis 可用时才有快照）
+    search_health: dict = {}
+    try:
+        if _redis_ready():
+            raw = _new_redis().get("search_engine_health")
+            if raw:
+                search_health = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        search_health = {}
+    out["search_health"] = search_health
+    # 行情数据源健康（eastmoney/tencent/sina 熔断 + 冷却），进程内快照
+    try:
+        from adapters.source_health import get_health as get_source_health
+        out["source_health"] = get_source_health()
+    except Exception:
+        out["source_health"] = {}
+    # 月度预算状态（超限降级可观测）
+    try:
+        from costs import get_budget_status
+        out["budget"] = get_budget_status()
+    except Exception:
+        out["budget"] = {}
+    # 统一依赖健康视图 + 唯一一份可行动健康视图
+    try:
+        import health_registry
+        dependencies = health_registry.snapshot()
+    except Exception:
+        dependencies = []
+    out["dependencies"] = dependencies
+    try:
+        import actionable_state as _as
+        out["health"] = _as.unified_health(dependencies, out["source_health"])
+    except Exception as exc:
+        logging.getLogger("web_ui").warning("统一健康视图失败：%s", str(exc)[:120])
+        out["health"] = {"items": [], "summary": {}, "ok": False, "causes": []}
+    # 代码执行沙箱（容器隔离不可用时必须显式说明）
+    try:
+        out["code_sandbox"] = _code_sandbox_status()
+    except Exception:
+        out["code_sandbox"] = {}
+    return out
+
+
 def _system_status():
     try:
         db = sqlite3.connect(DB_PATH, timeout=10); db.row_factory = sqlite3.Row
@@ -1427,11 +1488,15 @@ def _system_status():
                 _publish_embed_alert(_fb_notice)
         except Exception:
             _fb_embedding = {}
-        return {"agents": [], "queues": {}, "tasks": {"total": 0, "success": 0, "today": 0},
-                "memory": {"conversations": 0, "strategies": 0}, "recent": [],
-                "uptime_sec": 0, "survival_rate": 100,
-                "llm_warning": _fb_warning, "embedding_health": _fb_embedding,
-                "llm_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+        # 降级面快照用与正常路径**同一份实现**补齐：数据库不可读时，
+        # Redis/依赖/沙箱这些"最该看见"的信息不能反而消失，接口形状也必须一致。
+        _fb = {"agents": [], "queues": {}, "tasks": {"total": 0, "success": 0, "today": 0},
+               "memory": {"conversations": 0, "strategies": 0}, "recent": [],
+               "uptime_sec": 0, "survival_rate": 100,
+               "llm_warning": _fb_warning, "embedding_health": _fb_embedding,
+               "llm_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+        _fb.update(_status_aux_snapshots())
+        return _fb
 
 def _code_sandbox_status() -> dict:
     """沙箱状态快照（模式/是否要求隔离/隔离是否就绪/镜像是否存在）。

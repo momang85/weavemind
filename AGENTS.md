@@ -44,7 +44,7 @@
 
 1. **根目录平坦布局**：142 个根级 .py 顶层互相 import。改公共模块前先全局搜引用。
 2. **巨文件**：orchestrator_v2.py 8445 行、web_ui.py 6522 行（212 方法）、acceptance_checker.py 3767 行、llm_client.py 2847 行。小步修改，别顺手重构；所谓拆分只是 Mixin 搬代码，不改耦合。
-3. **测试平铺根目录**（82 个 test_*.py，test_p0.py 412 用例）：按文件运行，别全量跑。
+3. **测试平铺根目录**（90 个 test_*.py，test_p0.py 412 用例）：按文件运行，别全量跑。
 4. **密钥**：`.env` 与 `config.json` 含真实 key；绝不提交、绝不粘贴到日志或回复。`config.json.bak.*` 系列未被 .gitignore 覆盖（见积压 #1）。
 5. **三套 worker 基类并存**（根 `worker_base.py`、`workers/`、`async_worker_base.py`）：改动前先确认现役实现。
 6. 研究交付的语义红线：验收状态与人工复核分离，勿在代理侧"替用户"标记复核通过。

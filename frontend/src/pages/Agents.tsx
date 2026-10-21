@@ -79,7 +79,7 @@ function AgentCard({
 
         {/* Name */}
         <h3 className="text-slate-200 font-semibold text-sm mb-2">{agentDisplayName(agent)}</h3>
-        <div className="text-[10px] font-mono text-slate-600 mb-2" title="运行标识（队列与白名单按它匹配）">
+        <div className="text-xs font-mono text-slate-600 mb-2" title="运行标识（队列与白名单按它匹配）">
           {agentRawId(agent)}
         </div>
 

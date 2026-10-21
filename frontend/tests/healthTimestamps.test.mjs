@@ -30,9 +30,19 @@ test('裸串（本仓 strftime 写入 = 本地墙钟）只改格式，不做时�
   assert.equal(localizeTimestamps('fetched_at 2026-10-21 20:15:00'), 'fetched_at 10-21 20:15:00')
 })
 
-test('Z 后缀与已带本地偏移的串都正确归一', () => {
+test('Z 后缀与已带偏移的串都正确归一（断言与运行环境时区无关）', () => {
+  // 两种写法表达同一时刻，归一端点后必须相同
   assert.equal(localizeTimestamps('2026-10-21T14:00:00Z'), localizeTimestamps('2026-10-21T14:00:00+00:00'))
-  assert.match(localizeTimestamps('2026-10-21T22:00:00+08:00'), /10-21 22:00:00/)
+  // 不写死"22:00:00"：CI 跑在 UTC，本地是 UTC+8，写死就只能在东八区通过。
+  // 正确口径是"按本机时区换算"，所以期望值也从 Date 推导。
+  const expected = new Date('2026-10-21T22:00:00+08:00')
+  const hh = String(expected.getHours()).padStart(2, '0')
+  const mm = String(expected.getMinutes()).padStart(2, '0')
+  assert.match(localizeTimestamps('2026-10-21T22:00:00+08:00'),
+    new RegExp(`10-21 ${hh}:${mm}:00`))
+  // 带本地偏移的串换算后与同刻的 Z 串一致（同一时刻同一显示）
+  assert.equal(localizeTimestamps('2026-10-21T22:00:00+08:00'),
+    localizeTimestamps('2026-10-21T14:00:00Z'))
 })
 
 test('不可解析的串原样保留，不编造', () => {

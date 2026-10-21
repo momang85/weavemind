@@ -150,6 +150,22 @@ jobs:
         run: python test_task_projection.py
       - name: Writer consolidation tests
         run: python test_writer_consolidation.py
+      - name: "Search retry keeps already-obtained candidates (no budget starvation)"
+        run: python test_search_candidate_kept.py
+      - name: "Source exclusion audit (candidate vs adopted vs excluded, package inclusion)"
+        run: python test_source_exclusion_registry.py
+      - name: "LLM stream fallback attribution, bad non-SSE response, probe path"
+        run: python test_llm_stream_fallback_and_bad_response.py
+      - name: "Orchestrator instance claim order (no cleanup before claim)"
+        run: python test_orchestrator_claim_order.py
+      - name: "Human review binding to current adopted version (F4)"
+        run: python test_human_review_binding.py
+      - name: "Metrics p95 nearest-rank"
+        run: python test_metrics_p95_nearest_rank.py
+      - name: "Search year token digit boundary (stock code is not a year)"
+        run: python test_search_year_boundary.py
+      - name: "Workspace event timestamps and subject-token gate"
+        run: python test_ws_time_and_topic_gate.py
       - name: Checkpoint tests
         run: python test_checkpointer.py
       - name: Financial chain tests

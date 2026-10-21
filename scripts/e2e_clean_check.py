@@ -194,7 +194,14 @@ def main() -> int:
 
         # 4) 起服务
         report["stage"] = "start"
-        up = _run([sys.executable, "launcher.py", "start"], clone, env, timeout=420,
+        # 必须显式关掉守护常驻：`launcher.py start` 默认 `WEAVEMIND_SUPERVISE=1`，
+        # 走 `supervise_services()` 是**阻塞常驻**的守护循环，同步 subprocess.run
+        # 永远等不到它返回（CI 实测 420s 超时，而服务其实早已起来）。
+        # 宿主上的正常入口是 `start.bat → launcher.py up`（up 再把守护拉成独立后台进程）；
+        # 本步要的是"起完就返回、随后轮询 /api/health"，所以按 launcher 文档关守护。
+        start_env = dict(env)
+        start_env["WEAVEMIND_SUPERVISE"] = "0"
+        up = _run([sys.executable, "launcher.py", "start"], clone, start_env, timeout=420,
                   check=False)
         started = True
         tail = (up.stdout or "").strip().splitlines()[-3:]

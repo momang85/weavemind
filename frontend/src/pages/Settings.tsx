@@ -415,7 +415,7 @@ export default function SettingsPage() {
                 </div>
                 <details className="text-slate-400">
                   <summary className="cursor-pointer select-none">查看服务端原始报文（原样，不做截断）</summary>
-                  <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-slate-500">
+                  <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-slate-500">
                     {g.view.raw || '（服务端未回传 health_reason）'}
                   </pre>
                   {g.view.rawNote && <div className="mt-1 text-amber-300/90">{g.view.rawNote}</div>}
