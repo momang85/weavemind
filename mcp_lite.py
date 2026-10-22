@@ -19,12 +19,19 @@ from tool_dispatch import dispatch_tool
 
 
 def _all_tools() -> list[dict]:
-    """本地工具 + 金融数据插件工具（免费合规源，无需账号）。"""
+    """本地工具 + 金融数据插件工具（免费合规源）+ 用户自加数据源（设置页配置）。"""
+    tools = list(TOOL_REGISTRY)
     try:
         from finance_plugin import FINANCE_TOOL_REGISTRY
-        return list(TOOL_REGISTRY) + list(FINANCE_TOOL_REGISTRY)
+        tools = tools + list(FINANCE_TOOL_REGISTRY)
     except Exception:
-        return list(TOOL_REGISTRY)
+        pass
+    try:
+        import data_sources
+        tools = tools + list(data_sources.tool_registry())
+    except Exception:
+        pass
+    return tools
 
 
 def _input_schema(tool: dict) -> dict:
@@ -79,6 +86,28 @@ class MCPServer:
             if not args.get("instruction"):
                 return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "arguments.instruction required"}}
             try:
+                # 用户自加数据源优先（finance_custom_<id>；密钥在 credentials.json）
+                try:
+                    from data_sources import call_source_tool, is_source_tool
+                    if is_source_tool(name):
+                        result = call_source_tool(
+                            name, str(args["instruction"]),
+                            timeout=float(int(args.get("timeout") or 60)),
+                        )
+                        if result is not None:
+                            return {
+                                "jsonrpc": "2.0", "id": mid,
+                                "result": {
+                                    "content": [{
+                                        "type": "text",
+                                        "text": json.dumps(result.get("result", result),
+                                                           ensure_ascii=False),
+                                    }],
+                                    "isError": result.get("status") != "success",
+                                },
+                            }
+                except Exception:
+                    pass
                 # 金融数据插件优先（本地直连免费源，无需账号/worker）
                 try:
                     from finance_plugin import call_finance_tool, is_finance_tool

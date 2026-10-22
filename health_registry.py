@@ -36,6 +36,7 @@ _NAME_PLANNER = "planner"
 _NAME_MCP = "mcp"
 _NAME_LORA = "lora"
 _NAME_REDIS = "redis"  # 任务20
+_NAME_DATA_SOURCES = "data_sources"  # 用户自加数据源（设置页配置）
 
 # 状态语义（专项 §6）：缺快照与过期都不能是绿色可用
 STATE_AVAILABLE = "available"
@@ -583,9 +584,35 @@ def _live_probe_lora() -> dict:
                 "detail": "", "latency_ms": int((time.time() - started) * 1000)}
 
 
+def probe_data_sources() -> dict:
+    """用户自加数据源（设置页配置）的登记状态：只回数量/名称与密钥是否已配置，
+    **绝不回密钥值**。启用的源缺密钥（且非 none 鉴权）按降级报。"""
+    try:
+        from data_sources import enabled_sources, source_secret
+        sources = enabled_sources()
+    except Exception as exc:
+        return _unknown_entry("data_sources", f"数据源配置不可读：{str(exc)[:80]}")
+    if not sources:
+        return _entry(_NAME_DATA_SOURCES, True, "未配置用户数据源（设置页可添加）",
+                      detail="no sources", state=STATE_AVAILABLE)
+    missing_key: list[str] = []
+    for src in sources:
+        auth = str(src.get("auth") or "bearer")
+        if auth != "none" and not source_secret(src):
+            missing_key.append(str(src.get("id") or "?"))
+    if missing_key:
+        return _entry(_NAME_DATA_SOURCES, False,
+                      "启用的数据源缺 API 密钥：" + ", ".join(missing_key[:5]),
+                      detail=f"{len(sources)} 个已启用，{len(missing_key)} 个缺密钥",
+                      state=STATE_DEGRADED)
+    return _entry(_NAME_DATA_SOURCES, True, "",
+                  detail="已启用：" + ", ".join(str(s.get("id")) for s in sources[:8]),
+                  state=STATE_AVAILABLE)
+
+
 _PROBES = (
     probe_llm, probe_search, probe_market_source, probe_embedding, probe_sandbox,
-    probe_planner, probe_mcp, probe_lora, probe_redis,
+    probe_planner, probe_mcp, probe_lora, probe_redis, probe_data_sources,
 )
 
 

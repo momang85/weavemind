@@ -220,11 +220,18 @@ SECTIONS: list[dict] = [
     },
     {
         "key": "data_sources",
-        "label": "数据源密钥（预留）",
-        "note": "当前行情/宏观/新闻均为免费公开接口，无需密钥；该字段为未来付费额度预留。",
+        "label": "数据源（用户自加）",
+        "note": ("在本页「数据源」区块编辑：每个源填 id/名称/类型/base_url，密钥单独存本机密钥仓"
+                 "（credentials.json，不进 git；接口只回「已配置」，不回明文）。启用后自动登记出站"
+                 "端点（data_source:<id>，私网/本机地址需勾选「内网服务」确认）并注册为可调用工具"
+                 " finance_custom_<id>；停用或删除立即撤销登记、清除对应工具。"
+                 "许可提示：自定义/授权源（Wind 等）的正文默认会进入模型上下文——若该源许可不允许"
+                 "外发给第三方模型，请把该源的 model_context 设为「仅派生结果」。"),
+        "kind": "list",
         "entries": [
-            {"path": "data_sources.crypto_api_key", "label": "CoinGecko Key", "kind": "secret",
-             "status": "reserved", "affects": "预留，当前不影响任何功能"},
+            {"path": "data_sources", "label": "数据源列表", "kind": "list", "testable": True,
+             "health": "data_sources",
+             "affects": "取数第③级（结构化补充源）+ 工具目录；不可用时该工具如实返回失败"},
         ],
     },
     {
@@ -473,4 +480,15 @@ def validate_payload(cfg: dict) -> list[str]:
                     if path not in editable:
                         issues.append(f"未声明的配置项：{path}")
     walk(cfg)
+    # 列表型段（data_sources / mcp_servers / network.endpoints）在 walk 里只是一个键，
+    # 条目内部不会被递归校验——数据源是"用户可自定义的端点"，必须逐条验：
+    # id 合法且不重复、kind 在域内、base_url 是 http(s)、method/auth 取值受控。
+    items = cfg.get("data_sources") if isinstance(cfg, dict) else None
+    if items is not None:
+        try:
+            from data_sources import validate_items
+            _clean, item_issues = validate_items(items)
+            issues.extend(f"data_sources：{i}" for i in item_issues)
+        except Exception as exc:                     # noqa: BLE001 - 校验器坏了要拒绝而非放行
+            issues.append(f"data_sources 校验器不可用：{str(exc)[:120]}")
     return issues[:10]

@@ -184,6 +184,8 @@ jobs:
         run: python test_notifications.py
       - name: Settings requirements tests
         run: python test_settings_requirements.py
+      - name: "User data sources (settings editor, credentials vault, registered egress, probe)"
+        run: python test_data_source_settings.py
       - name: Task time optimization tests
         run: python test_task_time_optimization.py
       - name: "Y2a event calendar & market event returns (disclosure-date evidence, future filter, caliber gate, overlap dedup, replay)"

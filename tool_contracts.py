@@ -112,6 +112,15 @@ def tool_catalog_text() -> str:
             lines.append(f"- {t['name']}: {t['description']} 返回: {t['returns']}")
     except Exception:
         pass
+    # 用户自加数据源（设置页配置，密钥在 credentials.json）：规划器必须能看见它，
+    # 否则"加了源但计划里永远用不到"——与设置页声称的能力不一致。
+    try:
+        import data_sources
+        seg = data_sources.catalog_text()
+        if seg:
+            lines.append(seg)
+    except Exception:
+        pass
     try:
         import mcp_client
         with mcp_client._LOCK:

@@ -67,6 +67,18 @@ def dispatch_tool(
             return ext
     except Exception:
         pass
+    # 用户自加数据源（设置页配置的 finance_custom_<id>）：本地直连，不经 worker 派发。
+    # 未配置/已停用的源如实返回 failed，不再往下落到 find_agent（那会报 "No worker"，
+    # 掩盖真实原因）。
+    try:
+        from data_sources import call_source_tool
+        src = call_source_tool(capability, str(instruction),
+                               timeout=float(max(5, min(120, int(timeout or 60)))))
+        if src is not None:
+            _audit(capability, instruction, src, time.time() - t0, task_id)
+            return src
+    except Exception:
+        pass
     agent = find_agent(capability)
     if not agent:
         return {"task_id": "?", "status": "FAILED", "result": f"No worker for {capability}"}

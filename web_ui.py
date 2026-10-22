@@ -764,6 +764,75 @@ def _deep_merge(base: dict, patch: dict) -> dict:
 # LLM 相关且含 api_key 的配置段：脱敏与"空值不回写"保护统一按此表
 _LLM_KEY_SECTIONS = ("llm", "embedding", "planner", "backup", "image")
 
+# 列表型配置段里的密钥字段：改道本机密钥仓（credentials.json），config.json 只留
+# 非密钥字段。键的构造是 "段名.<条目 id>.<字段>"，删除条目即整前缀清理。
+_LIST_SECRET_SECTIONS = (
+    ("data_sources", "id", "api_key"),
+    ("mcp_servers", "name", "api_key"),
+)
+
+
+def _route_list_secrets(body: dict) -> dict:
+    """保存前把列表型段里的 api_key 写进密钥仓，并从待落盘负载里移除。
+
+    空值语义与 LLM 段一致：GET 下发的是脱敏空串，**空串=保持不变**；要删除密钥须显式传
+    `clear_key: true`（前端"清除密钥"勾选框）。删除整个条目时按前缀清理孤儿凭据。
+
+    返回统计（只含计数，不含任何密钥值），供审计使用。
+    """
+    stats = {"written": 0, "cleared": 0, "dropped": 0}
+    try:
+        import credentials
+    except Exception as exc:                       # noqa: BLE001 - 密钥仓不可用就别写盘
+        logger.warning("密钥仓不可用，数据源密钥未落盘（配置照常保存）：%s", str(exc)[:120])
+        return stats
+    existing = _load_config() or {}
+    for section, id_field, key_field in _LIST_SECRET_SECTIONS:
+        items = body.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get(id_field) or "").strip()
+            if item.pop("clear_key", False) and rid:
+                if credentials.delete_secret(f"{section}.{rid}.{key_field}"):
+                    stats["cleared"] += 1
+                continue
+            value = str(item.pop(key_field, "") or "")
+            if rid and value:
+                if credentials.set_secret(f"{section}.{rid}.{key_field}", value):
+                    stats["written"] += 1
+        # 孤儿凭据：配置里已删掉的条目不再留钥匙
+        old = existing.get(section)
+        if isinstance(old, list):
+            new_ids = {str(i.get(id_field) or "") for i in items if isinstance(i, dict)}
+            for prev in old:
+                if not isinstance(prev, dict):
+                    continue
+                pid = str(prev.get(id_field) or "")
+                if pid and pid not in new_ids:
+                    stats["dropped"] += credentials.forget_prefix(f"{section}.{pid}")
+    return stats
+
+
+def _mark_list_key_states(out: dict) -> None:
+    """给列表型条目补"已配置"标记（不返回值；前端据此显示「已配置，留空保持不变」）。"""
+    try:
+        import credentials
+    except Exception:
+        return
+    for section, id_field, key_field in _LIST_SECRET_SECTIONS:
+        items = out.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get(id_field) or "").strip()
+            item["api_key_set"] = bool(rid) and credentials.has_secret(
+                f"{section}.{rid}.{key_field}")
+
 
 def _public_config(cfg: dict | None) -> dict:
     """返回给前端的配置副本：剥离 users 段与全部密钥。
@@ -771,6 +840,8 @@ def _public_config(cfg: dict | None) -> dict:
     - users（含密码哈希）不入响应；
     - LLM 相关五段的 api_key 置空 + api_key_set 标记（已配置），
       前端据此显示"已配置（留空保持不变）"掩码态；明文 key 永不下发；
+    - 用户自加数据源（data_sources）与 mcp_servers 的条目级 api_key 同样
+      置空 + api_key_set（真实密钥在 credentials.json，不进 config.json）；
     - notifications 段复用 public_notifications_config（脱敏
       password/sendkey，与 /api/notifications 同口径）；
     - 兜底递归清扫其余段中的 api_key/password/secret/sendkey/token 类键。
@@ -791,6 +862,8 @@ def _public_config(cfg: dict | None) -> dict:
             out["notifications"] = public_notifications_config(out["notifications"])
         except Exception:
             pass
+    # 列表条目的"已配置"看密钥仓，不看 config.json（密钥根本不在那里）
+    _mark_list_key_states(out)
     out.pop("audit", None)  # 审计配置属服务端内部，不回显
     return out
 
@@ -8264,7 +8337,17 @@ def _post_config(self, p, body, admin):
             audit_log(admin.get("user", ""), self._client_ip(), "config.save",
                       result="fail", detail="; ".join(issues)[:200])
             return self._json({"error": "配置校验失败", "issues": issues}, 400)
+        # 用户自加数据源 / MCP 条目的密钥改道本机密钥仓（config.json 只留非密钥字段）；
+        # 被删除的条目同步清掉孤儿凭据。统计只含计数，不含任何密钥值。
+        secret_stats = _route_list_secrets(body)
         _save_config(body)
+        # 登记表失效：新加/停用/删除的数据源立即生效（net_policy 下次读取重载），
+        # 不必重启进程
+        try:
+            import net_policy as _net
+            _net.invalidate_registry()
+        except Exception:
+            pass
         llm = body.get("llm",{})
         if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
         if llm.get("base_url"): os.environ["LLM_BASE_URL"] = llm["base_url"]
@@ -8275,8 +8358,11 @@ def _post_config(self, p, body, admin):
             _clear_balance_cache()
         except Exception:
             pass
-        audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
-        return self._json({"status":"saved"})
+        audit_log(admin.get("user", ""), self._client_ip(), "config.save",
+                  result="ok",
+                  detail=("secrets: written=%(written)d cleared=%(cleared)d "
+                          "dropped=%(dropped)d" % secret_stats))
+        return self._json({"status":"saved", "secrets": secret_stats})
 
 
 def _get_config_requirements(self, p):
@@ -8318,6 +8404,10 @@ def _get_config_requirements(self, p):
             resolved = settings_schema.resolve(item, cfg, env)
             api_key_set = bool(resolved.get("value")) and item.get("kind") == "secret"
             display_value = settings_schema.mask(item, resolved.get("value"), api_key_set)
+            # 列表段（数据源/MCP/端点登记）的条目里可能混着历史明文 api_key：递归清零，
+            # 与 /api/config 同口径——密钥只从密钥仓读，任何接口都不回发明文。
+            if isinstance(display_value, list):
+                display_value = _scrub_secret_keys(display_value)
             health_item = health.get(str(item.get("health") or "")) or {}
             entries_out.append({
                 "path": item["path"],
@@ -8380,7 +8470,9 @@ def _post_config_test(self, p, body, admin):
         allowed = set(settings_schema.testable_targets().keys()) | {"mcp", "lora"}
     except Exception:
         allowed = {"llm", "planner", "backup", "embedding"}
-    if target not in allowed:
+    # 逐源探测：`data_source:<id>`（设置页每个数据源一个"测试"按钮）
+    per_source = target.startswith("data_source:")
+    if target not in allowed and not per_source:
         return self._json({"error": f"不支持的探测目标：{target or '(空)'}"}, 400)
     ip = self._client_ip()
     if ip not in ("127.0.0.1", "::1"):
@@ -8388,6 +8480,17 @@ def _post_config_test(self, p, body, admin):
         if locked:
             return self._json({"error": f"探测过于频繁，请 {wait}s 后重试"}, 429)
         _bf_record(f"cfgtest:{ip}")
+    if per_source:
+        sid = target.split(":", 1)[1].strip()
+        try:
+            import data_sources
+            result = data_sources.probe_source(sid)
+        except Exception as exc:
+            return self._json({"error": f"数据源探测失败：{str(exc)[:150]}"}, 500)
+        audit_log(admin.get("user", ""), ip, "config.test", target=target,
+                  result="ok" if result.get("ok") else "fail",
+                  detail=str(result.get("reason") or "")[:120])
+        return self._json(result)
     try:
         import health_registry
         result = health_registry.live_probe(target)

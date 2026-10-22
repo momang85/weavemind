@@ -8,9 +8,13 @@
   各自登记。调用方**不能**自报 `trusted`/`allow_private` 提升权限——私网例外只绑定到登记的
   具体服务。登记的环回模型服务（如 `http://127.0.0.1:11434`）允许；同一个地址出现在网页或
   研究指令里仍然拒绝。
+- `fetch_service(endpoint_id, ...)`：**登记服务的抓取通道**（20261021 补齐）：先
+  `request_service` 授权，再用已验 IP 发请求，**鉴权头是这条通道的用途**（数据源密钥、
+  webhook token）——与下一条"内容派生 URL 不带凭据"互不重叠。
 - `fetch_document(url, ...)`：**内容派生 URL**（资料正文、任务指令、模型输出、搜索结果）。
   只允许 http/https 公网内容，拒绝环回/私网/链路本地/共享/保留/非全局可路由地址与元数据服务，
-  拒绝 URL 用户凭据；**解析失败即拒绝**；所有解析结果都必须合规。
+  拒绝 URL 用户凭据，**并剥掉 Authorization/Cookie/X-Api-Key 头**（内容抓取不带凭据）；
+  **解析失败即拒绝**；所有解析结果都必须合规。
 
 共同约束：
 
@@ -284,10 +288,12 @@ def _endpoint_from_dict(raw: dict) -> Endpoint | None:
 
 
 def load_registry(force: bool = False) -> dict[str, Endpoint]:
-    """读登记端点：`config.json` 的 `network.endpoints`（运维/管理员维护）。
+    """读登记端点：`config.json` 的 `network.endpoints`（运维/管理员维护）
+    + 设置页里**启用的用户数据源**（`data_sources`，见 data_sources.endpoint_items）。
 
     个人单用户安装由本机操作者配置；银行版由授权管理员配置并审计。配置里的地址**不代表**
-    可信——是否允许私网只由登记项自身的用途与 `loopback` 标记决定。
+    可信——是否允许私网只由登记项自身的用途与 `loopback` 标记决定。用户数据源按端点登记
+    （`data_source:<id>`），删除或停用即撤销；私网/环回地址仍须该源显式勾选 loopback。
     """
     global _REGISTRY, _REGISTRY_LOADED
     if _REGISTRY_LOADED and not force:
@@ -299,6 +305,14 @@ def load_registry(force: bool = False) -> dict[str, Endpoint]:
             ep = _endpoint_from_dict(raw if isinstance(raw, dict) else {})
             if ep:
                 reg[ep.endpoint_id] = ep
+        try:
+            from data_sources import endpoint_items
+            for raw in endpoint_items(data):
+                ep = _endpoint_from_dict(raw)
+                if ep:
+                    reg[ep.endpoint_id] = ep
+        except Exception as exc:              # 数据源解析失败不影响网络登记表
+            logger.debug("用户数据源登记读取失败（按未登记处理）：%s", str(exc)[:120])
     except Exception as exc:
         logger.debug("网络端点登记表读取失败（按空表处理）：%s", exc)
     _REGISTRY, _REGISTRY_LOADED = reg, True
@@ -584,6 +598,107 @@ def fetch_document(url: str, *, timeout: float | None = None,
             except Exception:
                 pass
     raise FetchError(last_error or "连接失败")
+
+
+def fetch_service(endpoint_id: str, *, path: str = "", params=None, headers=None,
+                  method: str = "GET", body: bytes | str | None = None,
+                  timeout: float | None = None, max_bytes: int | None = None) -> dict:
+    """**登记端点**的抓取通道（用户自加数据源/自建网关专用）：先授权，再用已验 IP 连接。
+
+    与 `fetch_document` 的分工（补齐本模块一开始只写了半边的"两类接口"）：那条是
+    "内容派生 URL"（搜索结果/资料正文），**刻意不携带调用方凭据**；本条是"登记服务"
+    （设置页里操作者登记的数据源、模型、webhook），鉴权头正是它的用途——没有这条通道，
+    带 key 的付费数据源就只能绕过策略层发请求。
+
+    与 fetch_document 同守的纪律：出域以 `request_service` 授权为准（未登记即拒，调用方
+    不能用 kwargs 提权）；连接用**同一个已验 IP**（`_connect_pinned`，TLS 保留 SNI 与系统
+    CA）；不跟随重定向；响应体有上限、请求有总截止。审计只记脱敏目标与判定，**鉴权头不进
+    日志**。出口标记为 `registered_pinned`（同样不经代理：代理会自行解析域名，与已验 IP
+    直连冲突，不假装走了代理）。
+    """
+    method_up = str(method or "GET").upper()
+    if method_up not in ("GET", "POST"):
+        raise ValueError(f"登记服务抓取只支持 GET/POST，收到 {method!r}")
+    require_egress_ok()
+    decision = request_service(endpoint_id, method_up)
+    audit_decision(decision, action="fetch_service")
+    if not decision.ok:
+        raise NetworkPolicyError(decision.reason)
+    base = str(decision.url or "")
+    parts = urllib.parse.urlsplit(base)
+    host = (parts.hostname or "").lower()
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    req_path = parts.path or ""
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    for k, v in dict(params or {}).items():
+        query[str(k)] = str(v)
+    full_path = req_path.rstrip("/")
+    if path:
+        extra = str(path).lstrip("/")
+        full_path = f"{full_path}/{extra}" if full_path else f"/{extra}"
+    if not full_path:
+        full_path = "/"
+    if query:
+        full_path = f"{full_path}?{urllib.parse.urlencode(query)}"
+    payload = b""
+    if method_up == "POST":
+        payload = body.encode("utf-8") if isinstance(body, str) else bytes(body or b"")
+    budget = float(timeout or DEFAULT_TIMEOUT)
+    cap = int(max_bytes or MAX_BODY_BYTES)
+    root_deadline = time.monotonic() + budget
+
+    def _remaining() -> float:
+        return root_deadline - time.monotonic()
+
+    egress = "registered_pinned"
+    last_error = ""
+    for ip in decision.resolved:
+        remain = _remaining()
+        if remain <= 0:
+            raise FetchError(f"总截止 {budget:g}s 已用尽，未试完 {len(decision.resolved)} 个地址")
+        try:
+            sock = _connect_pinned(ip, port, host, parts.scheme, remain)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
+        try:
+            hdrs = {"Host": host, "User-Agent": "WeaveMind/1.0 (+policy:registered-service)",
+                    "Connection": "close", "Accept": "application/json, */*"}
+            for k, v in (headers or {}).items():
+                hdrs[str(k)] = str(v)          # 登记服务通道：鉴权头就是它的用途
+            if method_up == "POST":
+                hdrs.setdefault("Content-Type", "application/json")
+                hdrs["Content-Length"] = str(len(payload))
+            request = (f"{method_up} {full_path} HTTP/1.1\r\n"
+                       + "".join(f"{k}: {v}\r\n" for k, v in hdrs.items())
+                       + "\r\n").encode("utf-8", "replace") + payload
+            sock.sendall(request)
+            remain = _remaining()
+            if remain <= 0:
+                raise FetchError(f"总截止 {budget:g}s 在发出请求后用尽")
+            return _read_http_response(sock, url=base, egress=egress, cap=cap,
+                                       budget=remain)
+        except FetchError:
+            raise
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    raise FetchError(last_error or "连接失败")
+
+
+def invalidate_registry() -> None:
+    """设置页保存后让登记表重新加载（新登记的数据源不必重启进程）。
+
+    与 `reset_registry_for_test` 的区别：不清空已登记内容，只把"已加载"标记复位，
+    下一次 `load_registry` 会连同新增的数据源登记一起重读。
+    """
+    global _REGISTRY_LOADED
+    _REGISTRY_LOADED = False
 
 
 def _gunzip_bounded(raw: bytes, cap: int) -> bytes:

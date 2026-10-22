@@ -131,10 +131,11 @@
       ]
     }
   },
-  "data_sources": {
-    "_comment": "F4 数据源扩展：CoinGecko 免费公开接口无需 key；FRED CSV 与 Google News RSS 亦为公开接口。crypto_api_key 仅作未来付费额度预留。",
-    "crypto_api_key": ""
-  },
+  "data_sources": [
+    {
+      "_comment": "用户自加数据源（设置页「数据源」区块编辑，此数组仅示例格式）：每个源登记为出站端点 data_source:<id> 并注册工具 finance_custom_<id>。api_key 不要写进本文件——在设置页填写后自动转入本机 credentials.json（0600，不进 git）；环境变量 WEAVEMIND_DATA_SOURCE_<ID>_KEY 亦可。kind: http_json（base_url+auth）| mcp（tool+server）。model_context: full（正文可入模型上下文）| derived（仅派生结果，许可受限的付费源选这个）。loopback 仅自建/本机网关勾选。markets/metrics 供规划器匹配指标。"
+    }
+  ],
   "mcp_servers": [
     {
       "_comment": "MCP 即插即用（mcp_client.py 启动时发现并注册为外部工具，tool_dispatch 优先路由）——当前置空示例。",
