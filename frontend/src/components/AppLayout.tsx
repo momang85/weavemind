@@ -130,7 +130,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      <div className="main-mobile flex min-w-0 flex-1 flex-col">
+      <div className="main-mobile flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-[76px] shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-4 md:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <BrandMark className="h-7 w-7 shrink-0 text-brand md:hidden" />
@@ -158,7 +158,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         {liveTransport === 'polling' && !demoMode && <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800 md:px-8">
           实时通道已降级为轮询（每 2 秒更新），任务不受影响，进度可能稍有延迟。
         </div>}
-        <main id="workspace-content" tabIndex={-1} className="workspace-main mobile-scroll min-w-0 flex-1 overflow-auto p-4 outline-none md:p-8">
+        <main id="workspace-content" tabIndex={-1} className="workspace-main mobile-scroll min-h-0 min-w-0 flex-1 overflow-auto p-4 outline-none md:p-8">
           {children}
           <footer className="mt-10 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-4 text-xs text-ink-faint">
             <span>织光 · 上市公司研究工作台</span>

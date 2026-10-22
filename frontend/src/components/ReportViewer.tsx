@@ -35,6 +35,7 @@ import { WorkingPaperPanel } from './WorkingPaperPanel'
 import ResearchBriefPanel from './ResearchBriefPanel'
 import AnalysisWorkbenchPanel from './AnalysisWorkbenchPanel'
 import { StatusBadge } from './ui'
+import { financialLabel } from '../lib/financialText'
 import { parseTopStatsWithSource, topStatsCardMeta } from '../lib/topStats'
 import { reportStatsView } from '../lib/reportStats'
 import { rewriteE2eVerdict } from '../lib/e2eVerdict'
@@ -421,11 +422,18 @@ function scrollToId(id: string) {
   if (!el) return
   const scroller = document.querySelector('main') as HTMLElement | null
   const before = scroller ? scroller.scrollTop : 0
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const move = (behavior: ScrollBehavior) => {
+    if (!scroller) { el.scrollIntoView({ behavior, block: 'start' }); return }
+    const toolbar = document.querySelector<HTMLElement>('[aria-label="报告内容定位"]')
+    const inset = Math.max(Number.parseFloat(getComputedStyle(el).scrollMarginTop) || 24, (toolbar?.offsetHeight || 0) + 24)
+    const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - inset
+    scroller.scrollTo({ top: Math.max(0, top), behavior })
+  }
+  move(window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth')
   window.setTimeout(() => {
     const after = scroller ? scroller.scrollTop : 0
     if (Math.abs(after - before) < 4) {
-      el.scrollIntoView({ block: 'start' })
+      move('auto')
     }
   }, 700)
 }
@@ -492,6 +500,15 @@ function CodeComponent({ className, children }: MarkdownComponentProps) {
   )
 }
 
+function TableComponent({ children }: MarkdownComponentProps) {
+  return (
+    <div role="region" aria-label="研究数据表，可横向滚动" tabIndex={0} className="my-4 min-w-0 max-w-full overflow-x-auto rounded-lg border border-line">
+      <div className="border-b border-line bg-surface-sunken px-3 py-2 text-xs text-ink-faint sm:hidden">较宽的表格可左右滑动查看</div>
+      <table className="w-full">{children}</table>
+    </div>
+  )
+}
+
 const markdownComponents = {
   h1: H1,
   h2: H2,
@@ -501,6 +518,7 @@ const markdownComponents = {
   h6: H6,
   a: AComponent,
   code: CodeComponent,
+  table: TableComponent,
 }
 
 export const ReportMarkdown = memo(function ReportMarkdown({ md, sources, taskId }: {
@@ -988,7 +1006,7 @@ th,td{border:1px solid #e8e5dd;padding:8px;text-align:left} th{background:#f3f1e
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {topStats.map((it, i) => (
               <div key={i} className="rounded-lg border border-line bg-surface-raised/30 px-3 py-2">
-                <div className="break-words text-xs text-ink-muted" title={it.k}>{it.k}</div>
+                <div className="break-words text-xs text-ink-muted" title={it.k}>{financialLabel(it.k)}</div>
                 <div className="mt-0.5 break-words font-semibold text-ink" title={it.v}>{it.v}</div>
               </div>
             ))}
@@ -1029,7 +1047,7 @@ th,td{border:1px solid #e8e5dd;padding:8px;text-align:left} th{background:#f3f1e
             { icon: Clock, label: '耗时', value: statsView.elapsed, color: 'text-ink-muted' },
             { icon: CheckCircle2, label: statsView.rateLabel, value: statsView.rateValue, color: 'text-emerald-700' },
             { icon: Award, label: '执行步骤', value: statsView.steps, color: 'text-brand' },
-            { icon: Zap, label: 'Files', value: statsView.files, color: 'text-violet-700' },
+            { icon: Zap, label: '生成文件', value: statsView.files, color: 'text-ink-muted' },
           ].map(item => (
             <div key={item.label} className="bg-surface border border-line rounded-xl p-4 text-center">
               <item.icon className={`w-5 h-5 mx-auto mb-2 ${item.color}`} />

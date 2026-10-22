@@ -7,6 +7,7 @@ import {
 import { stepStatusMeta } from '../lib/statusMeta'
 import { gateSkipReason, isGateSkipDisplay, GATE_SKIP_LABEL } from '../lib/stepSkip'
 import { foldPlanDescriptions } from '../lib/planText'
+import { agentDisplayName, CAPABILITY_ZH } from '../lib/agentLabel'
 
 // 步骤状态：颜色来自 lib/statusMeta（唯一实现），图标仍由本组件选择（图标是 UI 关注点）
 const statusConfig = {
@@ -78,7 +79,7 @@ const TreeNode = memo(function TreeNode({
     <div className="relative">
       <div
         onClick={() => onSelect?.(node)}
-        className={`flex items-center gap-2 py-1.5 group cursor-pointer ${isRoot ? 'mb-2' : ''}`}>
+        className={`flex flex-wrap sm:flex-nowrap items-center gap-2 py-1.5 group cursor-pointer ${isRoot ? 'mb-2' : ''}`}>
         {hasChildren ? (
           <button onClick={e => { e.stopPropagation(); setExpanded(!expanded) }}
             className="p-0.5 hover:bg-line rounded transition-colors shrink-0">
@@ -90,12 +91,12 @@ const TreeNode = memo(function TreeNode({
         )}
 
         <div className={`shrink-0 w-2.5 h-2.5 rounded-full ${cfg.dot}
-          ${node.status === 'running' ? 'animate-pulse shadow-[0_0_8px] shadow-cyan-400/50' : ''}`} />
+          ${node.status === 'running' ? 'animate-pulse' : ''}`} />
 
         <StatusIcon status={node.status} />
 
-        <span className="text-xs font-mono text-ink-faint bg-surface-raised/60 px-1.5 py-0.5 rounded shrink-0">
-          {node.capability || 'goal'}
+        <span title={node.capability} className="max-w-[7rem] truncate text-xs text-ink-faint bg-surface-raised/60 px-1.5 py-0.5 rounded shrink-0">
+          {CAPABILITY_ZH[node.capability] || node.capability || '研究'}
         </span>
 
         {!!node.iteration && (
@@ -124,14 +125,14 @@ const TreeNode = memo(function TreeNode({
           </span>
         )}
 
-        <span className={`truncate text-sm ${isRoot ? 'text-ink font-semibold' : cfg.text}`}
+        <span className={`min-w-0 basis-full sm:basis-auto sm:flex-1 truncate text-sm ${isRoot ? 'text-ink font-semibold' : cfg.text}`}
           title={hint || label || node.name}>
           {label || node.name}
         </span>
 
         {node.agent_id && (
-          <span className="text-xs text-ink-faint bg-surface-raised/40 px-1.5 py-0.5 rounded-full shrink-0 ml-auto">
-            {node.agent_id.replace('_', ' ')}
+          <span title={node.agent_id} className="hidden sm:inline-block max-w-[9rem] truncate text-xs text-ink-faint bg-surface-raised/40 px-1.5 py-0.5 rounded-full shrink-0 ml-auto">
+            {agentDisplayName({ agent_id: node.agent_id, capability: node.capability })}
           </span>
         )}
 

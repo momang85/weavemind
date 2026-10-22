@@ -2,6 +2,7 @@ import { memo } from 'react'
 import { AlertTriangle, CheckCircle2, FileSpreadsheet, Link2, Sigma } from 'lucide-react'
 
 import { summarizeWorkingPaper } from '../lib/researchGoal'
+import { financialLabel } from '../lib/financialText'
 
 /**
  * S2：可重算底稿面板（结果页"先结论与目标达成、再关键指标/来源与缺口"）。
@@ -58,7 +59,7 @@ function WorkingPaperPanelImpl({ paper }: { paper: unknown }) {
           <tbody>
             {s.facts.map(f => (
               <tr key={f.factId} className="border-t border-line/60">
-                <td className="px-3 py-2 text-ink">{f.label}</td>
+                <td className="px-3 py-2 text-ink" title={f.label}>{financialLabel(f.label)}</td>
                 <td className="px-3 py-2 text-ink">{f.entity}</td>
                 <td className="px-3 py-2 text-ink-muted">{f.period}</td>
                 <td className="px-3 py-2 text-right text-ink">
