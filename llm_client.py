@@ -902,9 +902,11 @@ def _mark_auth_error(code: int, body: str, endpoint: str = "") -> None:
         # 登录用户（含 viewer）
         _last_auth_error["message"] = f"LLM 端点鉴权/余额错误 HTTP {code}"
     if body:
+        # 上游错误体常把密钥回显出来（DeepSeek 打 ****zthD，多数中转站打全串）：
+        # 这一行进的是日志与控制台，首启引导会把它直接打在新生屏幕上，先脱敏。
         logger.warning(
             "LLM auth/balance error %s endpoint=%s body=%s",
-            code, endpoint, str(body)[:150],
+            code, endpoint, _scrub_secrets(str(body))[:150],
         )
     if endpoint and _is_balance_error(body):
         # 余额不足是确定性故障：立即标记不健康（不走 2 次失败阈值），
@@ -1893,12 +1895,18 @@ def _parse_json_content(raw: str) -> dict[str, Any]:
 
 
 def _load_llm_config():
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
     try:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
         # 缺陷D：显式 utf-8。默认编码在 Windows 是 cp936/gbk，config.json 里的中文
         # 注释/值会 UnicodeDecodeError → 整段配置静默丢失（主模型角色映射一起丢）。
         with open(cfg_path, 'r', encoding='utf-8') as f:
             return json.load(f).get('llm', {})
+    except FileNotFoundError:
+        # 全新克隆/首次运行：config.json 由首启引导生成，此刻没有它是**正常态**。
+        # 以前这里与真故障同一条 warning，"[Errno 2] No such file or directory" 会
+        # 跟在引导提示后面打在新生屏幕上，被当成报错（实测截图）。
+        logger.info("config.json 尚未生成（首次运行正常；首启引导写入后生效）: %s", cfg_path)
+        return {}
     except Exception as e:
         # 不吞异常：读不到/解不开要留痕（此前裸 except 让"配置丢了"无从发现）
         logger.warning("LLM 配置加载失败: %s", e)
@@ -1914,12 +1922,15 @@ _MODEL_ROLES_CFG = {
 
 def _load_backup_config() -> dict:
     """读取备用 LLM 端点/模型配置（config.json 顶层 backup 段）。"""
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
     try:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
         # 缺陷D：显式 utf-8（原因同 `_load_llm_config`）；实机就因缺它导致备援配置
         # 整段为空 —— 熔断器"备援端点数=0"，failover 从未真正生效。
         with open(cfg_path, 'r', encoding='utf-8') as f:
             return json.load(f).get('backup', {}) or {}
+    except FileNotFoundError:
+        # 没有 config.json 时"无备援"是正常态，不必在新生屏幕上再刷一条告警
+        return {}
     except Exception as e:
         # 不吞异常：加载失败要留痕，且仍按"无备援"降级（不阻断主链路）
         logger.warning("备援配置加载失败: %s", e)

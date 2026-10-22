@@ -15,7 +15,9 @@ base_url / model），失败率很高——start.bat 只能打印这行提示然
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -25,13 +27,16 @@ CONFIG_PATH = BASE_DIR / "config.json"
 TEMPLATE_PATH = BASE_DIR / "config.example.json"
 
 # 供应商预设：(菜单名, base_url, 推荐模型)
+# 顺序即菜单序号；最后一项是"自定义"，序号由 `_CUSTOM_INDEX` 算出来并写进提示里。
 PROVIDERS = (
-    ("SiliconFlow（默认，国内直连）", "https://api.siliconflow.cn/v1",
+    ("SiliconFlow（国内直连）", "https://api.siliconflow.cn/v1",
      "deepseek-ai/DeepSeek-V3"),
     ("DeepSeek 官方", "https://api.deepseek.com/v1", "deepseek-chat"),
     ("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("自定义 base_url", "", ""),
+    ("Tierflow 中转（地址已填，模型名见该站控制台）", "https://tierflow.cn/v1", None),
+    ("自定义 base_url（中转/聚合站、公司内网网关；key 必须与地址同一家）", "", ""),
 )
+_CUSTOM_INDEX = next(i for i, p in enumerate(PROVIDERS, 1) if not p[1])
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
 # 模板里的占位符：这些值等于"没填"
 _PLACEHOLDER_HINTS = ("your_", "your-", "xxxx", "changeme", "placeholder")
@@ -111,6 +116,44 @@ def probe_allowed(url: str) -> tuple[bool, str]:
     )
 
 
+@contextlib.contextmanager
+def _quiet_probe_logging():
+    """探测期间把 `llm_client` 的日志压到 ERROR。
+
+    探测结果本来就由本模块以人话回给用户，而 `llm_client` 还会顺手打一条
+    `LLM auth/balance error ... body=...` 的 WARNING——实测它插进问答提示中间
+    （"…[1]: LLM auth/balance error 401 …正在测试…"挤成一行），既难看又可能
+    带出上游回显的密钥片段。真正的告警在任务执行期照旧记录。
+    """
+    lg = logging.getLogger("llm_client")
+    old = lg.level
+    lg.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        lg.setLevel(old)
+
+
+_NEXT_STEP_HINTS = {
+    "unauthorized": (
+        "→ 地址不变，就只能换一把**该服务商签发**的 key；如果这把 key 来自别家"
+        "（中转/聚合站），请回到菜单选「{custom}) 自定义 base_url」填那家的地址。",
+        "→ With this address, only a key issued by *this* provider works; "
+        "if the key came from a relay/aggregator, re-run and pick "
+        "\"{custom}) custom base_url\" with that provider's address.",
+    ),
+    "insufficient_balance": (
+        "→ 到该服务商控制台充值/提额度后再试（地址与 key 都没问题，是这个账号没钱了）。",
+        "→ Top up on that provider's console and retry (address and key are fine).",
+    ),
+    "unreachable": (
+        "→ 检查网络/代理；自填地址要带 /v1，且不能多写 /chat/completions。",
+        "→ Check network/proxy; a custom address must end with /v1 "
+        "(not /chat/completions).",
+    ),
+}
+
+
 def probe_endpoint(base_url: str, api_key: str, model: str,
                    timeout: float = 20.0) -> tuple[bool | None, str]:
     """极短请求验证端点可用；返回 (ok, 可读原因)。
@@ -118,6 +161,11 @@ def probe_endpoint(base_url: str, api_key: str, model: str,
     `ok is None` 表示**跳过**（例：依赖尚未安装）。本模块在启动脚本的 [2/6] 运行，
     而依赖要到 [4/6] 才自动安装，此时 import llm_client 会失败——那是"还没轮到"，
     不是端点有问题；当成失败会让新手卡在"重填/仍然保存"上（实测如此）。
+
+    失败原因优先用 `llm_client` 给出的整句（带端点域名与状态码含义），这里再补一句
+    **下一步怎么做**。此前只按 `reason` 枚举翻成"鉴权失败（key 可能无效或已过期）"，
+    实测把"key 与地址不同源"说成了"key 过期"，新人于是反复换 key（换到正确的那家
+    才发现原先的 key 从没坏）。
     """
     try:
         import llm_client
@@ -131,18 +179,26 @@ def probe_endpoint(base_url: str, api_key: str, model: str,
         return None, _t(f"无法加载 llm_client：{str(exc)[:80]}",
                         f"llm_client unavailable: {str(exc)[:80]}")
     try:
-        res = llm_client._probe_endpoint_status(base_url, api_key, model) or {}
+        with _quiet_probe_logging():
+            res = llm_client._probe_endpoint_status(base_url, api_key, model) or {}
     except Exception as exc:
         return False, _t(f"探测失败：{str(exc)[:120]}", f"Probe failed: {str(exc)[:120]}")
     if res.get("ok"):
         return True, _t("连通正常", "Endpoint OK")
     reason = str(res.get("reason") or "unreachable")
-    mapping = {
+    generic = {
         "unauthorized": _t("鉴权失败（key 可能无效或已过期）", "Unauthorized (bad/expired key)"),
         "insufficient_balance": _t("额度不足（需充值）", "Insufficient balance"),
         "unreachable": _t("网络不可达（检查地址/网络/代理）", "Unreachable (check URL/network/proxy)"),
     }
-    return False, mapping.get(reason, reason)
+    # `message` 是给设置页/引导看的整句人话（含端点域名）；没有时退回枚举文案，
+    # 老版本/被 mock 的探测结果仍能工作。
+    detail = str(res.get("message") or "").strip() or generic.get(reason, reason)
+    hint = _NEXT_STEP_HINTS.get(reason)
+    if hint:
+        detail = f"{detail}\n    " + _t(hint[0], hint[1]).format(custom=_CUSTOM_INDEX)
+    return False, detail
+
 
 
 def config_status(path: Path | None = None) -> tuple[bool, str]:
@@ -322,7 +378,11 @@ def _print_guidance() -> None:
         "Non-interactive environment. Please do it manually:",
     ))
     print("  1. copy config.example.json config.json")
-    print("  2. fill in llm.api_key / llm.base_url / llm.model")
+    print(_t("  2. fill in llm.api_key / llm.base_url / llm.model"
+             "（模板里端点是**空白**的：没有默认服务商，必须填你 key 那家的地址）",
+             "  2. fill in llm.api_key / llm.base_url / llm.model "
+             "(the template has no endpoint preset on purpose: use the host "
+             "that issued your key)"))
     print(_t("  或设置好环境变量 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL",
              "  or set env vars LLM_API_KEY / LLM_BASE_URL / LLM_MODEL"))
 
@@ -351,15 +411,26 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
     print()
     print(_t("可选端点：", "Endpoints:"))
     for i, (name, url, model) in enumerate(PROVIDERS, 1):
-        suffix = f"  {url}  模型 {model}" if url else ""
+        suffix = ""
+        if url:
+            suffix = f"  {url}"
+            # 模型名留空（None）= 该站模型名因人而异，必须由使用者填
+            suffix += f"  模型 {model}" if model else "  模型名待填"
         print(f"  {i}) {name}{suffix}")
-    choice = _ask(_t("选择序号", "Choose number"), "1")
-    try:
-        idx = int(choice) - 1
-        if not 0 <= idx < len(PROVIDERS):
-            idx = 0
-    except Exception:
-        idx = 0
+    choice = ""
+    while True:
+        # 不给默认值：**任何**预设都不该被一个回车选中——key 与地址必须同一家，
+        # 猜错只是 401（实测：新人回车用了 SiliconFlow 预设，key 却是别家的）。
+        choice = _ask(_t(f"选择序号 1-{len(PROVIDERS)}（必填，没有默认值）",
+                         f"Choose 1-{len(PROVIDERS)} (required, no default)"), "")
+        try:
+            idx = int(str(choice).strip()) - 1
+        except Exception:
+            idx = -1
+        if 0 <= idx < len(PROVIDERS):
+            break
+        print("  ! " + _t(f"请输入 1 到 {len(PROVIDERS)} 之间的序号",
+                          f"Enter a number from 1 to {len(PROVIDERS)}"))
     _, preset_url, preset_model = PROVIDERS[idx]
 
     base_url = _ask(_t("Base URL", "Base URL"), preset_url)
@@ -380,7 +451,15 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
             api_key = ""
 
     # 3) 模型
-    model = _ask(_t("模型名", "Model"), preset_model or "deepseek-chat")
+    if preset_model is None:
+        # 使用该预设但模型名不预填（各站模型名不同，猜一个只会 404）：必填
+        model = ""
+        while not str(model).strip():
+            model = _ask(_t("模型名（必填，取该服务商控制台里列出的那个名字）",
+                            "Model (required: a name listed in that provider's console)"), "")
+        model = str(model).strip()
+    else:
+        model = _ask(_t("模型名", "Model"), preset_model or "deepseek-chat")
 
     # 4) Embedding（可选）
     print()
@@ -395,6 +474,7 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
 
     # 5) 连通性自测（回环/内网按策略跳过；依赖未装也跳过而非报错）
     print()
+    probe_failed = None      # 存下最后一句失败原因：写盘时要提醒"现在还不能用"
     allowed, why_skip = probe_allowed(base_url)
     if not allowed:
         print("  - " + why_skip)
@@ -409,12 +489,30 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
         else:
             print(("  ✓ " if good else "  ! ") + reason)
         if good is False:
+            probe_failed = reason
             # 默认重填：探测已给出可读原因（key 无效/额度不足/网络不通），
             # 新手在"回车即保存"的默认下极易把坏配置带进启动流程。
             again = _ask(_t("回车=重新填写 / 输入 n = 仍然保存",
                             "Enter=re-enter / n=save anyway"), "y")
             if not str(again).strip().lower().startswith("n"):
                 return run_interactive(force=True, path=target)
+        if good and embedding:
+            # 嵌入也要单独测：多数中转站只转对话模型，bge 一类会 404，之后每次记忆
+            # 检索都失败并降级——但那时配置已保存、新人只会看到"记忆不好用"。
+            print(_t(f"正在测试 Embedding {embedding['model']} …",
+                     f"Probing embedding {embedding['model']} …"))
+            ok_emb, why_emb = probe_endpoint(base_url, api_key, embedding["model"])
+            if ok_emb is False:
+                print("  ! " + why_emb)
+                print(_t("    （该端点不提供这个 embedding 模型时，记忆检索会每次失败并降级）",
+                         "    (if this endpoint has no such embedding model, memory "
+                         "recall fails and degrades on every call)"))
+                pick = _ask(_t("1) 仍按此保存   2) 跳过 embedding（记忆检索降级为关键词兜底）",
+                               "1) save anyway   2) skip embedding (keyword fallback)"), "2")
+                if not str(pick).strip().startswith("1"):
+                    embedding = None
+                    print(_t("  - 已跳过 embedding（之后可在网页「设置」页补配）",
+                             "  - embedding skipped (set it later on the Settings page)"))
 
     # 6) 写盘（基底是已有配置：只改引导问到的字段，不动用户设过的其它项）
     cfg = build_config(_base_config(target), base_url=base_url, api_key=api_key,
@@ -426,6 +524,17 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
     if embedding is None:
         print(_t("提示：未配置 Embedding，记忆检索会降级为关键词兜底（不影响任务执行）。",
                  "Note: no Embedding configured; memory recall degrades to keyword search."))
+    if probe_failed:
+        # "仍然保存"等于把一份已知不可用的配置带进启动流程：明说后果与修法，
+        # 否则新人会以为启动成功就万事大吉，直到第一次提问才失败。
+        print()
+        print("  ! " + _t("端点没通过探测，这份配置**现在还不能用**：启动后每次模型调用都会失败。",
+                         "The endpoint failed the probe; this config **cannot work yet** — "
+                         "every model call will fail after startup."))
+        print(_t("    修法：启动后打开网页 →「设置」→ 把 Base URL / 模型名 / key 改成同一家的，"
+                 "点「测试连通性」看到「正常」再开始研究。",
+                 "    Fix: after startup open the web UI → Settings → set base_url / model / key "
+                 "from the same provider, run \"test connectivity\" until it is OK."))
     print(_t("下一步：启动后打开 http://localhost:8080 ，首次登录点「创建管理员」。",
              "Next: after startup open http://localhost:8080 and create the admin account."))
     return 0
@@ -456,8 +565,10 @@ def probe_configured(path: Path | None = None) -> int:
         return 0
     print(("  ✓ " if good else "  ! ") + reason)
     if not good:
-        print(_t("    （不影响启动：可稍后在网页「设置」页修正端点或密钥）",
-                 "    (startup continues; fix it later on the Settings page)"))
+        print(_t("    （端点不通时任务会在调用模型这一步失败；请先在网页「设置」页"
+                 "把 base_url / 模型名 / key 改成同一家的）",
+                 "    (with a dead endpoint every task fails at the model call; fix "
+                 "base_url / model / key on the Settings page first)"))
     return 0 if good else 1
 
 

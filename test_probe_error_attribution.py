@@ -82,6 +82,84 @@ class TestFailureMessageSaysWhatActuallyHappened(unittest.TestCase):
         self.assertIn("500", msg)
 
 
+class TestLogLinesDoNotEchoTheKey(unittest.TestCase):
+    """401/402/403 的**日志行**同样会打在新生屏幕上（首启引导），必须脱敏。
+
+    实测截图：`LLM auth/balance error 401 endpoint=primary body={"error":{"message":
+    "Authentication Fails. Your api key: ****zthD is invalid ...`——DeepSeek 自己把 key
+    打了码，但多数中转站会把整串回显，这一行会原样进控制台与会话日志。
+    """
+
+    def test_auth_error_log_scrubs_the_body(self):
+        body = ('{"error":{"message":"bad key sk-live-9f8e7d6c5b4a3210",'
+                '"type":"authentication_error"}}')
+        with self.assertLogs("llm_client", level="WARNING") as cm:
+            lc._mark_auth_error(401, body, "primary")
+        out = "\n".join(cm.output)
+        self.assertNotIn("sk-live-9f8e7d6c5b4a3210", out)
+        self.assertIn("authentication_error", out, "诊断信息要保留")
+
+    def test_auth_error_message_for_users_carries_no_body(self):
+        lc._mark_auth_error(401, '{"message":"your key sk-live-9f8e7d6c5b4a3210"}', "primary")
+        msg = str(lc._last_auth_error.get("message") or "")
+        self.assertNotIn("sk-live", msg)
+        self.assertIn("401", msg)
+
+
+class TestFirstRunIsNotAnError(unittest.TestCase):
+    """全新克隆没有 config.json 是**正常态**：引导会先生成它。
+
+    实测：引导探测时先 import llm_client，模块级加载打两条 WARNING
+    （`LLM 配置加载失败: [Errno 2] No such file or directory: ...\\config.json`），
+    新人在等待探测结果时先看到满屏红字，把它当成"又出错了"。
+    """
+
+    def _load(self, fn):
+        with mock.patch("builtins.open", side_effect=FileNotFoundError(
+                2, "No such file or directory", "config.json")):
+            with self.assertLogs("llm_client", level="DEBUG") as cm:
+                return fn(), cm.output
+
+    def test_missing_config_is_not_a_warning(self):
+        got, out = self._load(lc._load_llm_config)
+        self.assertEqual(got, {}, "缺失时按空配置降级")
+        warnings = [l for l in out if l.startswith("WARNING")]
+        self.assertEqual(warnings, [], f"缺失 config.json 不该报 WARNING：{warnings}")
+
+    def test_missing_backup_config_is_silent(self):
+        with mock.patch("builtins.open", side_effect=FileNotFoundError(
+                2, "No such file or directory", "config.json")):
+            with self.assertNoLogs("llm_client", level="WARNING"):
+                got = lc._load_backup_config()
+        self.assertEqual(got, {}, "没有 config.json 时「无备援」是正常态，不该告警")
+
+    def test_corrupt_config_still_warns(self):
+        """真正的读失败（编码错/JSON 坏）仍要留痕，别把"没配置"和"配置坏了"混为一谈。"""
+        with mock.patch("builtins.open", side_effect=UnicodeDecodeError(
+                "utf-8", b"\xff", 0, 1, "invalid start byte")):
+            with self.assertLogs("llm_client", level="WARNING") as cm:
+                lc._load_llm_config()
+        self.assertTrue(any("配置加载失败" in line for line in cm.output))
+
+
+class TestSetupWizardCarriesTheSentence(unittest.TestCase):
+    """首启引导是新人唯一会读的那块屏幕：它不能只翻枚举。"""
+
+    def _probe(self, res):
+        import setup_wizard
+        with mock.patch.object(lc, "_probe_endpoint_status", return_value=res):
+            return setup_wizard.probe_endpoint(
+                "https://api.deepseek.com/v1", "sk-test", "deepseek-chat")
+
+    def test_wizard_shows_host_and_the_way_out(self):
+        ok, reason = self._probe({"ok": False, "reason": "unauthorized",
+                                  "message": "api.deepseek.com 返回 401：该接入点不认这把密钥"
+                                             "——密钥与接入点必须是同一家服务商"})
+        self.assertFalse(ok)
+        self.assertIn("api.deepseek.com", reason)
+        self.assertIn("自定义 base_url", reason)
+
+
 class TestMessageNeverLeaksSecrets(unittest.TestCase):
     """这句话会进 /api/status、设置页与会话日志，回显的凭据必须先脱敏。"""
 
