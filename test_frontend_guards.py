@@ -127,8 +127,8 @@ class TestStatusSemanticsUnified(unittest.TestCase):
             if not any(k in text for k in SHARED_STATUS_IMPLS):
                 missing.append(rel)
         self.assertEqual(missing, [],
-                         f"这些文件展示任务状态但没走统一实现"
-                         f"（{"/".join(SHARED_STATUS_IMPLS)}）：{missing}")
+                         "这些文件展示任务状态但没走统一实现"
+                         "（" + "/".join(SHARED_STATUS_IMPLS) + "）：" + str(missing))
 
     def test_shared_text_modules_derive_from_status_meta(self):
         """白名单里的域文案模块必须真的派生自 statusMeta，不得自成第二套映射。"""
