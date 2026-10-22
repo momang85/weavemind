@@ -785,7 +785,9 @@ class TestProbeClassifiesThinkingBudget(unittest.TestCase):
         import llm_client
         with mock.patch.object(llm_client.LLMClient, "_send_request", return_value="ok"):
             res = llm_client._probe_endpoint_status("https://e.invalid/v1", "k", "m")
-        self.assertEqual(res, {"ok": True, "reason": "ok"})
+        # message 是给设置页的一整句人话（带端点域名）；成功时固定为空串，
+        # 保持返回形状稳定（见 test_probe_error_attribution）。
+        self.assertEqual(res, {"ok": True, "reason": "ok", "message": ""})
 
 
 class TestLLMCache(unittest.TestCase):
