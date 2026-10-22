@@ -340,15 +340,15 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
   const staleEntries = state?.selection?.stale || []
 
   return (
-    <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+    <div className="rounded-lg border border-line-strong bg-surface/40 p-3 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-ink">
         <Calculator className="w-4 h-4" /> 分析工作台（选运行 → 改假设 → 复算 → 对比 → 采纳 → 导出）
       </div>
       {loadState === 'loading' && (
-        <div className="text-xs text-slate-500">正在读取分析状态…（最多等 12 秒）</div>
+        <div className="text-xs text-ink-faint">正在读取分析状态…（最多等 12 秒）</div>
       )}
       {loadState === 'error' && (
-        <div className="text-xs border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+        <div className="text-xs border border-red-500/30 bg-red-500/10 text-red-700 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
           <span className="inline-flex items-start gap-1.5">
             <TriangleAlert className="w-3.5 h-3.5 mt-0.5" />
             <span>分析状态读取失败：{loadErr || '连接中断'}（这不代表本任务没有可复算输入）</span>
@@ -360,7 +360,7 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
         </div>
       )}
       {loadState === 'ok' && !state?.ok && (
-        <div className="text-xs text-amber-400 flex items-start gap-1">
+        <div className="text-xs text-amber-700 flex items-start gap-1">
           <TriangleAlert className="w-3.5 h-3.5 mt-0.5" />
           <span>{state?.reason || '该任务还没有可复算输入（analysis/dataset.json）'}</span>
         </div>
@@ -373,24 +373,24 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
           <button
             disabled={busy} onClick={() => void freezeNow()}
             title="按本任务现有留存的公开资料冻结数据集并复算注册模型（确定性、零模型调用）"
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-60"
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-60"
           >
             {busy ? '补算中…' : '补算分析输入'} <Calculator className="w-3 h-3" />
           </button>
           {state?.inputs?.source && (
-            <span className="text-slate-500">来源：{state.inputs.source === 'working_paper' ? '研究底稿 working_paper.json' : '财务载荷 financials.json'}</span>
+            <span className="text-ink-faint">来源：{state.inputs.source === 'working_paper' ? '研究底稿 working_paper.json' : '财务载荷 financials.json'}</span>
           )}
         </div>
       )}
       {!state?.ok && state?.next_action === 'material' && (
-        <div className="text-xs text-slate-400">
+        <div className="text-xs text-ink-muted">
           工作区没有可用的分析事实来源：请在本页「补材料」上传该公司的公开财务资料（年报/摘要），
           补齐后再点「补算分析输入」。缺口如实保留，不会用估计值代替披露数。
         </div>
       )}
       {card && (
-        <div className="text-xs text-slate-300 space-y-1">
-          <div className="text-slate-400">
+        <div className="text-xs text-ink space-y-1">
+          <div className="text-ink-muted">
             分析卡（已验证运行）{card.in_report ? '：**进正文的这一条**' : '：未进正文'}
           </div>
           <div className="font-mono">
@@ -404,10 +404,10 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
             const rows = outs.flatMap((o) => (o.basis || []).map((b) => ({ o, b })))
             if (!rows.length) return null
             return (
-              <details className="text-slate-400">
+              <details className="text-ink-muted">
                 <summary className="cursor-pointer">原始依据（{rows.length} 条观察，可回溯）</summary>
                 <table className="mt-1 w-full text-left font-mono">
-                  <thead className="text-slate-500">
+                  <thead className="text-ink-faint">
                     <tr><th>指标</th><th>期间</th><th>值</th><th>口径</th><th>fact_id</th><th>来源</th></tr>
                   </thead>
                   <tbody>
@@ -426,7 +426,7 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
                   </tbody>
                 </table>
                 {outs[0]?.formula && (
-                  <div className="mt-1 text-slate-500">算式：{outs[0].formula}</div>
+                  <div className="mt-1 text-ink-faint">算式：{outs[0].formula}</div>
                 )}
               </details>
             )
@@ -434,13 +434,13 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
         </div>
       )}
       {selEntries.length > 0 && (
-        <div className="text-xs text-slate-400 space-y-0.5">
+        <div className="text-xs text-ink-muted space-y-0.5">
           <div>
             进正文的选择（{selEntries.length} 条，规则版本 {state?.rules_version || '—'}）：
             {selEntries.map((e) => `${e.model_id}=${String(e.run_id || '').slice(0, 12)}`).join('、')}
           </div>
           {staleEntries.map((e) => (
-            <div key={`${e.model_id}-${e.run_id}`} className="text-amber-400">
+            <div key={`${e.model_id}-${e.run_id}`} className="text-amber-700">
               ⚠️ {e.model_id} 的选择已不可用：{e.why || e.state}
             </div>
           ))}
@@ -450,7 +450,7 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <select
-              className="bg-slate-800 border border-slate-600 rounded px-2 py-1"
+              className="bg-surface-raised border border-line-strong rounded px-2 py-1"
               value={modelId}
               onChange={(e) => {
                 const mid = e.target.value
@@ -474,7 +474,7 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
               还没算过的模型没有运行可选——如实提示下一步，不显示空菜单 */}
             {modelRuns.length > 0 ? (
               <select
-                className="bg-slate-800 border border-slate-600 rounded px-2 py-1"
+                className="bg-surface-raised border border-line-strong rounded px-2 py-1"
                 value={chosenRunId}
                 onChange={(e) => {
                   const rid = e.target.value
@@ -493,7 +493,7 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
                 ))}
               </select>
             ) : (
-              <span className="text-slate-500">
+              <span className="text-ink-faint">
                 该模型还没算过：改参数后点「确定性复算」生成新运行
               </span>
             )}
@@ -504,12 +504,12 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
               const choices = !range && Array.isArray(model?.allowed_params?.[k])
                 ? (model!.allowed_params![k] as string[]) : null
               return (
-                <label key={k} className="flex items-center gap-1 text-slate-400">
+                <label key={k} className="flex items-center gap-1 text-ink-muted">
                   {k}
                   {choices ? (
                     /* **选择型参数**（如 rounding）：候选即边界，下拉选择，不自由输入 */
                     <select
-                      className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-100"
+                      className="bg-surface-raised border border-line-strong rounded px-1 py-0.5 text-ink"
                       value={params[k] ?? ''}
                       onChange={(e) => setParams({ ...params, [k]: e.target.value })}
                     >
@@ -517,13 +517,13 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
                     </select>
                   ) : (
                     <input
-                      className="w-20 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-100"
+                      className="w-20 bg-surface-raised border border-line-strong rounded px-1 py-0.5 text-ink"
                       value={params[k] ?? ''}
                       placeholder={String(model?.default_params?.[k] ?? '')}
                       onChange={(e) => setParams({ ...params, [k]: e.target.value })}
                     />
                   )}
-                  <span className="text-slate-500">
+                  <span className="text-ink-faint">
                     {range
                       ? `[${range[0]}, ${range[1]}]`
                       : ''}
@@ -534,13 +534,13 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
               )
             })}
             <button
-              className="px-2 py-1 rounded border border-sky-500/40 text-sky-300 disabled:opacity-50"
+              className="px-2 py-1 rounded border border-sky-500/40 text-sky-700 disabled:opacity-50"
               disabled={busy} onClick={() => void recompute()}
             >
               <RotateCcw className="w-3.5 h-3.5 inline mr-1" />确定性复算
             </button>
             <button
-              className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-300 disabled:opacity-50"
+              className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-700 disabled:opacity-50"
               disabled={busy || !chosenRunId || chosen?.status !== 'validated' || chosen?.selected}
               title={chosen?.selected ? '这一条已经在正文里' : '把所选运行选定为进正文的那一条'}
               onClick={() => void adopt()}
@@ -548,7 +548,7 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
               <ShieldCheck className="w-3.5 h-3.5 inline mr-1" />采纳这版
             </button>
             <button
-              className="px-2 py-1 rounded border border-slate-500/40 text-slate-300 disabled:opacity-50"
+              className="px-2 py-1 rounded border border-line-strong/40 text-ink disabled:opacity-50"
               disabled={busy}
               onClick={() => void exportNow()}
             >
@@ -557,11 +557,11 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
           </div>
           {diff && diff.length > 0 && (
             <div className="text-xs">
-              <div className="text-slate-400 flex items-center gap-1">
+              <div className="text-ink-muted flex items-center gap-1">
                 <GitCompare className="w-3.5 h-3.5" />前后对比（新运行 vs 所选基准运行）
               </div>
               <table className="mt-1 w-full text-left font-mono">
-                <thead className="text-slate-500">
+                <thead className="text-ink-faint">
                   <tr><th>指标</th><th>改前</th><th>改后</th><th>变化</th></tr>
                 </thead>
                 <tbody>
@@ -580,14 +580,14 @@ export default function AnalysisWorkbenchPanel({ taskId, exportPackage, onAdopte
         </>
       )}
       {msg && (
-        <div className={`text-xs ${msg.kind === 'ok' ? 'text-emerald-400'
-          : msg.kind === 'warn' ? 'text-amber-400' : 'text-red-400'}`}>
+        <div className={`text-xs ${msg.kind === 'ok' ? 'text-emerald-700'
+          : msg.kind === 'warn' ? 'text-amber-700' : 'text-red-700'}`}>
           {msg.text}
         </div>
       )}
       {/* P0-4：这一行与「导出与复核」面板的说明来自**同一次 resolvePackage 调用**
           （packageLine / exportPanelNote 同一模块），两边不可能再各说一套。 */}
-      <div className="text-xs text-slate-500">
+      <div className="text-xs text-ink-faint">
         {packageLine(pkg.res, { adoptedIdentity: state?.adopted_identity })}
       </div>
     </div>

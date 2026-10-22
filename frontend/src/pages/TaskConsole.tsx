@@ -7,6 +7,7 @@ import SubmitPanel from '../components/console/SubmitPanel'
 import PlanPanel from '../components/console/PlanPanel'
 import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
 import FirstRunGuide from '../components/FirstRunGuide'
+import { WeaveLines } from '../components/Brand'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import { resolveSubmissionKey } from '../lib/submissionKey'
 import { requestResume } from '../lib/resume'
@@ -52,6 +53,7 @@ export default function TaskConsole() {
   const setLogs = useTaskStore(s => s.setLogs)
 
   const [goal, setGoal] = useState('')
+  const [composerVersion, setComposerVersion] = useState(0)
   const [project, setProject] = useState('default')
   const [lastGoal, setLastGoal] = useState('')
   // 运行中任务切页恢复：taskId 迁入 store（重挂载自动恢复跟踪，不再孤儿化）
@@ -442,6 +444,12 @@ export default function TaskConsole() {
 
   const newConversation = useCallback(() => {
     reset()
+    setGoal('')
+    setLastGoal('')
+    setDeepTaskId('')
+    setUserContext('')
+    setImportMsg([])
+    setComposerVersion(version => version + 1)
     clearLastTask()   // "新对话"= 主动放弃当前任务：连刷新恢复点一起清
     setConvMessages([])
     useTaskStore.setState({ currentTaskId: null })
@@ -495,7 +503,16 @@ export default function TaskConsole() {
     : recentTasks.filter(t => t.status !== 'PENDING')
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto space-y-5">
+      {!taskId && !deepTaskId && (
+        <section className="research-hero relative isolate overflow-hidden rounded-xl px-5 py-4 md:px-8 md:py-6">
+          <WeaveLines className="pointer-events-none absolute -right-16 -top-5 -z-10 hidden h-64 w-[540px] text-brand lg:block" />
+          <p className="eyebrow text-brand">WEAVEMIND / 独立研究，有据可循</p>
+          <h2 className="editorial-title mt-3 text-2xl leading-snug tracking-wide text-ink md:text-[34px]">看清一家公司，<br className="sm:hidden" />从每一份证据开始。</h2>
+          <p className="mt-3 hidden max-w-xl text-sm text-ink-muted sm:block">为个人投资者与小团队，把公开披露整理成可复核的研究。<br className="hidden sm:block" />少一些信息翻找，多一些有依据的判断。</p>
+          <div className="mt-5 hidden flex-wrap gap-x-5 gap-y-2 text-xs text-ink-muted md:flex"><span>01 明确研究问题</span><span>02 整理资料与底稿</span><span>03 复核并导出</span></div>
+        </section>
+      )}
       {/* N3：首次使用引导——模型未配置时默认展开，配好后可随时折叠查看 */}
       <FirstRunGuide
         configComplete={firstRun.configComplete}
@@ -505,7 +522,7 @@ export default function TaskConsole() {
         onGoSettings={() => { window.location.href = '/settings' }} />
 
       <SubmitPanel
-        key={taskId || 'idle'}
+        key={taskId || `idle-${composerVersion}`}
         goal={goal} setGoal={setGoal}
         project={project} setProject={setProject}
         confirmMode={confirmMode} setConfirmMode={setConfirmMode}
@@ -529,12 +546,12 @@ export default function TaskConsole() {
         <div className={
           'rounded-lg border px-4 py-3 text-sm flex flex-wrap items-center gap-3 '
           + (actionableTone(actionable?.state) === 'bad'
-            ? 'border-red-800 bg-red-950/40 text-red-200'
+            ? 'border-red-200 bg-red-50/40 text-red-700'
             : actionableTone(actionable?.state) === 'warn'
-              ? 'border-amber-800 bg-amber-950/30 text-amber-100'
+              ? 'border-amber-200 bg-amber-50/30 text-amber-700'
               : actionableTone(actionable?.state) === 'ok'
-                ? 'border-emerald-800 bg-emerald-950/30 text-emerald-100'
-                : 'border-slate-700 bg-slate-900/60 text-slate-200')
+                ? 'border-emerald-200 bg-emerald-50/30 text-emerald-700'
+                : 'border-line-strong bg-surface/60 text-ink')
         }>
           <span className="font-medium">[{String(actionable?.label || '')}]</span>
           <span className="flex-1 min-w-[16rem]">{String(actionable?.message || '')}</span>
@@ -549,7 +566,9 @@ export default function TaskConsole() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">
+      <ReportViewer />
+
+      {(taskId || planTree || isRunning || resultItems.length > 0) && <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <PlanPanel
           planTree={planTree} awaitingConfirm={awaitingConfirm} revision={revision}
           isRunning={isRunning} taskId={taskId}
@@ -562,9 +581,7 @@ export default function TaskConsole() {
           gapsFor={gapsFor} onToggleGaps={toggleGaps}
           onViewReport={viewFullReport} onSubmit={submit} onPrefillGoal={prefillGoal}
           onResume={onResumeTask} />
-      </div>
-
-      <ReportViewer />
+      </div>}
 
       {selectedStep && <StepInspector node={selectedStep} onClose={() => setSelectedStep(null)} />}
     </div>

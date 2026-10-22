@@ -4,7 +4,7 @@ import {
   LABEL_FONT, TOPO_HEIGHT, placeTopologyLabels, shortAgentLabel, topologyNodes,
 } from '../lib/topologyLayout'
 
-const COLORS = ['#38bdf8', '#6ee7b7', '#fbbf24', '#fca5a5', '#c084fc', '#f472b6', '#818cf8']
+const COLORS = ['#92702e', '#487764', '#b68c41', '#a96d59', '#7e7290', '#8e7770', '#637a83']
 
 export default function AgentTopology() {
   const agents = useTaskStore(s => s.agents)
@@ -48,7 +48,7 @@ export default function AgentTopology() {
       ctx.beginPath()
       ctx.moveTo(cx + Math.cos(ang) * HUB_R, cy + Math.sin(ang) * HUB_R)
       ctx.lineTo(node.x, node.y)
-      ctx.strokeStyle = busy ? '#38bdf8' : '#334155'
+      ctx.strokeStyle = busy ? '#92702e' : '#cec9bc'
       ctx.lineWidth = busy ? 1.5 : 0.5; ctx.stroke()
 
       // 节点
@@ -61,15 +61,15 @@ export default function AgentTopology() {
       // 忙碌指示
       if (busy) {
         ctx.beginPath(); ctx.arc(node.x, node.y, node.r + 3, 0, Math.PI * 2)
-        ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1
+        ctx.strokeStyle = '#92702e'; ctx.lineWidth = 1
         ctx.setLineDash([3, 2]); ctx.stroke(); ctx.setLineDash([])
       }
     })
 
     // 中枢节点：挪到连线之后画，避免被辐条压住
     ctx.beginPath(); ctx.arc(cx, cy, HUB_R, 0, Math.PI * 2)
-    ctx.fillStyle = '#38bdf8'; ctx.fill()
-    ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 2; ctx.stroke()
+    ctx.fillStyle = '#92702e'; ctx.fill()
+    ctx.strokeStyle = '#f3f1eb'; ctx.lineWidth = 2; ctx.stroke()
     ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
     ctx.fillText('中枢', cx, cy)
@@ -79,7 +79,7 @@ export default function AgentTopology() {
     for (const l of layout.placed) {
       const owner = nodes[Number(l.id.slice(1))]
       const isHovered = owner && agents[Number(l.id.slice(1))]?.agent_id === hovered
-      ctx.fillStyle = isHovered ? '#e2e8f0' : '#94a3b8'
+      ctx.fillStyle = isHovered ? '#292d2b' : '#626760'
       ctx.textAlign = l.align
       ctx.textBaseline = l.baseline
       ctx.fillText(l.text, l.align === 'left' ? l.x : l.align === 'right' ? l.x + l.w : l.x + l.w / 2,
@@ -115,7 +115,7 @@ export default function AgentTopology() {
       />
       <div className="text-center text-xs text-gray-500 mt-1">
         {hoveredAgent
-          ? <span className="text-cyan-400">{hoveredAgent.agent_id} · {hoveredAgent.status || '未知'}</span>
+          ? <span className="text-brand">{hoveredAgent.agent_id} · {hoveredAgent.status || '未知'}</span>
           : <span>
               {agents.length} 个智能体在线
               {hiddenCount > 0 && `（${hiddenCount} 个标签画布放不下已省略，鼠标移到节点上可看名称）`}

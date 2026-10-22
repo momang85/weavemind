@@ -45,13 +45,13 @@ export function statusLabel(raw?: string): string {
 export function statusBadgeClass(raw?: string): string {
   const base = 'px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap'
   switch (statusKind(raw)) {
-    case 'success': return `${base} bg-emerald-500/15 text-emerald-400 border border-emerald-500/25`
-    case 'issue': return `${base} bg-amber-500/15 text-amber-400 border border-amber-500/25`
-    case 'skipped': return `${base} bg-amber-500/15 text-amber-400 border border-amber-500/25`
-    case 'failure': return `${base} bg-red-500/15 text-red-400 border border-red-500/25`
-    case 'running': return `${base} bg-cyan-500/15 text-cyan-400 border border-cyan-500/25`
-    case 'cancelled': return `${base} bg-slate-500/15 text-slate-400 border border-slate-500/25`
-    default: return `${base} bg-slate-500/15 text-slate-400 border border-slate-600/30`
+    case 'success': return `${base} bg-emerald-500/15 text-emerald-700 border border-emerald-500/25`
+    case 'issue': return `${base} bg-amber-500/15 text-amber-700 border border-amber-500/25`
+    case 'skipped': return `${base} bg-amber-500/15 text-amber-700 border border-amber-500/25`
+    case 'failure': return `${base} bg-red-500/15 text-red-700 border border-red-500/25`
+    case 'running': return `${base} bg-brand/15 text-brand border border-brand/25`
+    case 'cancelled': return `${base} bg-line-strong/15 text-ink-muted border border-line-strong/25`
+    default: return `${base} bg-line-strong/15 text-ink-muted border border-line-strong/30`
   }
 }
 
@@ -62,9 +62,9 @@ export function statusDotClass(raw?: string): string {
     case 'issue': return 'w-2 h-2 rounded-full bg-amber-400'
     case 'skipped': return 'w-2 h-2 rounded-full bg-amber-400'
     case 'failure': return 'w-2 h-2 rounded-full bg-red-400'
-    case 'running': return 'w-2 h-2 rounded-full bg-cyan-400 animate-pulse'
-    case 'cancelled': return 'w-2 h-2 rounded-full bg-slate-500'
-    default: return 'w-2 h-2 rounded-full bg-slate-600'
+    case 'running': return 'w-2 h-2 rounded-full bg-brand animate-pulse'
+    case 'cancelled': return 'w-2 h-2 rounded-full bg-line-strong'
+    default: return 'w-2 h-2 rounded-full bg-line-strong'
   }
 }
 
@@ -74,15 +74,15 @@ export function stepStatusMeta(raw?: string): {
 } {
   switch (statusKind(raw)) {
     case 'success':
-      return { label: '成功', line: 'bg-emerald-400', dot: 'bg-emerald-400', text: 'text-emerald-300', bg: 'border-emerald-500/20 bg-emerald-500/5' }
+      return { label: '成功', line: 'bg-emerald-400', dot: 'bg-emerald-400', text: 'text-emerald-700', bg: 'border-emerald-500/20 bg-emerald-500/5' }
     case 'failure':
-      return { label: '失败', line: 'bg-red-400', dot: 'bg-red-400', text: 'text-red-300', bg: 'border-red-500/20 bg-red-500/5' }
+      return { label: '失败', line: 'bg-red-400', dot: 'bg-red-400', text: 'text-red-700', bg: 'border-red-500/20 bg-red-500/5' }
     case 'running':
-      return { label: '运行中', line: 'bg-cyan-400', dot: 'bg-cyan-400', text: 'text-cyan-300', bg: 'border-cyan-500/20 bg-cyan-500/5' }
+      return { label: '运行中', line: 'bg-brand', dot: 'bg-brand', text: 'text-brand', bg: 'border-brand/20 bg-brand/5' }
     case 'skipped':
-      return { label: '已跳过', line: 'bg-amber-400', dot: 'bg-amber-400', text: 'text-amber-300', bg: 'border-amber-500/20 bg-amber-500/5' }
+      return { label: '已跳过', line: 'bg-amber-400', dot: 'bg-amber-400', text: 'text-amber-700', bg: 'border-amber-500/20 bg-amber-500/5' }
     default:
-      return { label: '待执行', line: 'bg-slate-700', dot: 'bg-slate-600', text: 'text-slate-500', bg: 'border-slate-800' }
+      return { label: '待执行', line: 'bg-line', dot: 'bg-line-strong', text: 'text-ink-faint', bg: 'border-line' }
   }
 }
 
@@ -97,8 +97,8 @@ export function agentStatusLabel(status?: string): string {
 
 export function agentStatusDotClass(status?: string): string {
   const s = String(status || '')
-  if (!s || s.startsWith('offline')) return 'w-2 h-2 rounded-full bg-slate-500'
-  if (s.includes('active')) return 'w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse animate-pulse'
+  if (!s || s.startsWith('offline')) return 'w-2 h-2 rounded-full bg-line-strong'
+  if (s.includes('active')) return 'w-2.5 h-2.5 rounded-full bg-brand animate-pulse animate-pulse'
   return 'w-2 h-2 rounded-full bg-emerald-400'
 }
 
@@ -119,10 +119,10 @@ export function resultLabel(raw?: string): string {
 
 export function resultClass(raw?: string): string {
   const r = String(raw || '').trim().toLowerCase()
-  if (r === 'ok' || r === 'success' || r === 'allow' || r === 'allowed' || r === 'pass') return 'text-emerald-400'
-  if (r === 'fail' || r === 'failed' || r === 'error') return 'text-red-400'
-  if (r === 'denied' || r === 'deny') return 'text-amber-400'
-  return 'text-slate-400'
+  if (r === 'ok' || r === 'success' || r === 'allow' || r === 'allowed' || r === 'pass') return 'text-emerald-700'
+  if (r === 'fail' || r === 'failed' || r === 'error') return 'text-red-700'
+  if (r === 'denied' || r === 'deny') return 'text-amber-700'
+  return 'text-ink-muted'
 }
 
 /** 审计「详情」里的原始英文 errno 片段 → 中文；识别不了就原样返回，不编。 */

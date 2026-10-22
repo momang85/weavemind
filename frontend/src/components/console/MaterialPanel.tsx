@@ -38,10 +38,10 @@ type Material = {
 }
 
 const STATUS_TEXT: Record<string, { label: string; cls: string }> = {
-  admitted: { label: '已准入', cls: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' },
-  rejected: { label: '未准入', cls: 'text-amber-400 border-amber-500/30 bg-amber-500/10' },
-  fetch_failed: { label: '未取得原文', cls: 'text-red-400 border-red-500/30 bg-red-500/10' },
-  pending_intake: { label: '待摄取', cls: 'text-slate-400 border-slate-600 bg-slate-800/40' },
+  admitted: { label: '已准入', cls: 'text-emerald-700 border-emerald-500/30 bg-emerald-500/10' },
+  rejected: { label: '未准入', cls: 'text-amber-700 border-amber-500/30 bg-amber-500/10' },
+  fetch_failed: { label: '未取得原文', cls: 'text-red-700 border-red-500/30 bg-red-500/10' },
+  pending_intake: { label: '待摄取', cls: 'text-ink-muted border-line-strong bg-surface-raised/40' },
 }
 
 const METRIC_LABEL: Record<string, string> = {
@@ -281,101 +281,101 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
 
   return (
     <div className="space-y-3 text-xs">
-      <div className="text-slate-400">
+      <div className="text-ink-muted">
         补充原始披露：给直链（由服务取件）或上传文件。材料经同一准入判据（主体/期间/
         披露日/正文完整性）后并入资料快照，证据、底稿与报告读的是同一份快照。
       </div>
 
-      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2">
-        <div className="flex items-center gap-2 text-slate-300">
-          <Link2 className="w-3.5 h-3.5 text-cyan-400" /> 披露直链
+      <div className="bg-surface/60 border border-line rounded-xl p-3 space-y-2">
+        <div className="flex items-center gap-2 text-ink">
+          <Link2 className="w-3.5 h-3.5 text-brand" /> 披露直链
         </div>
         <input value={url} onChange={e => setUrl(e.target.value)} disabled={disabled || busy}
           placeholder="https://…（官方披露平台或发行人公告直链）"
-          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-slate-200" />
+          className="w-full bg-surface-sunken border border-line rounded px-2 py-1.5 text-ink" />
         <div className="grid grid-cols-2 gap-2">
           <input value={title} onChange={e => setTitle(e.target.value)} disabled={disabled || busy}
             placeholder="标题（可选，如：洋河股份:2024年年度报告）"
-            className="bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-slate-200" />
+            className="bg-surface-sunken border border-line rounded px-2 py-1.5 text-ink" />
           <input value={declared} onChange={e => setDeclared(e.target.value)} disabled={disabled || busy}
             placeholder="披露日（材料自身没带日期时才用，如 2025-04-29）"
-            className="bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-slate-200" />
+            className="bg-surface-sunken border border-line rounded px-2 py-1.5 text-ink" />
         </div>
         <div className="flex items-center gap-2">
           <button onClick={submitLink} disabled={disabled || busy || !url.trim()}
-            className="px-3 py-1.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 disabled:opacity-40">
+            className="px-3 py-1.5 rounded bg-brand/15 border border-brand/30 text-brand disabled:opacity-40">
             添加直链
           </button>
-          <label className={`px-3 py-1.5 rounded border border-slate-700 text-slate-300 inline-flex items-center gap-1.5 ${disabled || busy ? 'opacity-40' : 'cursor-pointer hover:bg-slate-800'}`}>
+          <label className={`px-3 py-1.5 rounded border border-line-strong text-ink inline-flex items-center gap-1.5 ${disabled || busy ? 'opacity-40' : 'cursor-pointer hover:bg-surface-raised'}`}>
             <Upload className="w-3.5 h-3.5" /> 上传文件
             <input type="file" className="hidden" disabled={disabled || busy}
               accept=".pdf,.txt,.md,.html,.htm,.json" onChange={e => onFile(e.target.files)} />
           </label>
-          {busy && <span className="text-slate-500 inline-flex items-center gap-1">
+          {busy && <span className="text-ink-faint inline-flex items-center gap-1">
             <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 摄取中…</span>}
         </div>
-        <div className="text-slate-600">
+        <div className="text-ink-faint">
           上限：单件 3 MiB、PDF ≤ 400 页；不接受压缩包。上市公司的披露日以材料自带日期为准，
           自填日期只作声明依据（会如实标注）。
         </div>
       </div>
 
-      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2">
-        <div className="flex items-center gap-2 text-slate-300">
-          <FileText className="w-3.5 h-3.5 text-violet-400" /> 按新材料生成候选正文
+      <div className="bg-surface/60 border border-line rounded-xl p-3 space-y-2">
+        <div className="flex items-center gap-2 text-ink">
+          <FileText className="w-3.5 h-3.5 text-violet-700" /> 按新材料生成候选正文
         </div>
-        <div className="text-slate-500">
-          用已并入的新材料重新装配正文（<span className="text-slate-400">确定性装配</span>：
+        <div className="text-ink-faint">
+          用已并入的新材料重新装配正文（<span className="text-ink-muted">确定性装配</span>：
           不调用模型、不消耗检索或生成额度）。同一次动作只生成一个候选；候选
-          <span className="text-slate-400">不采纳</span>——旧交付、人工文字与旧批准都保留，
+          <span className="text-ink-muted">不采纳</span>——旧交付、人工文字与旧批准都保留，
           需你显式采纳后才会成为交付。只重做产出正文的步骤，检索/清洗不重跑。
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <button onClick={genCandidate}
             disabled={disabled || busy || admittedCount === 0 || !taskId}
-            className="px-3 py-1.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 disabled:opacity-40">
+            className="px-3 py-1.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-700 disabled:opacity-40">
             生成候选正文
           </button>
           <button onClick={() => previewCandidate()}
             disabled={disabled || busy || !taskId}
-            className="px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40">
+            className="px-3 py-1.5 rounded bg-surface-raised border border-line-strong text-ink disabled:opacity-40">
             预览候选正文
           </button>
           <button onClick={() => queryOp(op || undefined)}
             disabled={disabled || busy || !taskId}
-            className="px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-300 disabled:opacity-40"
+            className="px-3 py-1.5 rounded bg-surface-raised border border-line-strong text-ink disabled:opacity-40"
             title="查看上次候选操作的结果；不传 operation id 则查最近一次">
             查看上次操作
           </button>
           {admittedCount === 0 && (
-            <span className="text-slate-600">还没有已准入的材料</span>
+            <span className="text-ink-faint">还没有已准入的材料</span>
           )}
-          {busy && <span className="text-slate-500 inline-flex items-center gap-1">
+          {busy && <span className="text-ink-faint inline-flex items-center gap-1">
             <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 处理中…</span>}
         </div>
         {cand && (
-          <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-200 px-2 py-1.5 space-y-1">
+          <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-700 px-2 py-1.5 space-y-1">
             <div>
               候选 {String(cand.candidate_version_id ?? '').slice(0, 12)}…
               {cand.acceptance?.overall ? ` · 本候选验收：${cand.acceptance.overall}` : ''}
               {' · '}{cand.adopted || prev?.is_adopted ? '已采纳' : '未采纳（需显式采纳）'}
             </div>
-            <div className="text-violet-300/80">
+            <div className="text-violet-700/80">
               影响步骤 {(cand.affected_steps ?? []).map((s: any) => s.step_id || s.capability).join('、') || '—'}
               ；未重做 {(cand.stopped_steps ?? []).length} 个
               {cand.budget && (cand.budget.calls_left !== undefined
                 ? ` · 剩余检索额度 ${cand.budget.calls_left} 次` : '')}
             </div>
             {(cand.acceptance?.gaps ?? []).length > 0 && (
-              <div className="text-amber-300">
+              <div className="text-amber-700">
                 候选缺口：{(cand.acceptance.gaps ?? []).slice(0, 3).join('；')}
               </div>
             )}
             {cand.prior_failure?.status && (
-              <div className="text-amber-300">
+              <div className="text-amber-700">
                 原任务状态：{cand.prior_failure.status}（{cand.prior_failure.phase || '—'}）——
                 {String(cand.prior_failure.detail ?? '').slice(0, 80)}
-                <div className="text-amber-300/70">
+                <div className="text-amber-700/70">
                   原失败记录未被修改；候选是新版本，不代表任务已成功。
                 </div>
               </div>
@@ -385,74 +385,74 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
 
         {/* C 批：预览 → 比较 → 显式采纳（闭环）。采纳是按钮 + 二次确认，绝不自动。 */}
         {prev && (
-          <div className="rounded-lg border border-slate-700 bg-slate-900/70 px-2 py-2 space-y-2">
-            <div className="text-slate-300">
+          <div className="rounded-lg border border-line-strong bg-surface/70 px-2 py-2 space-y-2">
+            <div className="text-ink">
               候选预览（只读）：
-              <span className="text-slate-500"> 身份 {String(prev.candidate?.identity_id ?? '').slice(0, 16)}…</span>
+              <span className="text-ink-faint"> 身份 {String(prev.candidate?.identity_id ?? '').slice(0, 16)}…</span>
               {prev.is_adopted
-                ? <span className="ml-2 text-emerald-400">已是当前选中版本</span>
-                : <span className="ml-2 text-amber-300">未采纳</span>}
+                ? <span className="ml-2 text-emerald-700">已是当前选中版本</span>
+                : <span className="ml-2 text-amber-700">未采纳</span>}
             </div>
-            <div className="text-slate-400">
+            <div className="text-ink-muted">
               与当前稿比较：改动 {(prev.comparison?.changed_lines ?? 0)} 行
               （+{prev.comparison?.added_lines ?? 0}/-{prev.comparison?.removed_lines ?? 0}）；
               字节 {prev.comparison?.adopted_bytes ?? 0} → {prev.comparison?.candidate_bytes ?? 0}；
               人工分析节{prev.comparison?.analysis_section_preserved
-                ? <span className="text-emerald-400"> 原样保留</span>
-                : <span className="text-amber-300"> 未保留（需人工确认）</span>}
+                ? <span className="text-emerald-700"> 原样保留</span>
+                : <span className="text-amber-700"> 未保留（需人工确认）</span>}
             </div>
             {(prev.candidate?.acceptance?.gaps ?? []).length > 0 && (
-              <div className="text-amber-300">
+              <div className="text-amber-700">
                 证据缺口：{(prev.candidate.acceptance.gaps ?? []).slice(0, 5).join('；')}
               </div>
             )}
             {(prev.comparison?.diff_head ?? []).length > 0 && (
-              <pre className="max-h-40 overflow-auto rounded bg-slate-950 border border-slate-800 p-2 text-xs leading-5 text-slate-400">
+              <pre className="max-h-40 overflow-auto rounded bg-surface-sunken border border-line p-2 text-xs leading-5 text-ink-muted">
                 {(prev.comparison.diff_head ?? []).join('\n')}
                 {prev.comparison.diff_truncated ? '\n…（差异过长，已截断）' : ''}
               </pre>
             )}
             <div className="flex items-center gap-2 flex-wrap">
               <button onClick={() => setShowBody(v => !v)}
-                className="px-2 py-1 rounded border border-slate-700 text-slate-300">
+                className="px-2 py-1 rounded border border-line-strong text-ink">
                 {showBody ? '收起候选正文' : '查看候选正文'}
               </button>
               {!prev.is_adopted && !adoptArmed && (
                 <button onClick={adoptArm} disabled={disabled || busy}
-                  className="px-3 py-1.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 disabled:opacity-40">
+                  className="px-3 py-1.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-700 disabled:opacity-40">
                   采纳这一版…
                 </button>
               )}
-              <span className="text-slate-500">
+              <span className="text-ink-faint">
                 采纳后对该身份重验；人工复核仍由你单独完成，机器不代写。
               </span>
             </div>
             {adoptArmed && !prev.is_adopted && (
-              <div className="rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 px-2 py-2 space-y-1">
+              <div className="rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 px-2 py-2 space-y-1">
                 <div>确认采纳这一版作为交付正文？这会切换交付的选中版本。</div>
-                <div className="text-emerald-300/80">
+                <div className="text-emerald-700/80">
                   身份 {String(prev.candidate?.identity_id ?? '').slice(0, 20)}…
                   · 与当前稿改动 {prev.comparison?.changed_lines ?? 0} 行
                   · 候选验收 {prev.candidate?.acceptance?.overall || '（未知）'}
                 </div>
-                <div className="text-emerald-300/80">
+                <div className="text-emerald-700/80">
                   旧版与人工文字保留在版本库；人工复核（human_review）不继承、不改写；
                   采纳**不等于**验收通过——重验结论会如实显示。
                 </div>
                 <div className="flex items-center gap-2">
                   <button onClick={adoptCandidate} disabled={disabled || busy}
-                    className="px-3 py-1.5 rounded bg-emerald-500/25 border border-emerald-400/50 text-emerald-100 disabled:opacity-40">
+                    className="px-3 py-1.5 rounded bg-emerald-500/25 border border-emerald-400/50 text-emerald-700 disabled:opacity-40">
                     确认采纳（不可自动完成）
                   </button>
                   <button onClick={() => setAdoptArmed(false)}
-                    className="px-2 py-1 rounded border border-slate-600 text-slate-300">
+                    className="px-2 py-1 rounded border border-line-strong text-ink">
                     取消
                   </button>
                 </div>
               </div>
             )}
             {showBody && (
-              <pre className="max-h-80 overflow-auto rounded bg-slate-950 border border-slate-800 p-2 text-xs leading-5 text-slate-300 whitespace-pre-wrap">
+              <pre className="max-h-80 overflow-auto rounded bg-surface-sunken border border-line p-2 text-xs leading-5 text-ink whitespace-pre-wrap">
                 {String(prev.body ?? '')}
               </pre>
             )}
@@ -460,18 +460,18 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
         )}
 
         {adopted && (
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-200 px-2 py-1.5 space-y-1">
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 px-2 py-1.5 space-y-1">
             <div>
               已采纳 {String(adopted.adopted?.version_id ?? '').slice(0, 12)}…
               （此前选中 {String(adopted.previous?.version_id ?? '').slice(0, 12)}…）
             </div>
-            <div className="text-emerald-300/80">
+            <div className="text-emerald-700/80">
               对该身份重验：{adopted.reverify?.overall || '（未知）'}
               {adopted.reverify?.covers_adopted_identity ? '' : ' · 未绑到该身份，按待重验处理'}
               {(adopted.reverify?.gaps ?? []).length > 0
                 ? `；缺口：${(adopted.reverify.gaps ?? []).slice(0, 3).join('；')}` : ''}
             </div>
-            <div className="text-emerald-300/80">
+            <div className="text-emerald-700/80">
               人工复核文件{adopted.human_review_untouched ? '未被改动' : '被改动了（异常，请核对）'}；
               旧批准未继承；采纳本身不等于验证通过。
               {adopted.next?.export ? ` 下一步：${adopted.next.export}` : ''}
@@ -482,9 +482,9 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
 
       {msg && (
         <div className={`rounded-xl border px-3 py-2 whitespace-pre-wrap ${
-          msg.kind === 'ok' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-            : msg.kind === 'warn' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
-              : 'border-red-500/30 bg-red-500/10 text-red-300'}`}>
+          msg.kind === 'ok' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700'
+            : msg.kind === 'warn' ? 'border-amber-500/30 bg-amber-500/10 text-amber-700'
+              : 'border-red-500/30 bg-red-500/10 text-red-700'}`}>
           <span className="inline-flex items-center gap-1.5">
             {msg.kind === 'ok' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
             {msg.text}
@@ -493,12 +493,12 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
       )}
 
       <div className="space-y-2">
-        <div className="text-slate-400">
+        <div className="text-ink-muted">
           任务材料（{items.length}）
-          {loadState === 'loading' && <span className="text-slate-600"> · 读取中…</span>}
+          {loadState === 'loading' && <span className="text-ink-faint"> · 读取中…</span>}
         </div>
         {loadState === 'error' && (
-          <div className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+          <div className="border border-red-500/30 bg-red-500/10 text-red-700 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
             <span className="inline-flex items-start gap-1.5">
               <AlertTriangle className="w-3.5 h-3.5 mt-0.5" />
               <span>
@@ -512,21 +512,21 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
             </button>
           </div>
         )}
-        {loadState === 'ok' && items.length === 0 && <div className="text-slate-600 text-center py-6">还没有补充材料。</div>}
+        {loadState === 'ok' && items.length === 0 && <div className="text-ink-faint text-center py-6">还没有补充材料。</div>}
         {items.map(m => {
-          const st = STATUS_TEXT[m.status ?? ''] ?? { label: m.status ?? '未知', cls: 'text-slate-400 border-slate-700' }
+          const st = STATUS_TEXT[m.status ?? ''] ?? { label: m.status ?? '未知', cls: 'text-ink-muted border-line-strong' }
           const scope = m.read_scope ?? {}
           return (
-            <div key={m.material_id} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-1.5">
+            <div key={m.material_id} className="bg-surface/60 border border-line rounded-xl p-3 space-y-1.5">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className={`px-1.5 py-0.5 rounded border ${st.cls}`}>{st.label}</span>
-                <span className="text-slate-300 truncate max-w-[60%]" title={m.title}>{m.title || m.url || m.material_id}</span>
-                <span className="text-slate-600">{m.channel_label}</span>
+                <span className="text-ink truncate max-w-[60%]" title={m.title}>{m.title || m.url || m.material_id}</span>
+                <span className="text-ink-faint">{m.channel_label}</span>
               </div>
-              <div className="text-slate-500 break-all">
+              <div className="text-ink-faint break-all">
                 {m.filename || m.url}
               </div>
-              <div className="flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
+              <div className="flex flex-wrap gap-x-3 gap-y-1 text-ink-faint">
                 {m.kind_label && <span>{m.kind_label}</span>}
                 {m.source_class && <span>来源类别：{m.source_class}</span>}
                 {m.provenance_label && <span>{m.provenance_label}</span>}
@@ -541,7 +541,7 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
                 )}
               </div>
               {m.raw_sha256 && (
-                <div className="text-slate-600 break-all">
+                <div className="text-ink-faint break-all">
                   原件 sha256 {m.raw_sha256.slice(0, 16)}… · 正文 sha256 {(m.text_sha256 || '').slice(0, 16)}…
                 </div>
               )}
@@ -549,16 +549,16 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
                 <div className="flex flex-wrap gap-1.5">
                   {Object.entries(m.metric_states).map(([k, v]) => (
                     <span key={k} className={`px-1.5 py-0.5 rounded border ${
-                      v.state === 'present_in_scope' ? 'border-emerald-500/30 text-emerald-400'
-                        : 'border-slate-700 text-slate-500'}`}>
+                      v.state === 'present_in_scope' ? 'border-emerald-500/30 text-emerald-700'
+                        : 'border-line-strong text-ink-faint'}`}>
                       {METRIC_LABEL[k] ?? k}：{v.label ?? v.state}
                     </span>
                   ))}
                 </div>
               )}
-              {m.reason && <div className="text-amber-400">未准入原因：{m.reason}</div>}
+              {m.reason && <div className="text-amber-700">未准入原因：{m.reason}</div>}
               {(m.pending ?? []).length > 0 && (
-                <div className="text-amber-400">待办：{(m.pending ?? []).map(p => p.reason).join('；')}</div>
+                <div className="text-amber-700">待办：{(m.pending ?? []).map(p => p.reason).join('；')}</div>
               )}
             </div>
           )

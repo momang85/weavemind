@@ -1,34 +1,34 @@
 import { memo, useEffect, useState } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square, Building2 } from 'lucide-react'
+import { Loader2, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square, Building2, ArrowUpRight, Search, Table2, Archive, BookOpen } from 'lucide-react'
 import { buildResearchGoal, type ResearchFields, type ResearchForm } from '../../lib/researchGoal'
 
 /** 快答结果卡片：正文 + 来源链接 + 诚实降级标签。 */
 function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
   return (
-    <div id="quick-answer-card" className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3 space-y-2">
+    <div id="quick-answer-card" className="bg-brand/5 border border-brand/20 rounded-xl p-3 space-y-2">
       <div className="flex items-center gap-2 text-xs">
-        <Zap className="w-3 h-3 text-cyan-400" />
-        <span className="text-cyan-400 font-semibold">快答</span>
+        <Zap className="w-3 h-3 text-brand" />
+        <span className="text-brand font-semibold">快答</span>
         {qa.mode === 'searched' ? (
-          <span className="text-emerald-400">已检索 {qa.sources?.length || 0} 条来源 · {qa.searched_at}</span>
+          <span className="text-emerald-700">已检索 {qa.sources?.length || 0} 条来源 · {qa.searched_at}</span>
         ) : qa.mode === 'error' ? (
-          <span className="text-red-400">请求失败</span>
+          <span className="text-red-700">请求失败</span>
         ) : (
-          <span className="text-amber-400">模型知识 · 未检索（未验证）</span>
+          <span className="text-amber-700">模型知识 · 未检索（未验证）</span>
         )}
-        <span className="text-slate-600">{qa.duration}s</span>
+        <span className="text-ink-faint">{qa.duration}s</span>
         <button onClick={onClose} aria-label="关闭快答"
-          className="ml-auto p-0.5 rounded text-slate-600 hover:text-slate-300 transition-colors">
+          className="ml-auto p-0.5 rounded text-ink-faint hover:text-ink transition-colors">
           <X className="w-3.5 h-3.5" />
         </button>
       </div>
-      <pre className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-64 overflow-y-auto">{qa.content}</pre>
+      <pre className="whitespace-pre-wrap break-all text-ink text-xs font-sans max-h-64 overflow-y-auto">{qa.content}</pre>
       {qa.sources?.length > 0 && (
-        <div className="space-y-1 pt-1 border-t border-slate-800">
-          <div className="text-xs text-slate-500">参考来源：</div>
+        <div className="space-y-1 pt-1 border-t border-line">
+          <div className="text-xs text-ink-faint">参考来源：</div>
           {qa.sources.map((s: any, i: number) => (
             <a key={i} href={s.url} target="_blank" rel="noreferrer"
-              className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 truncate">
+              className="flex items-center gap-1 text-xs text-brand hover:text-brand truncate">
               <ExternalLink className="w-2.5 h-2.5 shrink-0" />
               <span className="truncate">{s.title || s.url}</span>
             </a>
@@ -75,11 +75,15 @@ export default memo(function SubmitPanel({
   formCollapsedByDefault?: boolean
 }) {
   const [showContext, setShowContext] = useState(false)
+  const [inputMode, setInputMode] = useState<'company' | 'custom'>('company')
+  const [composerOpen, setComposerOpen] = useState(!formCollapsedByDefault)
   const [templates, setTemplates] = useState<any[]>([])
   const [stopping, setStopping] = useState(false)
   const [stopMsg, setStopMsg] = useState('')
   // 研究表单的结构化契约字段（与目标一起提交；重新输入目标时清空，避免张冠李戴）
   const [researchFields, setResearchFields] = useState<ResearchFields | null>(null)
+
+  useEffect(() => { if (goal.trim()) { setInputMode('custom'); setComposerOpen(true) } }, [goal])
 
   // 停止运行中的任务：写取消标志，编排器在下一个派发边界收尾
   const stopTask = async () => {
@@ -171,165 +175,150 @@ export default memo(function SubmitPanel({
     }
   }
 
-  return (
-    <>
-      {/* 快答栏（T3：秒级问答入口，检索优先、来源可见） */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex items-center gap-2">
-        <Zap className="w-4 h-4 text-cyan-400 ml-2 shrink-0" />
-        <input value={qaGoal}
-          onChange={e => setQaGoal(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') askQuick() }}
-          placeholder={demoMode
-            ? '演示模式：快答已停用（它会调用真实接口）'
-            : '快答：秒级问答（自动检索资讯并附来源），如「贵州茅台最新财报要点」'}
-          disabled={qaLoading || demoMode}
-          className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 p-2 text-sm focus:outline-none disabled:opacity-50" />
-        <button onClick={askQuick} disabled={qaLoading || demoMode || !qaGoal.trim()}
-          title={demoMode ? '演示模式下不可用（避免真实调用）' : '秒级问答，不走编排器'}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
-          {qaLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-          快答
-        </button>
-      </div>
-      {qa && <QuickAnswerCard qa={qa} onClose={() => setQa(null)} />}
-
-      {/* S2：研究一家公司（首发路径的默认入口）——只拼目标，不绕过自由输入框。
-          P2-4：打开已有任务（?task=<id> 或本会话已提交）时默认收起，第一屏先给任务与报告。 */}
-      <ResearchQuickForm
-        disabled={isRunning || demoMode}
-        defaultOpen={!formCollapsedByDefault}
-        onReady={(goalText, fields) => { setGoal(goalText); setResearchFields(fields) }} />
-
-      {/* 输入区 */}
-      {/* 窄屏：操作按钮组 basis-full 独占一行，输入框才能拿到整行宽度。
-          此前按钮组 shrink-0 且不换行，390px 窗口下把输入框压到 24px（实际不可输入）。 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex flex-wrap items-end gap-2">
-        <textarea value={goal}
-          onChange={e => { setGoal(e.target.value); if (researchFields) setResearchFields(null) }}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit(undefined, researchFields) } }}
-          placeholder={demoMode ? '演示模式：不可提交真实任务' : '给 AI 团队下达研究任务…（例：研究贵州茅台 2023/2024 年营业收入与归母净利润）'}
-          disabled={isRunning || demoMode}
-          rows={1}
-          className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
-        <div className="flex flex-wrap items-center justify-end gap-2 pb-1 shrink-0 basis-full sm:basis-auto">
-          {activeConversationId && (
-            <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs whitespace-nowrap">
-              <MessagesSquare className="w-3.5 h-3.5" /> 对话中
-            </span>
-          )}
-          <select value={templateName}
-            onChange={e => {
-              const name = e.target.value
-              setTemplateName(name)
-              const tpl = templates.find(t => t.name === name)
-              // 仅当用户尚未输入目标时回填模板目标：直接覆盖会吞掉
-              // 用户已写好的任务描述（与后端"允许不传 goal"语义一致）
-              if (tpl && tpl.goal && !goal.trim()) setGoal(tpl.goal)
-            }}
-            className="hidden sm:block bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-300 shrink-0">
-            <option value="">自定义任务</option>
-            {templates.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-          </select>
-          <input value={project}
-            onChange={e => setProject(e.target.value)}
-            placeholder="项目（default）"
-            title="任务所属项目（F1 多项目工作区）"
-            className="hidden sm:block w-28 bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-300 placeholder-slate-600 shrink-0 focus:outline-none focus:border-cyan-500" />
-          <label className="flex items-center gap-1.5 px-2 py-2 text-xs text-slate-400 cursor-pointer shrink-0">
-            <input type="checkbox" checked={confirmMode}
-              onChange={e => setConfirmMode(e.target.checked)}
-              className="accent-cyan-500" />
-            先确认计划
-          </label>
-          <button onClick={() => onSubmit(undefined, researchFields)} disabled={isRunning || demoMode || !goal.trim()}
-            title={demoMode ? '演示模式下不可提交真实任务' : '提交任务（Enter）'}
-            className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
-            {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> 执行中…</>) : (<><Sparkles className="w-4 h-4" /> 执行</>)}
-          </button>
-          {isRunning && taskId && (
-            <button onClick={stopTask} disabled={stopping || demoMode}
-              title={demoMode ? '演示模式下已停用' : '请求停止当前任务'}
-              className="flex items-center gap-2 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-40 text-rose-400 font-semibold px-4 py-2.5 rounded-lg transition-all text-sm border border-rose-500/20 shrink-0">
-              <Square className="w-4 h-4" /> {stopping ? '停止中…' : '停止'}
-            </button>
-          )}
-          {stopMsg && (
-            <span className="text-xs text-amber-400 whitespace-nowrap">{stopMsg}</span>
-          )}
-          {status === 'completed' && reportSummary === 'FAILED' && lastGoal && (
-            <button onClick={() => onSubmit(lastGoal)}
-              className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm border border-red-500/20 shrink-0">
-              <RefreshCw className="w-4 h-4" /> Retry
-            </button>
-          )}
-          <button onClick={onNewConversation} title="开始新对话"
-            className="flex items-center gap-2 px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors shrink-0">
-            <Plus className="w-4 h-4" /> 新对话
-          </button>
-        </div>
-        {(elapsedText || (!isRunning && etaText)) && (
-          <div className="mt-2 text-xs text-slate-500 basis-full">
-            {isRunning
-              ? `${elapsedText || ''}${elapsedText && etaText && !etaText.includes('未知') ? ' · ' : ''}${etaText && !etaText.includes('未知') ? etaText : ''}`
-              : etaText}
-          </div>
-        )}
-      </div>
-
-      {/* 导入上下文（可选） */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5">
-        <button onClick={() => setShowContext(!showContext)}
-          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-400 hover:text-slate-300 text-left">
-          <FileText className="w-3.5 h-3.5 text-cyan-400" />
-          导入上下文（需求背景 / 参考资料 / 约束条件）
-          <ChevronDown className={`w-3.5 h-3.5 ml-auto transition-transform ${showContext ? 'rotate-180' : ''}`} />
-        </button>
-        {showContext && (
-          <div className="space-y-2">
-            <textarea value={userContext}
-              onChange={e => setUserContext(e.target.value)}
-              rows={4}
-              placeholder="粘贴需求背景、参考资料、URL、约束条件等（可选）。将随任务一起提供给 AI 团队，用于更准确地满足需求。"
-              className="w-full bg-slate-800/50 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500" />
-            <div className="flex flex-wrap items-center gap-2">
-              <input id="ctx-file-input" type="file" multiple
-                accept=".txt,.md,.csv,.json,.log,.py,.yaml,.yml,.pdf,.docx,.xlsx,.xls"
-                className="hidden"
-                onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
-              <label htmlFor="ctx-file-input"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer">
-                <Upload className="w-3.5 h-3.5" /> 导入文件（txt/md/csv/json/pdf/docx/xlsx...）
-              </label>
-              <span className="text-xs text-slate-600">文件内容将自动追加到上下文中</span>
-            </div>
-            {importMsg.length > 0 && (
-              <div className="space-y-1">
-                {importMsg.map((m, i) => (
-                  <div key={i} className="text-xs flex gap-2">
-                    <span className="text-slate-400 truncate max-w-[200px]">{m.name}</span>
-                    <span className={m.note.startsWith('成功') ? 'text-emerald-400' : 'text-amber-400'}>{m.note}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </>
+  if (formCollapsedByDefault && !composerOpen) return (
+    <section className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-4">
+      <BookOpen className="h-5 w-5 text-brand" />
+      <div className="min-w-0 flex-1"><h2 className="text-sm font-medium">当前研究</h2><p className="truncate text-xs text-ink-faint">{taskId} {isRunning ? ` · ${elapsedText || '正在执行'}` : ''}</p></div>
+      {isRunning && <button onClick={stopTask} disabled={stopping || demoMode} className="rounded-lg border border-red-200 px-3 py-2 text-xs text-state-failure">{stopping ? '正在请求停止…' : '停止研究'}</button>}
+      <button onClick={() => setComposerOpen(true)} className="rounded-lg border border-line-strong px-3 py-2 text-xs text-brand">展开研究工具</button>
+      <button onClick={onNewConversation} className="button-primary rounded-lg px-3 py-2 text-xs">新建研究</button>
+      {stopMsg && <p role="status" className="basis-full text-xs text-state-issue">{stopMsg}</p>}
+    </section>
   )
 
+  return (
+    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_280px]">
+      <section id="research-entry" className="min-w-0 rounded-xl border border-line bg-surface">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-4 md:px-6">
+          <div><p className="eyebrow text-brand">RESEARCH DESK</p><h2 className="mt-1 text-lg font-medium">{taskId ? '当前研究与新任务' : '开启一份研究'}</h2></div>
+          <button onClick={onNewConversation} title="开始新对话" className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-xs text-ink-muted hover:bg-surface-raised">
+            <Plus className="h-3.5 w-3.5" />新研究
+          </button>
+        </div>
+        <div className="p-5 md:p-6">
+          <div role="tablist" aria-label="研究输入方式" className="mb-5 inline-flex max-w-full gap-1 rounded-lg bg-surface-raised p-1">
+            <button type="button" role="tab" id="company-tab" aria-selected={inputMode === 'company'} aria-controls="company-panel"
+              onClick={() => setInputMode('company')} className={`rounded-md px-3 py-2 text-sm ${inputMode === 'company' ? 'bg-surface text-brand-strong shadow-sm' : 'text-ink-muted'}`}>
+              研究一家公司
+            </button>
+            <button type="button" role="tab" id="custom-tab" aria-selected={inputMode === 'custom'} aria-controls="custom-panel"
+              onClick={() => setInputMode('custom')} className={`rounded-md px-3 py-2 text-sm ${inputMode === 'custom' ? 'bg-surface text-brand-strong shadow-sm' : 'text-ink-muted'}`}>
+              自定义研究
+            </button>
+          </div>
+          <div id="company-panel" role="tabpanel" aria-labelledby="company-tab" hidden={inputMode !== 'company'}>
+            <ResearchQuickForm disabled={isRunning || demoMode} defaultOpen={!formCollapsedByDefault}
+              onReady={(goalText, fields) => { setGoal(goalText); setResearchFields(fields); setInputMode('custom') }}
+              onStart={(goalText, fields) => onSubmit(goalText, fields)} />
+          </div>
+          <div id="custom-panel" role="tabpanel" aria-labelledby="custom-tab" hidden={inputMode !== 'custom'} className="space-y-4">
+            <label className="research-field">研究问题与要求
+              <textarea value={goal} rows={5}
+                onChange={event => { setGoal(event.target.value); if (researchFields) setResearchFields(null) }}
+                onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); onSubmit(undefined, researchFields) } }}
+                placeholder={demoMode ? '演示模式：不可提交真实任务' : '例如：对比一家公司的两个年度，解释收入、利润与经营现金流的变化，并列出来源与待核查事项。'}
+                disabled={isRunning || demoMode} />
+            </label>
+            {researchFields && <p className="text-xs text-brand">已附公司、年度与口径契约；手改目标将清除契约，可返回表单重新生成。</p>}
+            <button onClick={() => onSubmit(undefined, researchFields)} disabled={isRunning || demoMode || !goal.trim()}
+              className="button-primary inline-flex items-center gap-2 rounded-lg px-5 py-3 text-sm font-medium">
+              {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUpRight className="h-4 w-4" />}
+              {isRunning ? '研究进行中' : '开始研究'}
+            </button>
+            <span className="ml-3 text-xs text-ink-faint">Ctrl / ⌘ + Enter 提交</span>
+          </div>
+          <details className="mt-5 border-t border-line pt-4">
+            <summary className="text-xs text-ink-muted">更多研究选项 · 项目 / 模板 / 计划确认</summary>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="research-field">所属项目
+                <input value={project} onChange={event => setProject(event.target.value)} placeholder="default" disabled={isRunning || demoMode} />
+              </label>
+              <label className="research-field">任务模板
+                <select value={templateName} disabled={isRunning || demoMode} onChange={event => {
+                  const name = event.target.value
+                  setTemplateName(name)
+                  const template = templates.find(item => item.name === name)
+                  if (template?.goal && !goal.trim()) { setGoal(template.goal); setInputMode('custom') }
+                }}>
+                  <option value="">不使用模板</option>{templates.map(template => <option key={template.name} value={template.name}>{template.name}</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-ink-muted sm:col-span-2">
+                <input type="checkbox" checked={confirmMode} disabled={isRunning || demoMode} onChange={event => setConfirmMode(event.target.checked)} />
+                开始执行前，由我确认研究计划
+              </label>
+            </div>
+          </details>
+          <div className="mt-4 border-t border-line pt-4">
+            <button type="button" onClick={() => setShowContext(!showContext)} aria-expanded={showContext}
+              className="flex w-full items-center gap-2 text-left text-xs text-ink-muted">
+              <FileText className="h-4 w-4 text-brand" />补充参考资料与背景（可选）
+              <ChevronDown className={`ml-auto h-4 w-4 ${showContext ? 'rotate-180' : ''}`} />
+            </button>
+            {showContext && <div className="mt-4 space-y-3">
+              <label className="research-field">背景、参考链接与约束条件
+                <textarea value={userContext} onChange={event => setUserContext(event.target.value)} rows={4} disabled={isRunning || demoMode}
+                  placeholder="粘贴参考资料或要求，将随本次研究一起提交。" />
+              </label>
+              <input id="ctx-file-input" type="file" multiple accept=".txt,.md,.csv,.json,.log,.py,.yaml,.yml,.pdf,.docx,.xlsx,.xls"
+                className="hidden" disabled={isRunning || demoMode} onChange={event => { importFiles(event.target.files); event.target.value = '' }} />
+              <label htmlFor="ctx-file-input" className={`inline-flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-xs text-ink-muted ${isRunning || demoMode ? 'opacity-50' : 'cursor-pointer hover:bg-surface-raised'}`}>
+                <Upload className="h-4 w-4" />导入文件 · PDF / Word / Excel 等
+              </label>
+              {importMsg.length > 0 && <ul className="space-y-1" aria-live="polite">{importMsg.map((message, index) => <li key={index} className="flex min-w-0 gap-2 text-xs">
+                <span className="max-w-[50%] truncate text-ink-muted">{message.name}</span><span className={message.note.startsWith('成功') ? 'text-state-success' : 'text-state-issue'}>{message.note}</span>
+              </li>)}</ul>}
+            </div>}
+          </div>
+          {(isRunning || activeConversationId || demoMode || elapsedText || etaText) && <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-line pt-4 text-xs text-ink-faint">
+            {activeConversationId && <span className="inline-flex items-center gap-1"><MessagesSquare className="h-3.5 w-3.5" />当前会话</span>}
+            <span>{isRunning ? [elapsedText, etaText].filter(Boolean).join(' · ') : etaText}</span>
+            {demoMode && <span className="text-state-issue">演示模式下提交与快答已停用</span>}
+            {isRunning && taskId && <button onClick={stopTask} disabled={stopping || demoMode} className="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-2 text-state-failure">
+              <Square className="h-3 w-3" />{stopping ? '正在请求停止…' : '停止研究'}
+            </button>}
+            {status === 'completed' && reportSummary === 'FAILED' && lastGoal && <button disabled={demoMode} onClick={() => onSubmit(lastGoal)} className="inline-flex items-center gap-1 text-state-failure"><RefreshCw className="h-3.5 w-3.5" />重试研究</button>}
+            {stopMsg && <span role="status" className="text-state-issue">{stopMsg}</span>}
+          </div>}
+        </div>
+      </section>
+      <aside aria-label="研究辅助" className="space-y-5">
+        <section className="rounded-xl border border-line bg-surface p-5">
+          <div className="flex items-center gap-2 text-sm font-medium"><Search className="h-4 w-4 text-brand" />资料快查</div>
+          <p className="mb-4 mt-2 text-xs leading-relaxed text-ink-muted">一个具体问题，先检索再作答。来源随答案展示，不替代完整研究。</p>
+          <label className="research-field"><span className="sr-only">快查问题</span>
+            <textarea value={qaGoal} rows={3} onChange={event => setQaGoal(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); askQuick() } }}
+              placeholder={demoMode ? '演示模式：快答已停用' : '例如：某公司最新财报披露了哪些经营变化？'} disabled={qaLoading || demoMode} />
+          </label>
+          <button onClick={askQuick} disabled={qaLoading || demoMode || !qaGoal.trim()}
+            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-line-strong px-3 py-2.5 text-xs text-ink disabled:opacity-40">
+            {qaLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} {qaLoading ? '正在检索…' : '检索并快答'}
+          </button>
+          {qa && <div className="mt-4"><QuickAnswerCard qa={qa} onClose={() => setQa(null)} /></div>}
+        </section>
+        <section className="rounded-xl border border-line bg-surface p-5">
+          <p className="eyebrow text-brand">YOUR RESEARCH FILE</p>
+          <h3 className="mt-2 text-sm font-medium">不只是一份答案</h3>
+          <ul className="mt-4 space-y-4">
+            {[
+              { icon: FileText, title: '研究正文', note: '分清数据观察、判断与缺口' },
+              { icon: Table2, title: '可复算底稿', note: '计算口径与数字有据可查' },
+              { icon: Archive, title: '来源与证据包', note: '定位公开披露，按版本交付' },
+            ].map(({ icon: Icon, title, note }) => <li key={title} className="flex items-start gap-3">
+              <Icon className="mt-0.5 h-4 w-4 shrink-0 text-brand" strokeWidth={1.5} /><div><p className="text-xs font-medium">{title}</p><p className="mt-1 text-xs text-ink-faint">{note}</p></div>
+            </li>)}
+          </ul>
+        </section>
+      </aside>
+    </div>
+  )
 })
 
-/**
- * S2 首发入口：研究一家公司（公司与两个年度 + 口径 + 数据截至日）。
- *
- * 只做一件事——把表单拼成**符合契约的目标**写进输入框（用户仍可继续手改），
- * 缺字段就把缺口显示出来，**不拼一个含糊的目标**提交（身份/期间不靠猜）。
- */
-function ResearchQuickForm({ disabled, onReady, defaultOpen = true }: {
+function ResearchQuickForm({ disabled, onReady, onStart, defaultOpen = true }: {
   disabled: boolean
   onReady: (goal: string, fields: ResearchFields | null) => void
-  /** P2-4：已打开任务时默认收起（保留展开入口）；无任务时保持现状=展开 */
+  onStart: (goal: string, fields: ResearchFields | null) => void
   defaultOpen?: boolean
 }) {
   const [form, setForm] = useState<ResearchForm>({
@@ -339,89 +328,74 @@ function ResearchQuickForm({ disabled, onReady, defaultOpen = true }: {
   const [gaps, setGaps] = useState<string[]>([])
   const [open, setOpen] = useState(defaultOpen)
   const preview = buildResearchGoal(form)
-
-  const fill = () => {
-    if (preview.gaps.length) {
-      setGaps(preview.gaps)
-      return
-    }
+  const fill = (start: boolean) => {
+    if (preview.gaps.length) { setGaps(preview.gaps); return }
     setGaps([])
-    onReady(preview.goal, preview.fields)
+    if (start) onStart(preview.goal, preview.fields)
+    else onReady(preview.goal, preview.fields)
   }
 
-  const field = 'bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500'
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-      <button type="button" onClick={() => setOpen(o => !o)}
-        className="flex items-center gap-2 text-xs text-slate-300 hover:text-cyan-400">
-        <Building2 className="w-3.5 h-3.5 text-cyan-400" />
-        研究一家公司（上市公司研究工作台）
-        <span className="text-slate-500">{open ? '收起' : '展开'}</span>
+    <div>
+      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open}
+        className="mb-4 flex w-full items-center gap-2 text-left text-xs text-ink-muted">
+        <Building2 className="h-4 w-4 text-brand" />两期经营研究
+        <span className="ml-auto text-brand">{open ? '收起' : '展开新研究表单'}</span>
+        <ChevronDown className={`h-3.5 w-3.5 ${open ? 'rotate-180' : ''}`} />
       </button>
-      {open && (
-        <div className="mt-3 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <input value={form.company ?? ''} placeholder="公司名或代码，如 贵州茅台 / 600519.SH"
-              disabled={disabled}
-              onChange={e => setForm({ ...form, company: e.target.value })}
-              className={`${field} flex-1 min-w-[12rem]`} />
-            <input value={form.companyId ?? ''} placeholder="稳定标识（可选）600519.SH"
-              disabled={disabled}
-              onChange={e => setForm({ ...form, companyId: e.target.value })}
-              className={`${field} w-48`} />
-            <select value={form.market ?? ''} disabled={disabled}
-              title="市场决定数据源与口径；不选则记为缺口，不替你猜"
-              onChange={e => setForm({ ...form, market: e.target.value })}
-              className={field}>
-              <option value="">市场：未指定（留缺口）</option>
-              <option value="cn">A股</option>
-              <option value="hk">港股</option>
-              <option value="us">美股</option>
+      {open && <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <label className="research-field col-span-2 lg:col-span-4">研究哪家公司
+            <input value={form.company ?? ''} placeholder="输入公司名称或股票代码，如 贵州茅台 / 600519.SH" disabled={disabled}
+              onChange={event => setForm({ ...form, company: event.target.value })} />
+          </label>
+          <label className="research-field">起始年度
+            <input value={String(form.yearFrom ?? '')} inputMode="numeric" maxLength={4} placeholder="如 2023" disabled={disabled}
+              onChange={event => setForm({ ...form, yearFrom: event.target.value })} />
+          </label>
+          <label className="research-field">对比年度
+            <input value={String(form.yearTo ?? '')} inputMode="numeric" maxLength={4} placeholder="如 2024" disabled={disabled}
+              onChange={event => setForm({ ...form, yearTo: event.target.value })} />
+          </label>
+          <label className="research-field">报表口径
+            <select value={form.caliber ?? '合并'} disabled={disabled} onChange={event => setForm({ ...form, caliber: event.target.value })}>
+              <option value="合并">合并报表</option><option value="母公司">母公司报表</option>
             </select>
-            <input value={String(form.yearFrom ?? '')} placeholder="起始年 2023"
-              disabled={disabled} onChange={e => setForm({ ...form, yearFrom: e.target.value })}
-              className={`${field} w-28`} />
-            <input value={String(form.yearTo ?? '')} placeholder="结束年 2024"
-              disabled={disabled} onChange={e => setForm({ ...form, yearTo: e.target.value })}
-              className={`${field} w-28`} />
-            <select value={form.caliber ?? '合并'} disabled={disabled}
-              onChange={e => setForm({ ...form, caliber: e.target.value })}
-              className={field}>
-              <option value="合并">合并报表</option>
-              <option value="母公司">母公司报表</option>
-            </select>
-            <select value={form.perspective ?? 'equity'} disabled={disabled}
-              title="阅读重点：两种视角复用同一底稿；视角由你选，不按公司名推断"
-              onChange={e => setForm({ ...form, perspective: e.target.value })}
-              className={field}>
-              <option value="equity">投研视角</option>
-              <option value="bank_corporate">银行对公视角</option>
-            </select>
-            <input value={form.asOf ?? ''} placeholder="资料截至日 2025-04-30"
-              disabled={disabled} onChange={e => setForm({ ...form, asOf: e.target.value })}
-              className={`${field} w-40`} />
-          </div>
-          <textarea value={form.materials ?? ''} rows={2} disabled={disabled}
-            placeholder="可选：参考资料（年报链接 / 用户提供的材料；会在目标里注明）"
-            onChange={e => setForm({ ...form, materials: e.target.value })}
-            className={`${field} w-full resize-none`} />
-          {gaps.length > 0 && (
-            <ul className="text-xs text-amber-400 space-y-0.5">
-              {gaps.map(g => <li key={g}>· {g}</li>)}
-            </ul>
-          )}
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={fill} disabled={disabled}
-              className="px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs disabled:opacity-40">
-              生成研究目标（写入输入框）
-            </button>
-            <span className="text-xs text-slate-500">
-              只拼目标，不自动提交；表格与年度/口径会作为<span className="text-slate-400">结构化契约</span>随任务提交；
-              三个核心指标：营业收入 / 归母净利润 / 经营活动现金流净额
-            </span>
-          </div>
+          </label>
+          <label className="research-field">资料截至日
+            <input type="date" value={form.asOf ?? ''} disabled={disabled} onChange={event => setForm({ ...form, asOf: event.target.value })} />
+          </label>
         </div>
-      )}
+        <details className="rounded-lg border border-line bg-surface-sunken px-3 py-2.5">
+          <summary className="text-xs text-ink-muted">市场、阅读重点与参考链接（选填）</summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="research-field">证券市场
+              <select value={form.market ?? ''} disabled={disabled} onChange={event => setForm({ ...form, market: event.target.value })}>
+                <option value="">未指定（保留市场缺口）</option><option value="cn">A 股 · 首期研究范围</option><option value="hk">港股 · 非首期重点</option><option value="us">美股 · 非首期重点</option>
+              </select>
+            </label>
+            <label className="research-field">阅读重点
+              <select value={form.perspective ?? 'equity'} disabled={disabled} onChange={event => setForm({ ...form, perspective: event.target.value })}>
+                <option value="equity">个人 / 小团队投研</option><option value="bank_corporate">银行对公研究</option>
+              </select>
+            </label>
+            <label className="research-field sm:col-span-2">公司稳定标识（可选）
+              <input value={form.companyId ?? ''} placeholder="如 600519.SH，用于明确研究主体" disabled={disabled} onChange={event => setForm({ ...form, companyId: event.target.value })} />
+            </label>
+            <label className="research-field sm:col-span-2">参考资料（可选）
+              <textarea value={form.materials ?? ''} rows={2} placeholder="年报链接或需要参考的材料" disabled={disabled} onChange={event => setForm({ ...form, materials: event.target.value })} />
+            </label>
+          </div>
+        </details>
+        {gaps.length > 0 && <ul role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{gaps.map(gap => <li key={gap}>· {gap}</li>)}</ul>}
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <button type="button" onClick={() => fill(true)} disabled={disabled} className="button-primary inline-flex items-center gap-2 rounded-lg px-5 py-3 text-sm font-medium">
+            <ArrowUpRight className="h-4 w-4" />开始研究
+          </button>
+          <button type="button" onClick={() => fill(false)} disabled={disabled} className="rounded-lg border border-line px-3 py-3 text-xs text-ink-muted disabled:opacity-40">预览并编辑研究目标</button>
+        </div>
+        <p className="text-xs leading-relaxed text-ink-faint">聚焦收入、归母净利润与经营现金流。首期适用于 A 股非金融公司；缺失证据会保留缺口，不生成买卖建议。</p>
+      </div>}
     </div>
   )
 }

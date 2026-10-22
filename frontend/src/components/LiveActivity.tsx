@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { LogEntry } from '../stores/types'
 import { formatLocalClock } from '../lib/format'
+import { agentDisplayName } from '../lib/agentLabel'
 import { Pause, Play, Search, FileText, Code2, PackageCheck, Brain, Eye } from 'lucide-react'
 
 
@@ -15,10 +16,10 @@ const agentIcons: Record<string, typeof Brain> = {
 const typeCfg: Partial<Record<LogEntry['type'], { icon: string; border: string; bg: string }>> = {
   plan:     { icon: '🧠', border: 'border-l-blue-400',   bg: 'bg-blue-500/5' },
   review:   { icon: '👁',  border: 'border-l-purple-400', bg: 'bg-purple-500/5' },
-  dispatch: { icon: '📤', border: 'border-l-cyan-400',   bg: 'bg-cyan-500/5' },
+  dispatch: { icon: '📤', border: 'border-l-cyan-400',   bg: 'bg-brand/5' },
   memory:   { icon: '💾', border: 'border-l-amber-400',  bg: 'bg-amber-500/5' },
   error:    { icon: '❌', border: 'border-l-red-400',    bg: 'bg-red-500/10' },
-  info:     { icon: 'ℹ',  border: 'border-l-slate-400',  bg: 'bg-slate-500/5' },
+  info:     { icon: 'ℹ',  border: 'border-l-slate-400',  bg: 'bg-line-strong/5' },
 }
 
 
@@ -30,18 +31,18 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
   return (
     <div className={`flex items-start gap-2 px-3 h-full border-l-2 ${cfg.border} ${cfg.bg}`}>
         <span
-          className="text-xs text-slate-600 font-mono shrink-0 w-24 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden"
+          className="text-xs text-ink-faint font-mono shrink-0 w-24 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden"
           title={entry.timestamp ? String(entry.timestamp) : undefined}
         >
           {formatLocalClock(entry.timestamp)}
         </span>
         {IconComp ? (
-          <IconComp className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+          <IconComp className="w-3.5 h-3.5 text-ink-muted shrink-0 mt-0.5" />
         ) : (
           <span className="shrink-0 text-xs mt-0.5">{cfg.icon}</span>
         )}
-        <span className="text-xs text-slate-400 truncate mt-0.5">
-          {entry.agent && <span className="text-xs font-semibold text-slate-500">{entry.agent}: </span>}
+        <span className="text-xs text-ink-muted truncate mt-0.5">
+          {entry.agent && <span className="text-xs font-semibold text-ink-faint">{entry.agent}: </span>}
           {entry.message}
         </span>
     </div>
@@ -71,15 +72,15 @@ export default memo(function LiveActivity() {
       {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3 text-xs">
-          <span className="text-slate-500"><span className="text-emerald-400 font-semibold">{online}</span> online</span>
-          <span className="text-slate-600">·</span>
-          <span className="text-slate-500"><span className="text-amber-400 font-semibold">{busy}</span> busy</span>
+          <span className="text-ink-faint"><span className="text-emerald-700 font-semibold">{online}</span> 个在线</span>
+          <span className="text-ink-faint">·</span>
+          <span className="text-ink-faint"><span className="text-amber-700 font-semibold">{busy}</span> 个执行中</span>
         </div>
         <button onClick={() => setPaused(!paused)}
           className={`p-1.5 rounded-lg transition-transform duration-200 active:scale-95 ${
-            paused ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-500 hover:text-slate-300'
+            paused ? 'bg-brand/20 text-brand' : 'bg-surface-raised text-ink-faint hover:text-ink'
           }`}
-          title={paused ? 'Resume' : 'Pause'}>
+          title={paused ? '继续滚动' : '暂停滚动'}>
           {paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
         </button>
       </div>
@@ -91,21 +92,21 @@ export default memo(function LiveActivity() {
           return (
             <div key={a.agent_id}
               className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${
-                a.status?.startsWith('offline') ? 'border-red-500/20 bg-red-500/5 text-red-400' :
-                a.status?.includes('active') ? 'border-amber-500/20 bg-amber-500/5 text-amber-400' :
-                'border-emerald-500/20 bg-emerald-500/5 text-emerald-400'
+                a.status?.startsWith('offline') ? 'border-red-500/20 bg-red-500/5 text-red-700' :
+                a.status?.includes('active') ? 'border-amber-500/20 bg-amber-500/5 text-amber-700' :
+                'border-emerald-500/20 bg-emerald-500/5 text-emerald-700'
               }`}>
               <Icon className="w-3 h-3" />
-              <span className="truncate max-w-[72px]">{a.agent_id.replace(/_/g, ' ')}</span>
+              <span className="truncate max-w-[96px]" title={a.agent_id}>{agentDisplayName(a)}</span>
             </div>
           )
         })}
       </div>
 
       {/* 日志列表（可滚动，自动滚底） */}
-      <div ref={outerRef} className="flex-1 min-h-0 bg-slate-800/30 rounded-lg border border-slate-800 overflow-y-auto">
+      <div ref={outerRef} className="flex-1 min-h-0 bg-surface-raised/30 rounded-lg border border-line overflow-y-auto">
         {logs.length === 0 ? (
-          <div className="flex items-center justify-center h-64 text-slate-600 text-xs">等待事件中...</div>
+          <div className="flex items-center justify-center h-64 text-ink-faint text-xs">等待事件中...</div>
         ) : (
           <div className="space-y-px">
             {logs.map((entry, i) => (
@@ -116,8 +117,8 @@ export default memo(function LiveActivity() {
       </div>
 
       {paused && (
-        <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 rounded-lg px-3 py-1.5">
-          <Pause className="w-3 h-3" /> Paused
+        <div className="shrink-0 flex items-center gap-2 text-xs text-amber-700 bg-amber-500/10 rounded-lg px-3 py-1.5">
+          <Pause className="w-3 h-3" /> 已暂停自动滚动
         </div>
       )}
     </div>

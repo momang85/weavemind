@@ -33,15 +33,17 @@ const SAMPLE_GOAL =
   '3. 经营现金流变化还需要哪些附注才能解释？\n' +
   '将数据观察、发行人说法、计算结果与待核查判断分开；缺证据时明确保留缺口。'
 
-const box = 'bg-slate-900 border border-slate-800 rounded-xl p-4'
-const li = 'text-xs text-slate-400 leading-relaxed'
+const box = 'bg-surface border border-line rounded-xl px-4 py-3'
+const li = 'text-xs text-ink-muted leading-relaxed'
 
 export default function FirstRunGuide({ configComplete, demoAvailable, codeExecution, onPrefillGoal, onGoSettings }: Props) {
   const [open, setOpen] = useState<string | null>(configComplete ? null : 'start')
   const [demo, setDemo] = useState<{ markdown: string; note: string } | null>(null)
   const [demoError, setDemoError] = useState('')
+  const [guideOpen, setGuideOpen] = useState(!configComplete)
   useEffect(() => {
     setOpen(configComplete ? null : 'start')
+    setGuideOpen(!configComplete)
   }, [configComplete])
 
   const loadDemo = async () => {
@@ -59,13 +61,13 @@ export default function FirstRunGuide({ configComplete, demoAvailable, codeExecu
   const Step = ({ id, icon: Icon, title, children }: {
     id: string; icon: typeof Compass; title: string; children: React.ReactNode
   }) => (
-    <div className="border-t border-slate-800 first:border-t-0 pt-3 first:pt-0">
+    <div className="border-t border-line first:border-t-0 pt-3 first:pt-0">
       <button type="button" onClick={() => setOpen(open === id ? null : id)}
         className="flex w-full items-center gap-2 text-left">
-        {open === id ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
-          : <ChevronRight className="h-3.5 w-3.5 text-slate-500" />}
-        <Icon className="h-3.5 w-3.5 text-cyan-400" />
-        <span className="text-xs font-medium text-slate-300">{title}</span>
+        {open === id ? <ChevronDown className="h-3.5 w-3.5 text-ink-faint" />
+          : <ChevronRight className="h-3.5 w-3.5 text-ink-faint" />}
+        <Icon className="h-3.5 w-3.5 text-brand" />
+        <span className="text-xs font-medium text-ink">{title}</span>
       </button>
       {open === id && <div className="mt-2 space-y-2 pl-6">{children}</div>}
     </div>
@@ -73,27 +75,28 @@ export default function FirstRunGuide({ configComplete, demoAvailable, codeExecu
 
   return (
     <div className={`${box} space-y-3`}>
-      <div className="flex items-center gap-2">
-        <Compass className="h-4 w-4 text-cyan-400" />
-        <span className="text-sm text-slate-200">首次使用引导</span>
-        <span className="text-xs text-slate-500">
+      <button type="button" onClick={() => setGuideOpen(!guideOpen)} aria-expanded={guideOpen} className="flex w-full flex-wrap items-center gap-2 text-left">
+        <Compass className="h-4 w-4 text-brand" />
+        <span className="text-sm text-ink">使用指南</span>
+        <span className="hidden text-xs text-ink-faint sm:inline">
           {configComplete ? '模型已配置，可直接提交研究任务' : '先把模型配好，或用内置演示先看交付形态'}
         </span>
-      </div>
+        <ChevronDown className={`ml-auto h-4 w-4 text-ink-faint ${guideOpen ? 'rotate-180' : ''}`} />
+      </button>
 
       {/* N4 场景 8：代码执行能力在**提交任务之前**说明白——否则用户要等任务跑完，
           才从失败步骤里发现含代码的步骤根本执行不了。不提供"关闭隔离"这条出路。 */}
       {codeExecution && codeExecution.isolation_required && !codeExecution.isolation_ready && (
         <div data-code-execution-notice
-          className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
-          <span className="text-slate-300">代码执行：本机没有可用的容器隔离</span>
-          {codeExecution.note ? `（${codeExecution.note}）` : ''}——
-          含"生成并运行代码"的步骤会被拒绝执行，也不会退到本机运行；公司研究、图表、报告与交付下载
-          <span className="text-slate-300">不受影响</span>。请不要用"关闭隔离"来解决。
+          className="rounded-lg border border-line-strong bg-surface-sunken/60 px-3 py-2 text-xs text-ink-muted">
+          <span>高级代码执行暂不可用；公司研究、图表、报告与下载<span className="text-ink">不受影响</span>。</span>
+          <details className="mt-1"><summary>查看原因与安全说明</summary>
+            <p className="mt-1 break-words">本机没有可用的容器隔离，代码步骤将被拒绝，不会退到本机运行。请不要用"关闭隔离"来解决。{codeExecution.note}</p>
+          </details>
         </div>
       )}
 
-      <Step id="start" icon={PlayCircle} title="① 先体验，或先配置">
+      {guideOpen && <div className="space-y-3 border-t border-line pt-3"><Step id="start" icon={PlayCircle} title="① 先体验，或先配置">
         <p className={li}>
           没有密钥也能先看一份**内置演示**（合成数据），或者直接配置你自己的模型服务。
           真实研究必须完成自己的模型配置——演示不会代替它。
@@ -101,23 +104,23 @@ export default function FirstRunGuide({ configComplete, demoAvailable, codeExecu
         <div className="flex flex-wrap gap-2">
           {demoAvailable && (
             <button type="button" onClick={loadDemo}
-              className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700">
+              className="rounded-lg bg-surface-raised px-3 py-1.5 text-xs text-ink hover:bg-line">
               查看内置演示（非实时生成）
             </button>
           )}
           <button type="button" onClick={() => { setOpen('config'); onGoSettings?.() }}
-            className="rounded-lg bg-cyan-500/10 px-3 py-1.5 text-xs text-cyan-400 hover:bg-cyan-500/20">
+            className="rounded-lg bg-brand/10 px-3 py-1.5 text-xs text-brand hover:bg-brand/20">
             去配置模型服务
           </button>
         </div>
-        {demoError && <p className="text-xs text-amber-400">{demoError}</p>}
+        {demoError && <p className="text-xs text-amber-700">{demoError}</p>}
         {demo && (
           <div className="space-y-2">
             <div data-demo-banner
-              className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+              className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
               {demo.note || '内置演示：非本次实时生成，不代表真实研究结果；不写入任何研究统计'}
             </div>
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/60 p-3 text-xs text-slate-300">
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-sunken/60 p-3 text-xs text-ink">
               {demo.markdown}
             </pre>
           </div>
@@ -147,7 +150,7 @@ export default function FirstRunGuide({ configComplete, demoAvailable, codeExecu
         </p>
         <button type="button"
           onClick={() => onPrefillGoal?.(SAMPLE_GOAL)}
-          className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700">
+          className="rounded-lg bg-surface-raised px-3 py-1.5 text-xs text-ink hover:bg-line">
           把示例目标填进提交框（不自动提交）
         </button>
       </Step>
@@ -164,6 +167,7 @@ export default function FirstRunGuide({ configComplete, demoAvailable, codeExecu
           资料不足时按缺口清单补材料，而不是反复重跑。
         </p>
       </Step>
+      </div>}
     </div>
   )
 }

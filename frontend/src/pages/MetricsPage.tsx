@@ -82,10 +82,10 @@ export default function MetricsPage() {
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center gap-2">
-        <BarChart3 className="w-5 h-5 text-cyan-400" />
-        <h1 className="text-lg font-semibold text-slate-200">指标看板</h1>
-        {m?.timestamp && <span className="text-xs text-slate-500">更新于 {formatLocalTime(m.timestamp)}（本地时间）</span>}
-        <button onClick={load} aria-label="刷新指标" className="ml-auto p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors">
+        <BarChart3 className="w-5 h-5 text-brand" />
+        <h1 className="text-lg font-semibold text-ink">指标看板</h1>
+        {m?.timestamp && <span className="text-xs text-ink-faint">更新于 {formatLocalTime(m.timestamp)}（本地时间）</span>}
+        <button onClick={load} aria-label="刷新指标" className="ml-auto p-1.5 rounded-lg bg-surface-raised text-ink-muted hover:text-ink transition-colors">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -140,7 +140,7 @@ export default function MetricsPage() {
             <SectionTitle title="各能力成功率"
               extra={t?.scope ? `统计范围：${t.scope}` : undefined} />
             {Object.keys(m.by_capability || {}).length === 0 && (
-              <div className="text-xs text-slate-500 leading-relaxed">
+              <div className="text-xs text-ink-faint leading-relaxed">
                 暂无数据：需要至少一次任务结束才会按能力类型统计。当前
                 {terminal > 0 ? `已有 ${terminal} 个终态任务，统计将随下次汇总刷新` : `没有终态任务（进行中 ${t?.running ?? 0}）`}。
               </div>

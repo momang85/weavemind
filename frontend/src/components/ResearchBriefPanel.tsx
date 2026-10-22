@@ -23,9 +23,9 @@ interface Props {
   onRevised?: () => void
 }
 
-const box = 'bg-slate-900 border border-slate-800 rounded-xl p-3'
-const h = 'text-xs font-medium text-slate-300 mb-1.5'
-const li = 'text-xs text-slate-400 leading-relaxed'
+const box = 'bg-surface border border-line rounded-xl p-3'
+const h = 'text-xs font-medium text-ink mb-1.5'
+const li = 'text-xs text-ink-muted leading-relaxed'
 
 export default function ResearchBriefPanel({
   taskId, research, exportState, packageRes, onRevised,
@@ -92,7 +92,7 @@ export default function ResearchBriefPanel({
     <div className="space-y-3">
       {/* D2：投影状态——按当前版本重建（说明来源），或重建失败（隐藏版本相关块） */}
       {projectionNote && (
-        <div className="text-xs text-slate-500">{projectionNote}</div>
+        <div className="text-xs text-ink-faint">{projectionNote}</div>
       )}
       {/* 批次3b：研究状态——**与数字机器验收分开**：verified 只说数字与格式通过 */}
       {research.research_state?.state
@@ -100,7 +100,7 @@ export default function ResearchBriefPanel({
         <div className={`${box} ${research.research_state.state === 'research_draft'
           ? 'border border-amber-500/30' : ''}`}>
           <div className={`${h} ${research.research_state.state === 'research_draft'
-            ? 'text-amber-400' : 'text-emerald-400'}`}>
+            ? 'text-amber-700' : 'text-emerald-700'}`}>
             研究状态：{research.research_state.label || research.research_state.state}
           </div>
           <ul className={li}>
@@ -109,15 +109,15 @@ export default function ResearchBriefPanel({
               关键问题缺依据 {research.research_state.questions_without_support ?? 0} 个；
               未支持主张 {research.research_state.unsupported_claims ?? 0} 条</li>
             {research.research_state.state === 'research_draft' && (
-              <li className="text-amber-300">· 本条说的是<span className="text-amber-200">研究</span>是否就绪，不改变数字与格式的机器验收结论</li>
+              <li className="text-amber-700">· 本条说的是<span className="text-amber-700">研究</span>是否就绪，不改变数字与格式的机器验收结论</li>
             )}
           </ul>
         </div>
       )}
       {projectionMissing && (
         <div className={`${box} border border-amber-500/30`}>
-          <div className={`${h} text-amber-400`}>面板未展示：当前版本的结构未能重建</div>
-          <div className="text-xs text-amber-300">
+          <div className={`${h} text-amber-700`}>面板未展示：当前版本的结构未能重建</div>
+          <div className="text-xs text-amber-700">
             {proj?.reason || '重建失败'}；为避免把另一版的发现当成当前稿结论，本页隐藏
             发现/缺口/证据三块。可点下方"修改正文并重验"触发重装配。
           </div>
@@ -139,7 +139,7 @@ export default function ResearchBriefPanel({
           <div className={h}>缺口（分开列：必需数据 / 证据 / 引用）</div>
           {requiredGaps.length > 0 && (
             <div className="mb-1.5">
-              <div className="text-xs text-amber-400">必需数据</div>
+              <div className="text-xs text-amber-700">必需数据</div>
               <ul>{requiredGaps.map((g, i) => (
                 <li key={i} className={li}>· {g.text}{g.materials?.length ? `（需补：${g.materials.join('、')}）` : ''}</li>
               ))}</ul>
@@ -147,25 +147,25 @@ export default function ResearchBriefPanel({
           )}
           {evidenceGaps.length > 0 && (
             <div className="mb-1.5">
-              <div className="text-xs text-amber-400">证据（未取得正文定位）</div>
+              <div className="text-xs text-amber-700">证据（未取得正文定位）</div>
               <ul><li className={li}>· {evidenceGaps.join('、')}</li></ul>
             </div>
           )}
           {citationGaps.length > 0 && (
             <div className="mb-1.5">
-              <div className="text-xs text-amber-400">引用（未能在采用来源中唯一对应）</div>
+              <div className="text-xs text-amber-700">引用（未能在采用来源中唯一对应）</div>
               <ul><li className={li}>· 正文引用 {citationGaps.map(n => `[${n}]`).join('、')} 已去编号</li></ul>
             </div>
           )}
           {unproven.length > 0 && (
             <div>
-              <div className="text-xs text-amber-400">还不能证明什么</div>
+              <div className="text-xs text-amber-700">还不能证明什么</div>
               <ul>{unproven.map((u, i) => (
                 <li key={i} className={li}>· {u.label}：需先取得{u.materials?.join('、') || '补充材料'}</li>
               ))}</ul>
             </div>
           )}
-          {gaps.as_of && <div className="text-xs text-slate-500 mt-1">资料截至 {gaps.as_of}</div>}
+          {gaps.as_of && <div className="text-xs text-ink-faint mt-1">资料截至 {gaps.as_of}</div>}
         </div>
       )}
 
@@ -178,7 +178,7 @@ export default function ResearchBriefPanel({
         </div>
         {(ev.excluded || []).length > 0 && (
           <div className="mb-1.5">
-            <div className="text-xs text-slate-500">未采用的材料</div>
+            <div className="text-xs text-ink-faint">未采用的材料</div>
             <ul>{(ev.excluded || []).slice(0, 6).map((e, i) => (
               <li key={i} className={li}>· {e.title || e.url}（{e.validation_status}
                 {e.published_at ? `；发布 ${e.published_at}` : ''}）</li>
@@ -187,7 +187,7 @@ export default function ResearchBriefPanel({
         )}
         {(ev.rejected_citations || []).length > 0 && (
           <div className="mb-1.5">
-            <div className="text-xs text-slate-500">正文引用但未准入</div>
+            <div className="text-xs text-ink-faint">正文引用但未准入</div>
             <ul>{(ev.rejected_citations || []).slice(0, 6).map((r, i) => (
               <li key={i} className={li}>· {r.title || r.url}（{r.reason}）</li>
             ))}</ul>
@@ -195,7 +195,7 @@ export default function ResearchBriefPanel({
         )}
         {(research.evidence_locations || []).length > 0 && (
           <div className="mb-1.5">
-            <div className="text-xs text-slate-500">解释的出处（小节/页码）</div>
+            <div className="text-xs text-ink-faint">解释的出处（小节/页码）</div>
             <ul>{(research.evidence_locations || []).slice(0, 6).map((r, i) => (
               <li key={i} className={li}>· {r.kind}{r.source_n ? ` [${r.source_n}]` : ''}：{r.locator}</li>
             ))}</ul>
@@ -203,7 +203,7 @@ export default function ResearchBriefPanel({
         )}
         {(research.locators || []).length > 0 && (
           <div>
-            <div className="text-xs text-slate-500">字段位置（底稿）</div>
+            <div className="text-xs text-ink-faint">字段位置（底稿）</div>
             <ul>{(research.locators || []).slice(0, 6).map((l, i) => (
               <li key={i} className={li}>· {l.label}：{l.locator}</li>
             ))}</ul>
@@ -232,7 +232,7 @@ export default function ResearchBriefPanel({
           {weakClaims.length > 0 && (
             <ul className={li}>
               {weakClaims.slice(0, 5).map((c, i) => (
-                <li key={i} className={c.status === 'unsupported' ? 'text-amber-400' : ''}>
+                <li key={i} className={c.status === 'unsupported' ? 'text-amber-700' : ''}>
                   · {c.source ? '未采用来源'
                     : c.status === 'unsupported' ? '无底稿事实支持'
                     : c.status === 'partially_supported' ? '部分支持（有断言未对上底稿）'
@@ -242,14 +242,14 @@ export default function ResearchBriefPanel({
                 </li>
               ))}
               {unsupported.length > 0 && (
-                <li className="text-slate-500">
+                <li className="text-ink-faint">
                   · 未采用来源共 {unsupported.length} 条，正文对应句已逐句标『待核查』（不删句）
                 </li>
               )}
             </ul>
           )}
           {research.structure_current === false && (
-            <div className="text-xs text-amber-400">
+            <div className="text-xs text-amber-700">
               {research.structure_version_exists
                 ? <>· 面板（发现/缺口/证据）绑定的是
                     {String(research.structure_version_adopt_reason || '').includes('代码装配')
@@ -280,7 +280,7 @@ export default function ResearchBriefPanel({
                             : `（属版本 ${String(pr.report_version_id).slice(0, 12)}，当前版本无评审结论）`)
                 : '（无评审记录）'
               return (
-                <li className={pr.verdict === 'PASS' ? '' : 'text-amber-400'}>
+                <li className={pr.verdict === 'PASS' ? '' : 'text-amber-700'}>
                   · 计划评审（Critic）：{label}
                   {pr.verdict !== 'PASS' && pr.degraded_reason ? `——${pr.degraded_reason}` : ''}
                   {where}
@@ -291,15 +291,15 @@ export default function ResearchBriefPanel({
               ? <li>· 人工复核：{rv.human.approver} 于 {rv.human.at || '时间未记录'} 批准
                   {rv.human.version_id ? `（版本 ${String(rv.human.version_id).slice(0, 12)}）` : ''}</li>
               : rv.human?.approver
-                ? <li className="text-amber-400">· 人工复核：本版待复核（{rv.human.reason || '既有批准未绑定本版'}）；
+                ? <li className="text-amber-700">· 人工复核：本版待复核（{rv.human.reason || '既有批准未绑定本版'}）；
                     历史记录：{rv.human.approver} 于 {rv.human.at || '时间未记录'} 批准
                     {rv.human.version_id ? `（版本 ${String(rv.human.version_id).slice(0, 12)}）` : ''}
                     ——机器重验通过不代表已复核</li>
-                : <li className="text-amber-400">· 人工复核：待复核（无研究员批准记录）——机器重验通过不代表已复核</li>}
+                : <li className="text-amber-700">· 人工复核：待复核（无研究员批准记录）——机器重验通过不代表已复核</li>}
             {/* P0-5：截断闸门的结论必须**看得见**——此前只有后端判定，页面只说"草稿"，
                 用户看不出"正文其实是断的、这份不能当完整交付"。 */}
             {research.delivery?.truncated && (
-              <li className="text-amber-400">
+              <li className="text-amber-700">
                 · 正文被判截断（{String(research.delivery.truncation?.section || '末节')}）：
                 {research.delivery.truncation?.reason
                   || research.delivery.draft_reason
@@ -312,31 +312,31 @@ export default function ResearchBriefPanel({
           </ul>
           {!editing ? (
             <button type="button" onClick={() => setEditing(true)}
-              className="px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs">
+              className="px-3 py-1.5 bg-brand/10 hover:bg-brand/20 text-brand rounded-lg text-xs">
               修改正文并重验
             </button>
           ) : (
             <div className="space-y-2">
               <textarea value={body} onChange={e => setBody(e.target.value)} rows={5}
                 placeholder="替换整份研究正文（留空则用下面的查找/替换）"
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200" />
+                className="w-full bg-surface-raised border border-line-strong rounded-lg px-2 py-1.5 text-xs text-ink" />
               <div className="flex gap-2">
                 <input value={find} onChange={e => setFind(e.target.value)} placeholder="查找（原文片段）"
-                  className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200" />
+                  className="flex-1 bg-surface-raised border border-line-strong rounded-lg px-2 py-1.5 text-xs text-ink" />
                 <input value={replace} onChange={e => setReplace(e.target.value)} placeholder="替换为"
-                  className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200" />
+                  className="flex-1 bg-surface-raised border border-line-strong rounded-lg px-2 py-1.5 text-xs text-ink" />
               </div>
               <div className="flex items-center gap-2">
                 <button type="button" disabled={busy} onClick={submitRevision}
-                  className="px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs disabled:opacity-40">
+                  className="px-3 py-1.5 bg-brand/10 hover:bg-brand/20 text-brand rounded-lg text-xs disabled:opacity-40">
                   {busy ? '提交中…' : '提交修订并重验'}
                 </button>
                 <button type="button" disabled={busy} onClick={() => { setEditing(false); setResult('') }}
-                  className="px-3 py-1.5 text-slate-400 hover:text-slate-200 text-xs">取消</button>
+                  className="px-3 py-1.5 text-ink-muted hover:text-ink text-xs">取消</button>
               </div>
             </div>
           )}
-          {result && <div className="text-xs text-slate-300 mt-2">{result}</div>}
+          {result && <div className="text-xs text-ink mt-2">{result}</div>}
         </div>
       )}
 
@@ -345,7 +345,7 @@ export default function ResearchBriefPanel({
         <div className={box}>
           <div className={h}>导出</div>
           <ul className={li}>
-            <li>· Markdown / PDF 按<span className="text-slate-300">当前版本</span>导出（响应头带版本号）</li>
+            <li>· Markdown / PDF 按<span className="text-ink">当前版本</span>导出（响应头带版本号）</li>
             {/* P0-4：这一行与导出面板/分析工作台同源（packageRes 由 ReportViewer 用
                 resolvePackage 算好传下来）；没有 packageRes 的老调用才退回本地字段。 */}
             <li>{packageRes
@@ -359,19 +359,19 @@ export default function ResearchBriefPanel({
               const pkgV = exportState.package_body_version_id || exportState.manifest_version_id || ''
               const curV = exportState.current_body_version_id || exportState.current_version_id || ''
               return pkgV && curV && pkgV !== curV
-                ? <li className="text-amber-400">· 包生成于 {pkgV.slice(0, 12)}，
+                ? <li className="text-amber-700">· 包生成于 {pkgV.slice(0, 12)}，
                     当前版本 {curV.slice(0, 12)}——包不含最新修订，请重新导出</li>
                 : null
             })()}
             {exportState.package && exportState.package_stale
-              ? <li className="text-amber-400">· 包文件生成于 {exportState.package_generated_at || '未知时间'}，
+              ? <li className="text-amber-700">· 包文件生成于 {exportState.package_generated_at || '未知时间'}，
                   早于最近一次装配——重装配未重建包，包可能不含最新修订，请重新导出</li>
               : null}
           </ul>
         </div>
       )}
       {sc.company && (
-        <div className="text-xs text-slate-500">
+        <div className="text-xs text-ink-faint">
           {sc.company}｜期间 {(sc.periods || []).join('、')}｜口径 {sc.caliber || '未声明'}｜
           资料截至 {sc.as_of || '未声明'}｜单位 {sc.unit || '见表中标注'}
         </div>

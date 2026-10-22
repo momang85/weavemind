@@ -22,7 +22,7 @@ SyntaxHighlighter.registerLanguage('md', markdown)
 SyntaxHighlighter.registerLanguage('bash', bash)
 SyntaxHighlighter.registerLanguage('shell', bash)
 SyntaxHighlighter.registerLanguage('sh', bash)
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 // types used: TaskReport
 
 import { useTaskStore } from '../stores/useTaskStore'
@@ -34,6 +34,7 @@ import {
 import { WorkingPaperPanel } from './WorkingPaperPanel'
 import ResearchBriefPanel from './ResearchBriefPanel'
 import AnalysisWorkbenchPanel from './AnalysisWorkbenchPanel'
+import { StatusBadge } from './ui'
 import { parseTopStatsWithSource, topStatsCardMeta } from '../lib/topStats'
 import { reportStatsView } from '../lib/reportStats'
 import { rewriteE2eVerdict } from '../lib/e2eVerdict'
@@ -326,9 +327,9 @@ function ReportImage({ src, alt, title, draft, taskId }: {
   // 换成如实占位说明，源文件仍可下载。
   const aspectIssue = dims !== null && dims.w > 0 && dims.h / dims.w > 12
   return (
-    <figure className="my-4 rounded-xl border border-slate-800 bg-slate-900/60 p-2">
+    <figure className="my-4 rounded-xl border border-line bg-surface/60 p-2">
       {aspectIssue && dims ? (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
           图片尺寸异常（{dims.w}×{dims.h}，高宽比 {(dims.h / dims.w).toFixed(1)}），
           按图表质检规则不在页面嵌入展示；源文件仍可下载。
         </div>
@@ -342,29 +343,29 @@ function ReportImage({ src, alt, title, draft, taskId }: {
       )}
       <figcaption className="mt-2 flex flex-wrap items-center gap-2 px-1 pb-1">
         {draft && (
-          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-400">草稿级</span>
+          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-700">草稿级</span>
         )}
-        <span className="min-w-0 flex-1 truncate text-xs text-slate-400" title={caption}>
+        <span className="min-w-0 flex-1 truncate text-xs text-ink-muted" title={caption}>
           {caption || name}
         </span>
         <button type="button" onClick={() => downloadViaBlob(url, name)}
-          className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700">
+          className="rounded bg-surface-raised px-2 py-1 text-xs text-ink hover:bg-line">
           下载图片
         </button>
       </figcaption>
       {zoom && createPortal(
         <div role="dialog" aria-modal="true" onClick={() => setZoom(false)}
-          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-slate-950/90 p-4">
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-surface-sunken/90 p-4">
           <img src={url} alt={caption || '报告图表'} onClick={e => e.stopPropagation()}
             className="max-h-[75vh] max-w-full rounded-lg bg-white/5 object-contain" />
           <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
-            <span className="max-w-[60vw] truncate text-xs text-slate-300">{caption || name}</span>
+            <span className="max-w-[60vw] truncate text-xs text-ink">{caption || name}</span>
             <button type="button" onClick={() => downloadViaBlob(url, name)}
-              className="rounded bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700">
+              className="rounded bg-surface-raised px-3 py-1.5 text-xs text-ink hover:bg-line">
               下载图片
             </button>
             <button type="button" onClick={() => setZoom(false)}
-              className="rounded bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700">
+              className="rounded bg-surface-raised px-3 py-1.5 text-xs text-ink hover:bg-line">
               关闭（Esc）
             </button>
           </div>
@@ -441,8 +442,8 @@ function CitationBadges({ nums, sources }: { nums: number[]; sources: SourceItem
             onClick={src ? scrollToSources : undefined}
             className={`rounded px-1 py-px text-xs font-semibold leading-none transition-colors ${
               src
-                ? 'border border-cyan-500/25 bg-cyan-500/15 text-cyan-400 hover:bg-cyan-500/30 hover:text-cyan-300'
-                : 'border border-slate-700 bg-slate-800/60 text-slate-500'
+                ? 'border border-brand/25 bg-brand/15 text-brand hover:bg-brand/30 hover:text-brand'
+                : 'border border-line-strong bg-surface-raised/60 text-ink-faint'
             }`}>
             {n}
           </button>
@@ -472,7 +473,7 @@ function AComponent({ href, children }: MarkdownComponentProps) {
   }
   return (
     <a href={href} target="_blank" rel="noopener noreferrer"
-      className="text-cyan-400 underline decoration-cyan-500/40 underline-offset-2 transition-colors hover:text-cyan-300">
+      className="text-brand underline decoration-cyan-500/40 underline-offset-2 transition-colors hover:text-brand">
       {children}
     </a>
   )
@@ -482,8 +483,8 @@ function CodeComponent({ className, children }: MarkdownComponentProps) {
   const match = /language-(\w+)/.exec(className || '')
   const inline = !match
   return !inline && match ? (
-    <SyntaxHighlighter style={oneDark} language={match[1]} PreTag="div"
-      customStyle={{ background: '#0f172a', borderRadius: '8px', padding: '16px', fontSize: '12px', margin: '8px 0' }}>
+    <SyntaxHighlighter style={oneLight} language={match[1]} PreTag="div"
+      customStyle={{ background: '#f3f1eb', borderRadius: '8px', padding: '16px', fontSize: '12px', margin: '8px 0' }}>
       {String(children).replace(/\n$/, '')}
     </SyntaxHighlighter>
   ) : (
@@ -924,10 +925,10 @@ export default memo(function ReportViewer() {
       } catch { /* 用内存稿（下面标注版本未知） */ }
     }
     w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>研究报告</title>
-<style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;color:#1a1a2e;line-height:1.8}
-h1,h2{color:#16213e} pre{background:#f5f5f5;padding:16px;border-radius:8px;overflow-x:auto}
+<style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;color:#292d2b;line-height:1.8}
+h1,h2{color:#70531f} pre{background:#f3f1eb;padding:16px;border-radius:8px;overflow-x:auto}
 code{background:#f0f0f0;padding:2px 6px;border-radius:4px} table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;color:#fff}
+th,td{border:1px solid #e8e5dd;padding:8px;text-align:left} th{background:#f3f1eb;color:#292d2b}
 </style></head><body><div id="content"></div></body></html>`)
     w.document.close()
     // Convert markdown to HTML inline；先整体实体转义再套标签——
@@ -961,32 +962,44 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
   return (
     <div id="report-viewer" className="animate-fade-in space-y-5 scroll-mt-6">
+      <nav aria-label="报告内容定位" className="sticky top-0 z-20 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3">
+        <span className="mr-2 text-xs font-medium text-ink">阅读与核查</span>
+        {[
+          { id: 'research-model', label: '分析工作台', visible: !!taskIdForFiles },
+          { id: 'research-brief', label: '研究简报', visible: !!report.research },
+          { id: 'report-body', label: '研究正文', visible: true },
+          { id: 'working-paper', label: '可复算底稿', visible: !!paperData },
+          { id: 'acceptance-evidence', label: '验收证据', visible: !!accData },
+          { id: 'report-export', label: '导出与复核', visible: true },
+        ].filter(item => item.visible).map(item => <button key={item.id} onClick={() => scrollToId(item.id)}
+          className="rounded-lg border border-line px-3 py-2 text-xs text-ink-muted hover:border-brand hover:text-brand">{item.label}</button>)}
+      </nav>
       {/* F3a 数据卡：优先取正文『财务对照』表（判定见 lib/topStats）；退回首表时如实标注来源。
           P1-2：卡头与内容同源（topStatsCardMeta）；四格完整显示，不再截断。 */}
       {topStats.length > 0 && topMeta.title ? (
-        <div className="rounded-xl border border-cyan-500/20 bg-slate-900 p-4">
+        <div className="rounded-xl border border-brand/20 bg-surface p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Award className="h-4 w-4 text-cyan-400" />
-            <span className="text-sm font-semibold text-cyan-400">{topMeta.title}</span>
-            <span className="text-xs text-slate-500">
+            <Award className="h-4 w-4 text-brand" />
+            <span className="text-sm font-semibold text-brand">{topMeta.title}</span>
+            <span className="text-xs text-ink-faint">
               {topMeta.detail}
             </span>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {topStats.map((it, i) => (
-              <div key={i} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
-                <div className="break-words text-xs text-slate-400" title={it.k}>{it.k}</div>
-                <div className="mt-0.5 break-words font-semibold text-slate-100" title={it.v}>{it.v}</div>
+              <div key={i} className="rounded-lg border border-line bg-surface-raised/30 px-3 py-2">
+                <div className="break-words text-xs text-ink-muted" title={it.k}>{it.k}</div>
+                <div className="mt-0.5 break-words font-semibold text-ink" title={it.v}>{it.v}</div>
               </div>
             ))}
           </div>
         </div>
       ) : accTrace ? (
-        <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+        <div className="rounded-xl border border-line bg-surface p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <ScrollText className="h-4 w-4 text-slate-400" />
-            <span className="text-sm font-semibold text-slate-300">验收器统计</span>
-            <span className="text-xs text-slate-500">
+            <ScrollText className="h-4 w-4 text-ink-muted" />
+            <span className="text-sm font-semibold text-ink">验收器统计</span>
+            <span className="text-xs text-ink-faint">
               报告正文没有可提取的表格，以下为验收器统计（非报告结论）
             </span>
           </div>
@@ -1000,9 +1013,9 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                   ? `${Math.round(accTrace.covered_ratio * 100)}%` : '未知',
               },
             ].map(item => (
-              <div key={item.label} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
-                <div className="text-xs text-slate-400">{item.label}</div>
-                <div className="mt-0.5 font-semibold text-slate-100">{item.value}</div>
+              <div key={item.label} className="rounded-lg border border-line bg-surface-raised/30 px-3 py-2">
+                <div className="text-xs text-ink-muted">{item.label}</div>
+                <div className="mt-0.5 font-semibold text-ink">{item.value}</div>
               </div>
             ))}
           </div>
@@ -1013,20 +1026,20 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       <div className="space-y-2">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
-            { icon: Clock, label: '耗时', value: statsView.elapsed, color: 'text-slate-400' },
-            { icon: CheckCircle2, label: statsView.rateLabel, value: statsView.rateValue, color: 'text-emerald-400' },
-            { icon: Award, label: 'Steps', value: statsView.steps, color: 'text-cyan-400' },
-            { icon: Zap, label: 'Files', value: statsView.files, color: 'text-violet-400' },
+            { icon: Clock, label: '耗时', value: statsView.elapsed, color: 'text-ink-muted' },
+            { icon: CheckCircle2, label: statsView.rateLabel, value: statsView.rateValue, color: 'text-emerald-700' },
+            { icon: Award, label: '执行步骤', value: statsView.steps, color: 'text-brand' },
+            { icon: Zap, label: 'Files', value: statsView.files, color: 'text-violet-700' },
           ].map(item => (
-            <div key={item.label} className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-center">
+            <div key={item.label} className="bg-surface border border-line rounded-xl p-4 text-center">
               <item.icon className={`w-5 h-5 mx-auto mb-2 ${item.color}`} />
               <div className={`text-xl font-bold ${item.color}`}>{item.value}</div>
-              <div className="text-slate-500 text-xs">{item.label}</div>
+              <div className="text-ink-faint text-xs">{item.label}</div>
             </div>
           ))}
         </div>
         {/* P1-8：成功率与验收结论的关系必须写出来——不允许"100% 成功"与"验收未通过"并排且无解释 */}
-        <div className={`text-xs leading-relaxed ${statsView.acceptance.failed ? 'text-amber-400' : 'text-slate-500'}`}>
+        <div className={`text-xs leading-relaxed ${statsView.acceptance.failed ? 'text-amber-700' : 'text-ink-faint'}`}>
           机器验收结论：<span className="font-medium">{statsView.acceptance.overall}</span>。{statsView.note}
         </div>
       </div>
@@ -1036,12 +1049,12 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       {blockReason ? (
         <div role="alert"
           className="flex items-start gap-2.5 rounded-xl border-2 border-amber-500/60 bg-amber-500/10 px-4 py-3">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
           <div className="space-y-1">
-            <div className="text-xs font-semibold uppercase tracking-wide text-amber-500">
+            <div className="text-xs font-semibold uppercase tracking-wide text-amber-700">
               后端原文（分析工作台判定）
             </div>
-            <div className="text-sm leading-relaxed text-amber-200">{blockReason}</div>
+            <div className="text-sm leading-relaxed text-amber-700">{blockReason}</div>
           </div>
         </div>
       ) : null}
@@ -1049,26 +1062,26 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       {/* F3-B：研究简报面板——关键发现 → 缺口 → 证据 → 修改/重验 → 导出版本绑定。
           放在正文之前：金融读者先看结论与缺口，再决定要不要改、怎么导。
           P0-4：把任务详情里的包名一起传下去，工作台与导出面板共用同一个解析结果。 */}
-      <AnalysisWorkbenchPanel
+      <div id="research-model" className="scroll-mt-24"><AnalysisWorkbenchPanel
         taskId={taskIdForFiles}
         exportPackage={report.export?.package}
         onAdopted={() => { if (taskIdForFiles) void reloadTask(taskIdForFiles) }}
-      />
-      <ResearchBriefPanel
+      /></div>
+      <div id="research-brief" className="scroll-mt-24"><ResearchBriefPanel
         taskId={report.taskId}
         research={report.research}
         exportState={resolvedExportState}
         packageRes={pkg.res}
         onRevised={() => { if (report.taskId) void reloadTask(report.taskId) }}
-      />
+      /></div>
 
       {/* Report card */}
-      <div className="bg-slate-900 border border-emerald-500/20 rounded-xl">
-        <div className="flex items-center justify-between px-5 py-3 bg-emerald-500/5 border-b border-emerald-500/20 rounded-t-xl">
-          <div className="flex items-center gap-2.5">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-            <span className="text-emerald-400 font-semibold text-sm">任务完成</span>
-            <span className="text-slate-600 text-xs ml-1">— {report.summary}</span>
+      <div id="report-body" className="scroll-mt-24 bg-surface border border-line rounded-xl">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 bg-surface-sunken border-b border-line rounded-t-xl">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <ScrollText className="w-5 h-5 text-brand" />
+            <span className="text-ink font-semibold text-sm">研究正文</span>
+            <StatusBadge status={report.summary} />
           </div>
         </div>
 
@@ -1085,55 +1098,55 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             financial: '财务', news: '新闻', crypto: '加密资产', macro: '宏观', research: '调研',
           }
           return (
-            <div className="mx-4 mt-4 space-y-2.5 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3.5 py-3">
+            <div className="mx-4 mt-4 space-y-2.5 rounded-xl border border-brand/20 bg-brand/5 px-3.5 py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <ScrollText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                <span className="text-xs font-semibold text-cyan-400">数字可信度</span>
+                <ScrollText className="w-3.5 h-3.5 text-brand shrink-0" />
+                <span className="text-xs font-semibold text-brand">数字可信度</span>
                 <span className={`px-2 py-0.5 rounded text-xs ${
-                  pass ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                  pass ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'}`}>
                   {pass ? '达阈值' : '低于阈值'}
                 </span>
-                <span className="text-xs text-slate-400">共 {total} 个：</span>
-                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs">引用 {nt.cited_count ?? 0}</span>
-                <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-xs">计算 {nt.computed_count ?? 0}</span>
-                <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 text-xs">模型知识 {nt.disclosed_count ?? 0}</span>
-                <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-xs">不可溯源 {unverifiable}</span>
+                <span className="text-xs text-ink-muted">共 {total} 个：</span>
+                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-700 text-xs">引用 {nt.cited_count ?? 0}</span>
+                <span className="px-2 py-0.5 rounded bg-brand/10 text-brand text-xs">计算 {nt.computed_count ?? 0}</span>
+                <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-700 text-xs">模型知识 {nt.disclosed_count ?? 0}</span>
+                <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 text-xs">不可溯源 {unverifiable}</span>
               </div>
               <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs">
-                <span className="text-slate-400">
+                <span className="text-ink-muted">
                   数字溯源率
-                  <span className={`ml-1.5 font-semibold ${ratio != null && ratio >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  <span className={`ml-1.5 font-semibold ${ratio != null && ratio >= 70 ? 'text-emerald-700' : 'text-amber-700'}`}>
                     {ratio != null ? `${ratio}%` : '未知'}
                   </span>
                   {nt.traceable_count != null && total > 0 && (
-                    <span className="ml-1 text-slate-500">（{nt.traceable_count}/{total}）</span>
+                    <span className="ml-1 text-ink-faint">（{nt.traceable_count}/{total}）</span>
                   )}
                 </span>
-                <span className="text-slate-400">
+                <span className="text-ink-muted">
                   金额溯源率
-                  <span className={`ml-1.5 font-semibold ${amountRate != null && amountRate >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  <span className={`ml-1.5 font-semibold ${amountRate != null && amountRate >= 70 ? 'text-emerald-700' : 'text-amber-700'}`}>
                     {amountRate != null ? `${amountRate}%` : '未知'}
                   </span>
                   {nt.amount_total != null && (
-                    <span className="ml-1 text-slate-500">（{nt.amount_traceable ?? 0}/{nt.amount_total}）</span>
+                    <span className="ml-1 text-ink-faint">（{nt.amount_traceable ?? 0}/{nt.amount_total}）</span>
                   )}
                 </span>
               </div>
               {untraced.length > 0 && (
                 <div>
-                  <div className="text-xs text-slate-400">
+                  <div className="text-xs text-ink-muted">
                     不可溯源数字（最多显示 10 条，共 {unverifiable} 条）
                   </div>
                   <ul className="mt-1 space-y-0.5">
                     {untraced.slice(0, 10).map((u: any, i: number) => (
-                      <li key={i} className="truncate text-xs text-amber-300/80" title={String(u?.raw ?? '')}>
+                      <li key={i} className="truncate text-xs text-amber-700/80" title={String(u?.raw ?? '')}>
                         - {String(u?.raw ?? '').slice(0, 60)}
                       </li>
                     ))}
                   </ul>
                 </div>
               )}
-              <div className="text-xs leading-relaxed text-slate-500">
+              <div className="text-xs leading-relaxed text-ink-faint">
                 口径：分母 = 报告正文提取到的关键数字个数；本域阈值
                 {nt.threshold != null ? ` ${Math.round(nt.threshold * 100)}%` : ' —'}
                 {nt.domain ? `，域=${DOMAIN_LABEL[nt.domain] || nt.domain}` : ''}。
@@ -1145,7 +1158,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
         {/* S2：可重算底稿（目标达成 / 关键指标 / 来源与缺口 / 计算值公式） */}
         {paperData && (
-          <div className="mx-4 mt-4">
+          <div id="working-paper" className="mx-4 mt-4 scroll-mt-24">
             <WorkingPaperPanel paper={paperData} />
           </div>
         )}
@@ -1153,12 +1166,12 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         {/* 验收缺口横幅：SUCCESS_WITH_ISSUES 任务的报告顶部展示缺口明细 */}
         {report.summary === 'SUCCESS_WITH_ISSUES' && report.acceptance?.gaps && report.acceptance.gaps.length > 0 && (
           <div className="mx-4 mt-4 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
             <div className="min-w-0">
-              <div className="text-xs font-semibold text-amber-300/90">验收未完全通过（SUCCESS_WITH_ISSUES）</div>
+              <div className="text-xs font-semibold text-amber-700/90">验收未完全通过（SUCCESS_WITH_ISSUES）</div>
               <ul className="mt-1 space-y-1">
                 {report.acceptance.gaps.map((g, i) => (
-                  <li key={i} className="text-sm leading-relaxed text-amber-200/80">- {g}</li>
+                  <li key={i} className="text-sm leading-relaxed text-amber-700/80">- {g}</li>
                 ))}
               </ul>
             </div>
@@ -1168,24 +1181,24 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         {/* 数据时效信息卡 */}
         {freshness && (
           <div className="mx-4 mt-4 flex items-start gap-3 rounded-xl border border-amber-400/20 bg-amber-400/5 px-4 py-3">
-            <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
             <div className="min-w-0">
-              <div className="text-xs font-semibold text-amber-300/90">数据时效</div>
-              <div className="mt-0.5 text-sm leading-relaxed text-slate-300">{freshness.text}</div>
+              <div className="text-xs font-semibold text-amber-700/90">数据时效</div>
+              <div className="mt-0.5 text-sm leading-relaxed text-ink">{freshness.text}</div>
             </div>
           </div>
         )}
 
         {/* 窄屏：顶部粘性目录 */}
         {toc.length >= 2 && (
-          <div className="lg:hidden sticky top-4 z-20 mt-4 border-y border-slate-800/80 bg-slate-900/95 px-4 py-2.5 backdrop-blur">
-            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-500">
+          <div className="lg:hidden sticky top-4 z-20 mt-4 border-y border-line/80 bg-surface/95 px-4 py-2.5 backdrop-blur">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-ink-faint">
               <ListTree className="h-3 w-3" /> 目录
             </div>
             <div className="flex gap-1.5 overflow-x-auto pb-0.5">
               {toc.map(e => (
                 <button key={e.id} onClick={() => scrollToHeading(e.id)}
-                  className="shrink-0 rounded-md border border-slate-800 bg-slate-800/40 px-2 py-1 text-xs text-slate-400 transition-colors hover:border-cyan-500/30 hover:text-cyan-300">
+                  className="shrink-0 rounded-md border border-line bg-surface-raised/40 px-2 py-1 text-xs text-ink-muted transition-colors hover:border-brand/30 hover:text-brand">
                   {e.text}
                 </button>
               ))}
@@ -1196,19 +1209,19 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         <div className={toc.length >= 2 ? 'grid lg:grid-cols-[14rem_1fr]' : ''}>
           {/* 宽屏：左侧粘性目录 */}
           {toc.length >= 2 && (
-            <aside className="sticky top-6 hidden max-h-[calc(100vh-6rem)] self-start overflow-y-auto border-r border-slate-800/70 px-4 py-4 lg:block">
-              <div className="mb-3 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <aside className="sticky top-6 hidden max-h-[calc(100vh-6rem)] self-start overflow-y-auto border-r border-line/70 px-4 py-4 lg:block">
+              <div className="mb-3 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-ink-faint">
                 <ListTree className="h-3.5 w-3.5" /> 目录
               </div>
               <nav className="space-y-0.5">
                 {toc.map(e => (
                   <button key={e.id} onClick={() => scrollToHeading(e.id)}
-                    className={`block w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-800/70 hover:text-cyan-300 ${
+                    className={`block w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-surface-raised/70 hover:text-brand ${
                       e.level === 1
-                        ? 'text-[13px] font-medium text-slate-200'
+                        ? 'text-[13px] font-medium text-ink'
                         : e.level === 2
-                          ? 'pl-4 text-[13px] text-slate-400'
-                          : 'pl-7 text-xs text-slate-500'
+                          ? 'pl-4 text-[13px] text-ink-muted'
+                          : 'pl-7 text-xs text-ink-faint'
                     }`}>
                     {e.text}
                   </button>
@@ -1217,35 +1230,35 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             </aside>
           )}
 
-          <div className="min-w-0 p-6 text-sm leading-relaxed text-slate-300 max-w-none
-            [&_h1]:text-xl [&_h1]:font-bold [&_h1]:text-slate-100 [&_h1]:mb-3
-            [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:text-cyan-400 [&_h2]:mt-6 [&_h2]:mb-3
-            [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-slate-200 [&_h3]:mb-2
-            [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_li]:text-slate-400
-            [&_strong]:text-slate-200 [&_code]:text-cyan-400 [&_code]:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs
-            [&_table]:w-full [&_table]:text-xs [&_th]:text-left [&_th]:text-slate-400 [&_th]:font-medium [&_th]:px-2 [&_th]:py-1 [&_th]:border-b [&_th]:border-slate-800
-            [&_td]:px-2 [&_td]:py-1 [&_td]:border-b [&_td]:border-slate-800/50">
+          <div className="min-w-0 p-6 text-sm leading-relaxed text-ink max-w-none
+            [&_h1]:text-xl [&_h1]:font-bold [&_h1]:text-ink [&_h1]:mb-3
+            [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:text-brand [&_h2]:mt-6 [&_h2]:mb-3
+            [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-ink [&_h3]:mb-2
+            [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_li]:text-ink-muted
+            [&_strong]:text-ink [&_code]:text-brand [&_code]:bg-surface-raised [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs
+            [&_table]:w-full [&_table]:text-xs [&_th]:text-left [&_th]:text-ink-muted [&_th]:font-medium [&_th]:px-2 [&_th]:py-1 [&_th]:border-b [&_th]:border-line
+            [&_td]:px-2 [&_td]:py-1 [&_td]:border-b [&_td]:border-line/50">
             <ReportMarkdown md={bodyMd} sources={sourceItems} taskId={taskIdForFiles} />
 
             {/* 参考来源结构化卡片 */}
             {sourcesResult.sources && (
               <section id="sources" className="mt-8 scroll-mt-20">
-                <h2 className="flex items-center gap-2 text-lg font-semibold text-cyan-400">
+                <h2 className="flex items-center gap-2 text-lg font-semibold text-brand">
                   <Quote className="h-4 w-4" /> {sourcesResult.sources.heading}
                 </h2>
                 <ol className="mt-3 space-y-2">
                   {sourcesResult.sources.items.map((s, i) => (
                     <li key={`${s.url}-${i}`}>
                       <a href={s.url} target="_blank" rel="noopener noreferrer"
-                        className="group flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-800/30 px-3.5 py-2.5 transition-colors hover:border-cyan-500/30 hover:bg-slate-800/60">
-                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-cyan-500/15 text-xs font-semibold text-cyan-400">
+                        className="group flex items-center gap-3 rounded-lg border border-line bg-surface-raised/30 px-3.5 py-2.5 transition-colors hover:border-brand/30 hover:bg-surface-raised/60">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-brand/15 text-xs font-semibold text-brand">
                           {i + 1}
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm text-slate-200 transition-colors group-hover:text-cyan-300">{s.title}</span>
-                          <span className="mt-0.5 block truncate text-xs text-slate-500">{s.domain}</span>
+                          <span className="block truncate text-sm text-ink transition-colors group-hover:text-brand">{s.title}</span>
+                          <span className="mt-0.5 block truncate text-xs text-ink-faint">{s.domain}</span>
                         </span>
-                        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-600 transition-colors group-hover:text-cyan-400" />
+                        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-ink-faint transition-colors group-hover:text-brand" />
                       </a>
                     </li>
                   ))}
@@ -1255,11 +1268,11 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
             {/* 免责声明弱化卡片 */}
             {disclaimerResult.disclaimer && (
-              <section className="mt-6 rounded-lg border border-slate-800/60 bg-slate-900/40 px-4 py-3">
-                <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-600">
+              <section className="mt-6 rounded-lg border border-line/60 bg-surface/40 px-4 py-3">
+                <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-ink-faint">
                   <Quote className="h-3 w-3" /> 免责声明
                 </div>
-                <p className="mt-1 text-xs leading-relaxed text-slate-600">{disclaimerResult.disclaimer}</p>
+                <p className="mt-1 text-xs leading-relaxed text-ink-faint">{disclaimerResult.disclaimer}</p>
               </section>
             )}
           </div>
@@ -1268,17 +1281,17 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
       {/* F3a 验收证据：判定规则指纹（可反查旧结果由哪版规则产出）+ 验收时间线（反思重做可见） */}
       {accData && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+        <div id="acceptance-evidence" className="scroll-mt-24 bg-surface border border-line rounded-xl overflow-hidden">
           <button onClick={() => setFingerprintOpen(!fingerprintOpen)}
-            className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-800/30 transition-colors">
-            <div className="flex items-center gap-2 text-sm text-slate-300">
-              <Fingerprint className="w-4 h-4 text-cyan-400" />
+            className="w-full flex items-center justify-between px-5 py-3 hover:bg-surface-raised/30 transition-colors">
+            <div className="flex items-center gap-2 text-sm text-ink">
+              <Fingerprint className="w-4 h-4 text-brand" />
               验收证据
               {timeline && timeline.length > 0 && (
-                <span className="text-xs text-slate-500">验收 {timeline.length} 次</span>
+                <span className="text-xs text-ink-faint">验收 {timeline.length} 次</span>
               )}
             </div>
-            {fingerprintOpen ? <ChevronDown className="w-4 h-4 text-slate-500" /> : <ChevronRight className="w-4 h-4 text-slate-500" />}
+            {fingerprintOpen ? <ChevronDown className="w-4 h-4 text-ink-faint" /> : <ChevronRight className="w-4 h-4 text-ink-faint" />}
           </button>
           {fingerprintOpen && (
             <div className="px-5 pb-4 space-y-3">
@@ -1289,40 +1302,40 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                   { k: '报告 SHA256', v: accData.report_sha256 || '—' },
                   { k: '评估时间', v: accData.evaluated_at || '—' },
                 ].map(row => (
-                  <div key={row.k} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
-                    <div className="text-xs text-slate-400">{row.k}</div>
-                    <div className="mt-0.5 truncate font-mono text-xs text-slate-200" title={String(row.v)}>
+                  <div key={row.k} className="rounded-lg border border-line bg-surface-raised/30 px-3 py-2">
+                    <div className="text-xs text-ink-muted">{row.k}</div>
+                    <div className="mt-0.5 truncate font-mono text-xs text-ink" title={String(row.v)}>
                       {String(row.v)}
                     </div>
                   </div>
                 ))}
               </div>
-              <div className="text-xs leading-relaxed text-slate-500">
+              <div className="text-xs leading-relaxed text-ink-faint">
                 规则指纹随验收规则内容变化——同一份报告在不同规则版本下的判定不同，
                 留指纹才能在规则更新后反查旧结论由哪一版产出。
               </div>
               <div>
-                <div className="mb-1.5 text-xs font-semibold text-slate-400">验收时间线</div>
-                {timeline == null && <div className="text-xs text-slate-500">加载中…</div>}
+                <div className="mb-1.5 text-xs font-semibold text-ink-muted">验收时间线</div>
+                {timeline == null && <div className="text-xs text-ink-faint">加载中…</div>}
                 {timeline != null && timeline.length === 0 && (
-                  <div className="text-xs text-slate-500">该任务没有验收事件（旧任务或尚未进入验收阶段）</div>
+                  <div className="text-xs text-ink-faint">该任务没有验收事件（旧任务或尚未进入验收阶段）</div>
                 )}
                 {timeline != null && timeline.length > 0 && (
                   <ol className="space-y-1.5">
                     {timeline.map((ev: any, i: number) => {
                       const ok = String(ev?.overall || '').includes('SUCCESS') && !String(ev?.overall || '').includes('ISSUE')
                       return (
-                        <li key={i} className="flex flex-wrap items-center gap-2 rounded border border-slate-800 bg-slate-800/20 px-3 py-2 text-xs">
-                          <span className="text-slate-500">#{ev?.seq ?? i + 1}</span>
-                          <span className="text-slate-300">{ev?.trigger || '验收'}</span>
-                          {ev?.iteration ? <span className="text-slate-500">第 {ev.iteration} 轮</span> : null}
-                          <span className={`px-1.5 py-0.5 rounded ${ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                        <li key={i} className="flex flex-wrap items-center gap-2 rounded border border-line bg-surface-raised/20 px-3 py-2 text-xs">
+                          <span className="text-ink-faint">#{ev?.seq ?? i + 1}</span>
+                          <span className="text-ink">{ev?.trigger || '验收'}</span>
+                          {ev?.iteration ? <span className="text-ink-faint">第 {ev.iteration} 轮</span> : null}
+                          <span className={`px-1.5 py-0.5 rounded ${ok ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'}`}>
                             {ev?.overall || '—'}
                           </span>
-                          <span className="text-slate-400">缺口 {ev?.gaps_count ?? 0}</span>
-                          <span className="text-slate-500">{String(ev?.timestamp || '').replace('T', ' ').replace('Z', '')}</span>
+                          <span className="text-ink-muted">缺口 {ev?.gaps_count ?? 0}</span>
+                          <span className="text-ink-faint">{String(ev?.timestamp || '').replace('T', ' ').replace('Z', '')}</span>
                           {ev?.report_sha256 ? (
-                            <span className="font-mono text-slate-600" title={`报告指纹 ${ev.report_sha256}`}>
+                            <span className="font-mono text-ink-faint" title={`报告指纹 ${ev.report_sha256}`}>
                               {String(ev.report_sha256).slice(0, 8)}
                             </span>
                           ) : null}
@@ -1339,48 +1352,48 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
       {/* Files section */}
       {report.files && report.files.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <button onClick={() => setExpandedFiles(!expandedFiles)}
-            className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-800/30 transition-colors">
-            <div className="flex items-center gap-2 text-sm text-slate-300">
-              <Package className="w-4 h-4 text-violet-400" />
+            className="w-full flex items-center justify-between px-5 py-3 hover:bg-surface-raised/30 transition-colors">
+            <div className="flex items-center gap-2 text-sm text-ink">
+              <Package className="w-4 h-4 text-violet-700" />
               生成文件 ({report.files.length})
             </div>
-            {expandedFiles ? <ChevronDown className="w-4 h-4 text-slate-500" /> : <ChevronRight className="w-4 h-4 text-slate-500" />}
+            {expandedFiles ? <ChevronDown className="w-4 h-4 text-ink-faint" /> : <ChevronRight className="w-4 h-4 text-ink-faint" />}
           </button>
           {expandedFiles && (
             <div className="px-5 pb-4 space-y-1">
               {report.files.map((f, i) => (
                 <div key={i} className="px-3 py-2 space-y-1.5">
-                  <div className="flex items-center gap-2 text-xs font-mono text-slate-300 bg-slate-800/40 rounded px-3 py-2">
-                    <FileDown className="w-3 h-3 text-slate-500 shrink-0" />
+                  <div className="flex items-center gap-2 text-xs font-mono text-ink bg-surface-raised/40 rounded px-3 py-2">
+                    <FileDown className="w-3 h-3 text-ink-faint shrink-0" />
                     <span className="truncate">{f.name}</span>
-                    {f.size != null && <span className="text-slate-600 shrink-0">{(f.size / 1024).toFixed(1)} KB</span>}
-                    {f.kind && <span className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 text-xs shrink-0">{f.kind}</span>}
+                    {f.size != null && <span className="text-ink-faint shrink-0">{(f.size / 1024).toFixed(1)} KB</span>}
+                    {f.kind && <span className="px-1.5 py-0.5 rounded bg-line/60 text-ink-muted text-xs shrink-0">{f.kind}</span>}
                     <div className="ml-auto flex items-center gap-1.5 shrink-0">
                       {f.kind === 'html' && (
                         <button onClick={() => openFile(f.name)}
-                          className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-xs">
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-brand/15 hover:bg-brand/25 text-brand text-xs">
                           <ExternalLink className="w-3 h-3" /> 打开
                         </button>
                       )}
                       {f.kind === 'py' && (
                         <button onClick={() => runFile(f.name)} disabled={running === f.name || demoMode}
                           title={demoMode ? '演示模式下已停用（会在服务端执行代码）' : '运行该交付物（沙箱内执行）'}
-                          className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs disabled:opacity-50">
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 text-xs disabled:opacity-50">
                           <Play className="w-3 h-3" /> {running === f.name ? '运行中...' : '运行'}
                         </button>
                       )}
                       {f.kind !== 'html' && (
                         <button onClick={() => downloadFile(f.name)}
-                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-xs">
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-line/50 hover:bg-line text-ink text-xs">
                           <Download className="w-3 h-3" /> 下载
                         </button>
                       )}
                     </div>
                   </div>
                   {runOutput[f.name] && (
-                    <pre className="px-3 py-2 text-xs text-emerald-300/90 bg-slate-950 rounded whitespace-pre-wrap max-h-48 overflow-y-auto">
+                    <pre className="px-3 py-2 text-xs text-emerald-700/90 bg-surface-sunken rounded whitespace-pre-wrap max-h-48 overflow-y-auto">
                       {runOutput[f.name]}
                     </pre>
                   )}
@@ -1393,28 +1406,28 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
       {/* E1 溯源面板：三档分类 + 来源声明 + 免责声明 */}
       {(verifyData || verifyError || verifyLoading) && (
-        <div className="bg-slate-900/80 border border-cyan-500/20 rounded-xl p-4 space-y-3">
-          <div className="text-xs font-semibold text-cyan-400">数据溯源（确定性验收器）</div>
-          {verifyLoading && <div className="text-xs text-slate-500">体检中…</div>}
-          {verifyError && <div className="text-xs text-amber-400">体检失败：{verifyError}</div>}
+        <div className="bg-surface/80 border border-brand/20 rounded-xl p-4 space-y-3">
+          <div className="text-xs font-semibold text-brand">数据溯源（确定性验收器）</div>
+          {verifyLoading && <div className="text-xs text-ink-faint">体检中…</div>}
+          {verifyError && <div className="text-xs text-amber-700">体检失败：{verifyError}</div>}
           {verifyData && (
             <>
-              <div className="text-sm text-slate-200">{verifyData.summary}</div>
+              <div className="text-sm text-ink">{verifyData.summary}</div>
               {verifyData.numbers && (
                 <div className="flex flex-wrap gap-2 text-xs">
-                  <span className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-400">引用 {verifyData.numbers.cited}</span>
-                  <span className="px-2 py-1 rounded bg-cyan-500/10 text-cyan-400">计算 {verifyData.numbers.computed}</span>
-                  <span className="px-2 py-1 rounded bg-violet-500/10 text-violet-400">模型知识 {verifyData.numbers.disclosed_model_knowledge}</span>
-                  <span className="px-2 py-1 rounded bg-amber-500/10 text-amber-400">不可溯源 {verifyData.numbers.untraced}</span>
+                  <span className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-700">引用 {verifyData.numbers.cited}</span>
+                  <span className="px-2 py-1 rounded bg-brand/10 text-brand">计算 {verifyData.numbers.computed}</span>
+                  <span className="px-2 py-1 rounded bg-violet-500/10 text-violet-700">模型知识 {verifyData.numbers.disclosed_model_knowledge}</span>
+                  <span className="px-2 py-1 rounded bg-amber-500/10 text-amber-700">不可溯源 {verifyData.numbers.untraced}</span>
                 </div>
               )}
               {verifyData.source_labeling && !verifyData.source_labeling.pass && (
-                <div className="text-xs text-amber-400">
+                <div className="text-xs text-amber-700">
                   疑似虚假来源标注：{(verifyData.source_labeling.mislabeled || []).slice(0, 5).join('、')}
                 </div>
               )}
               {verifyData.disclaimer && (
-                <div className="text-xs text-slate-500">
+                <div className="text-xs text-ink-faint">
                   免责声明：{verifyData.disclaimer.present ? '✅ 已包含' : '❌ 缺失'}
                 </div>
               )}
@@ -1424,24 +1437,24 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       )}
 
       {/* F3a 导出与复核：下载 / 复核 / 分享集中一处，并说明交付包 zip 为何暂不提供 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div id="report-export" className="scroll-mt-24 bg-surface border border-line rounded-xl p-4">
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-slate-300">导出与复核</span>
-          <span className="text-xs text-slate-500">报告文件、复核与分享都在这里</span>
+          <span className="text-sm font-medium text-ink">导出与复核</span>
+          <span className="text-xs text-ink-faint">报告文件、复核与分享都在这里</span>
         </div>
         <div className="flex gap-3 flex-wrap">
-        <span className="basis-full text-xs text-slate-500">报告文件</span>
+        <span className="basis-full text-xs text-ink-faint">报告文件</span>
         <button onClick={downloadMarkdown}
-          className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+          className="flex items-center gap-2 px-4 py-2.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-sm transition-colors">
           <FileDown className="w-4 h-4" /> 下载Markdown
         </button>
         <button onClick={downloadPDF}
-          className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+          className="flex items-center gap-2 px-4 py-2.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-sm transition-colors">
           <FileDown className="w-4 h-4" /> 下载PDF
         </button>
         {report.files && report.files.length > 0 && (
           <button onClick={() => setExpandedFiles(!expandedFiles)}
-            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+            className="flex items-center gap-2 px-4 py-2.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-sm transition-colors">
             <Package className="w-4 h-4" /> 生成文件 ({report.files.length}) {expandedFiles ? '收起' : '展开'}
           </button>
         )}
@@ -1450,7 +1463,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         {pkg.res.hasPackage && taskIdForFiles ? (
           <a href={`/files/${encodeURIComponent(taskIdForFiles)}/${encodeURIComponent(pkg.res.name)}`}
             download={pkg.res.name}
-            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+            className="flex items-center gap-2 px-4 py-2.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-sm transition-colors">
             <Package className="w-4 h-4" /> 下载交付包 zip
           </a>
         ) : null}
@@ -1478,20 +1491,20 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
               } finally { setRepacking(false) }
             }}
             disabled={repacking}
-            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 rounded-lg text-sm transition-colors">
+            className="flex items-center gap-2 px-4 py-2.5 bg-surface-raised hover:bg-line disabled:opacity-50 text-ink rounded-lg text-sm transition-colors">
             <Package className="w-4 h-4" /> {repacking ? '正在重新导出…' : '按当前版本重新导出'}
           </button>
         ) : null}
-        <span className="basis-full text-xs leading-relaxed text-slate-500">
+        <span className="basis-full text-xs leading-relaxed text-ink-faint">
           {pkg.loading && !pkg.res.hasPackage ? PACKAGE_LOADING_NOTE
             : (pkg.panel.status === 'error' && !pkg.res.hasPackage)
               ? `交付包状态未知（分析状态读取失败：${pkg.panel.error || '未知原因'}）——读取失败不等于没有包，请重试`
               : exportPanelNote(pkg.res, exportPkgAt)}
         </span>
         {repackMsg ? (
-          <span className="basis-full text-xs text-slate-400">{repackMsg}</span>
+          <span className="basis-full text-xs text-ink-muted">{repackMsg}</span>
         ) : null}
-        <span className="basis-full text-xs text-slate-500">复核与分享</span>
+        <span className="basis-full text-xs text-ink-faint">复核与分享</span>
         <button onClick={async () => {
           if (!taskIdForFiles) return
           setVerifyLoading(true); setVerifyError('')
@@ -1506,14 +1519,14 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           } catch (e: any) { setVerifyError(String(e)) }
           setVerifyLoading(false)
         }}
-          className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 px-4 py-2.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-sm transition-colors disabled:opacity-50"
           disabled={demoMode || verifyLoading}
           title={demoMode ? '演示模式下已停用（数据溯源会调用真实模型）' : '对报告数字做一次可溯源复核'}>
           <ScrollText className="w-4 h-4" /> 数据溯源
         </button>
         <button onClick={() => setShowLogs(!showLogs)}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm transition-colors ${
-            showLogs ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+            showLogs ? 'bg-brand/20 text-brand' : 'bg-surface-raised hover:bg-line text-ink'
           }`}>
           <ScrollText className="w-4 h-4" /> {showLogs ? 'Hide' : 'View'} 完整日志 ({logs.length})
         </button>
@@ -1521,17 +1534,17 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           shareUrl ? (
             <>
               <button onClick={() => setShareDialogOpen(true)}
-                className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 rounded-lg text-sm border border-emerald-500/30 transition-colors">
+                className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 rounded-lg text-sm border border-emerald-500/30 transition-colors">
                 <Link2 className="w-4 h-4" /> 分享链接已开启
               </button>
               <button onClick={revokeShare}
-                className="flex items-center gap-2 px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm border border-red-500/20 transition-colors">
+                className="flex items-center gap-2 px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-700 rounded-lg text-sm border border-red-500/20 transition-colors">
                 <Trash2 className="w-4 h-4" /> 撤销分享
               </button>
             </>
           ) : (
             <button onClick={createShare} disabled={shareLoading}
-              className="flex items-center gap-2 px-4 py-2.5 bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 rounded-lg text-sm border border-cyan-500/30 transition-colors disabled:opacity-50">
+              className="flex items-center gap-2 px-4 py-2.5 bg-brand/15 hover:bg-brand/25 text-brand rounded-lg text-sm border border-brand/30 transition-colors disabled:opacity-50">
               <Share2 className="w-4 h-4" /> {shareLoading ? '生成中...' : '分享链接'}
             </button>
           )
@@ -1545,29 +1558,29 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       {shareDialogOpen && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           onClick={() => setShareDialogOpen(false)}>
-          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-xl"
+          <div className="w-full max-w-md bg-surface border border-line-strong rounded-xl p-5 shadow-xl"
             onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-1">
-              <div className="flex items-center gap-2 text-sm text-emerald-400 font-semibold">
+              <div className="flex items-center gap-2 text-sm text-emerald-700 font-semibold">
                 <Link2 className="w-4 h-4" /> 报告分享链接
               </div>
               <button onClick={() => setShareDialogOpen(false)}
-                className="text-slate-500 hover:text-slate-300">
+                className="text-ink-faint hover:text-ink">
                 <X className="w-4 h-4" />
               </button>
             </div>
             {shareUrl ? (
               <>
-                <p className="text-xs text-slate-500 mb-3">
+                <p className="text-xs text-ink-faint mb-3">
                   复制链接发给别人，对方无需登录即可在浏览器查看该报告
                   （{Math.round(Number(shareTtlHours) / 24) || 7} 天内有效
                   {shareProtected ? '，已开启访问密码' : ''}）。
                 </p>
                 <div className="flex gap-2">
                   <input readOnly value={shareUrl} onFocus={e => e.currentTarget.select()}
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-cyan-300 font-mono focus:outline-none" />
+                    className="flex-1 bg-surface-raised border border-line-strong rounded-lg px-3 py-2 text-xs text-brand font-mono focus:outline-none" />
                   <button onClick={copyShare}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500 text-slate-950 text-xs font-semibold hover:bg-cyan-400 shrink-0">
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-brand text-white text-xs font-semibold hover:bg-brand shrink-0">
                     {shareCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                     {shareCopied ? '已复制' : '复制'}
                   </button>
@@ -1575,41 +1588,41 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
               </>
             ) : (
               <>
-                <p className="text-xs text-slate-500 mb-3">
+                <p className="text-xs text-ink-faint mb-3">
                   可设置访问密码与有效期后生成分享链接；密码留空表示公开链接。
                 </p>
-                <label className="block text-xs text-slate-400 mb-1">
+                <label className="block text-xs text-ink-muted mb-1">
                   访问密码（可选）
                   <input type="password" value={sharePassword}
                     onChange={e => setSharePassword(e.target.value)}
                     placeholder="留空则不设密码"
-                    className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none" />
+                    className="w-full mt-1 bg-surface-raised border border-line-strong rounded-lg px-3 py-2 text-sm text-ink focus:outline-none" />
                 </label>
-                <label className="block text-xs text-slate-400 mt-3 mb-1">
+                <label className="block text-xs text-ink-muted mt-3 mb-1">
                   有效期
                   <select value={shareTtlHours}
                     onChange={e => setShareTtlHours(e.target.value)}
-                    className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none">
+                    className="w-full mt-1 bg-surface-raised border border-line-strong rounded-lg px-3 py-2 text-sm text-ink focus:outline-none">
                     <option value="168">7 天</option>
                     <option value="336">14 天</option>
                     <option value="720">30 天（上限）</option>
                   </select>
                 </label>
                 <button onClick={generateShare} disabled={shareLoading}
-                  className="w-full mt-4 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500 text-slate-950 text-xs font-semibold hover:bg-cyan-400 disabled:opacity-50">
+                  className="w-full mt-4 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-brand text-white text-xs font-semibold hover:bg-brand disabled:opacity-50">
                   {shareLoading ? '生成中...' : '生成分享链接'}
                 </button>
-                <p className="text-xs text-red-400 mt-2">{shareError || ''}</p>
+                <p className="text-xs text-red-700 mt-2">{shareError || ''}</p>
               </>
             )}
             {shareUrl && (
               <div className="mt-4 flex gap-2">
                 <button onClick={() => setShareDialogOpen(false)}
-                  className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+                  className="flex-1 px-3 py-2 rounded-lg bg-surface-raised hover:bg-line text-ink text-xs">
                   完成
                 </button>
                 <button onClick={revokeShare}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs border border-red-500/20">
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-700 text-xs border border-red-500/20">
                   <Trash2 className="w-3.5 h-3.5" /> 撤销分享
                 </button>
               </div>
@@ -1621,20 +1634,20 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
       {/* Inline logs */}
       {showLogs && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden animate-fade-in">
-          <div className="px-5 py-3 border-b border-slate-800 text-sm text-slate-400 font-medium">执行日志</div>
+        <div className="bg-surface border border-line rounded-xl overflow-hidden animate-fade-in">
+          <div className="px-5 py-3 border-b border-line text-sm text-ink-muted font-medium">执行日志</div>
           <div className="max-h-64 overflow-y-auto font-mono text-xs">
             {logs.map((l, i) => (
-              <div key={l.id || i} className={`flex gap-3 px-4 py-1.5 border-b border-slate-800/30 ${
+              <div key={l.id || i} className={`flex gap-3 px-4 py-1.5 border-b border-line/30 ${
                 l.type === 'error' ? 'bg-red-500/5' : l.type === 'review' ? 'bg-purple-500/5' : ''
               }`}>
-                <span className="text-slate-600 shrink-0 w-16">{l.timestamp.slice(0, 8)}</span>
+                <span className="text-ink-faint shrink-0 w-16">{l.timestamp.slice(0, 8)}</span>
                 <span className={`shrink-0 w-12 text-xs ${
-                  l.type === 'error' ? 'text-red-400' : l.type === 'plan' ? 'text-blue-400' :
-                  l.type === 'review' ? 'text-purple-400' : l.type === 'dispatch' ? 'text-cyan-400' :
-                  l.type === 'memory' ? 'text-amber-400' : 'text-slate-500'
+                  l.type === 'error' ? 'text-red-700' : l.type === 'plan' ? 'text-blue-700' :
+                  l.type === 'review' ? 'text-purple-700' : l.type === 'dispatch' ? 'text-brand' :
+                  l.type === 'memory' ? 'text-amber-700' : 'text-ink-faint'
                 }`}>{l.type}</span>
-                <span className="text-slate-400">{l.message}</span>
+                <span className="text-ink-muted">{l.message}</span>
               </div>
             ))}
           </div>

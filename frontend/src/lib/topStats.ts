@@ -209,7 +209,7 @@ export function parseTopStatsWithSource(md: string): TopStatsResult {
       continue
     }
     const cells = t.replace(/^\|+|\|+$/g, '').split('|').map(c => c.trim())
-    if (cells.every(c => !c || /^[-:\s—]*$/.test(c))) continue
+    if (cells.every(c => !c || /^(?:-|:|\s|—)*$/.test(c))) continue
     if (!header.length) { header = cells; cur = [cells] } else if (cur.length < 5) cur.push(cells)
   }
   if (cur.length) tables.push(cur)

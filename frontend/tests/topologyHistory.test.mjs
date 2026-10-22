@@ -114,10 +114,10 @@ test('历史页列表项在窄屏可换行且标题有保底宽度（P0 回归�
   const src = read('../src/pages/History.tsx')
   // 行容器必须允许换行，标题必须保底宽度，否则 flex-1 + truncate 会被固定项挤成 0 宽
   assert.match(src, /flex flex-wrap items-center gap-x-3 gap-y-2/)
-  assert.match(src, /flex-1 min-w-\[9rem\] text-slate-300 text-sm truncate">\{c\.title/)
-  assert.match(src, /flex-1 min-w-\[9rem\] text-slate-300 text-sm truncate">\{t\.goal\}/)
+  assert.match(src, /flex-1 min-w-\[9rem\] text-ink text-sm truncate">\{c\.title/)
+  assert.match(src, /flex-1 min-w-\[9rem\] text-ink text-sm truncate">\{t\.goal\}/)
   // 图标不能再让 flex 压缩（否则标题也塌）
-  assert.ok(!/ChevronRight className="w-4 h-4 text-slate-500" \/>/.test(src))
+  assert.ok(!/ChevronRight className="w-4 h-4 text-ink-faint" \/>/.test(src))
   // 50 条上限要如实告知
   assert.match(src, /const LIST_LIMIT = 50/)
   assert.match(src, /只显示最近 \{LIST_LIMIT\} 条/)

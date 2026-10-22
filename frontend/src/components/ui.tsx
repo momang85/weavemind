@@ -63,7 +63,7 @@ export function StatusBadge({ status, withHint = false }: { status?: string; wit
   return (
     <span className="inline-flex items-center gap-2">
       <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>
-      {withHint && hint && <span className="text-xs text-slate-500">{hint}</span>}
+      {withHint && hint && <span className="text-xs text-ink-faint">{hint}</span>}
     </span>
   )
 }
@@ -71,9 +71,9 @@ export function StatusBadge({ status, withHint = false }: { status?: string; wit
 // ── 反馈 ──────────────────────────────────────────────────────────
 
 const ALERT_STYLE = {
-  info: { cls: 'bg-cyan-500/10 border-cyan-500/25 text-cyan-300', Icon: Info },
-  warn: { cls: 'bg-amber-500/10 border-amber-500/25 text-amber-300', Icon: AlertTriangle },
-  danger: { cls: 'bg-red-500/10 border-red-500/25 text-red-300', Icon: OctagonAlert },
+  info: { cls: 'bg-brand/10 border-brand/25 text-brand', Icon: Info },
+  warn: { cls: 'bg-amber-500/10 border-amber-500/25 text-amber-700', Icon: AlertTriangle },
+  danger: { cls: 'bg-red-500/10 border-red-500/25 text-red-700', Icon: OctagonAlert },
 } as const
 
 /** 统一告警/提示条：info / warn / danger 三档，替换散写的四种横幅。 */
@@ -132,7 +132,7 @@ export function ErrorState({ title = '加载失败', description, onRetry }: {
     <Alert tone="danger" title={title}
       action={onRetry ? (
         <button onClick={onRetry}
-          className="px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs transition-colors">
+          className="px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-700 text-xs transition-colors">
           重试
         </button>
       ) : undefined}>
