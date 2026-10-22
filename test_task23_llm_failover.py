@@ -201,12 +201,26 @@ class TestBackupModelStartupCheck(unittest.TestCase):
     只记日志不阻断。"""
 
     def test_example_config_backup_model_is_real(self):
+        """示例配置里备援段要么**整体留空**（= 无兜底），要么三者一致且模型名真实。
+
+        为什么允许留空：`llm_client._load_backup_config` 只在 base_url **且** api_key
+        都存在时才启用备援——一个没有端点的模型名不是"配了备援"，只会在 failover 时
+        照样 404，还让人误以为有兜底。上一版模板正是这种"孤立模型名"（tierflow_pro
+        配着空的 base_url），本次修掉。留空后由使用者按自己的端点填写（首启引导会给）。
+        """
         cfg = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
         backup = cfg.get("backup") or {}
-        self.assertTrue(str(backup.get("model") or "").strip(),
-                        "示例配置的备援模型名不得为空")
-        self.assertNotEqual(str(backup.get("model")), "DeepSeek-V4.1-Flash",
+        model = str(backup.get("model") or "").strip()
+        base = str(backup.get("base_url") or "").strip()
+        key = str(backup.get("api_key") or "").strip()
+        self.assertNotEqual(model, "DeepSeek-V4.1-Flash",
                             "备援模型名不得是端点上不存在的旧名")
+        if base or key:
+            # 配了端点就必须有真实模型名（否则 failover 404，切换形同虚设）
+            self.assertTrue(model, "配了备援端点就必须写该端点真实提供的模型名")
+        else:
+            self.assertEqual(model, "",
+                             "没有备援端点时不得留一个孤立的模型名（那不是兜底）")
 
     def test_same_model_name_warns_and_is_non_blocking(self):
         cfg = {"llm": {"base_url": "https://p/v1", "api_key": "k", "model": "m1"},

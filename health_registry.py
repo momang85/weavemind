@@ -483,7 +483,13 @@ def _live_probe_llm(target: str) -> dict:
     result = _probe_endpoint_status(base, key, model)
     ok = bool(result.get("ok"))
     reason = "" if ok else str(result.get("reason") or "unreachable")
-    return _wrap(ok, reason, f"base={base[:60]}, model={model or '-'}")
+    # detail 优先放"端点自己说的话"（带域名与状态码含义）：此前只回显 base/model 配置，
+    # 而 reason 枚举会被前端翻成"密钥无效或无权限"/"不可达"——端点错、模型名错、
+    # 真连不上这三类不同成因因此在界面上分不开（实测代价见 _probe_failure_message）。
+    msg = str(result.get("message") or "").strip()
+    detail = (f"{msg}（base={base[:60]}, model={model or '-'}）" if msg
+              else f"base={base[:60]}, model={model or '-'}")
+    return _wrap(ok, reason, detail)
 
 
 def _live_probe_embedding() -> dict:
@@ -499,7 +505,7 @@ def _live_probe_embedding() -> dict:
     import os as _os
     import urllib.error
     import urllib.request
-    from llm_client import _classify_probe_error
+    from llm_client import _classify_probe_error, _probe_failure_message
 
     section = _config_section("embedding")
     base = (_os.environ.get("EMBEDDING_BASE_URL") or str(section.get("base_url") or "")
@@ -524,12 +530,16 @@ def _live_probe_embedding() -> dict:
         ok = bool(raw)
         return _wrap(ok, "" if ok else "空响应", f"base={base[:60]}, model={model}")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:200]
-        reason = _classify_probe_error(
-            RuntimeError(f"HTTP {exc.code}: {detail}"))
-        return _wrap(False, reason, detail)
+        body = exc.read().decode("utf-8", errors="replace")[:200]
+        err = RuntimeError(f"HTTP {exc.code}: {body}")
+        # 嵌入失败最常见的原因不是"端点挂了"，而是"这个接入点没有嵌入能力/不认这个
+        # 嵌入模型名"（例如把 BAAI/bge-* 发给只提供对话模型的中转网关）。因此这里
+        # 也走同一句话生成器，让 detail 直接说清是模型名的问题还是端点的问题。
+        return _wrap(False, _classify_probe_error(err),
+                     _probe_failure_message(err, base, model))
     except Exception as exc:
-        return _wrap(False, _classify_probe_error(exc), str(exc)[:200])
+        return _wrap(False, _classify_probe_error(exc),
+                     _probe_failure_message(exc, base, model))
 
 
 def _live_probe_mcp() -> dict:

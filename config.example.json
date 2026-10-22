@@ -31,9 +31,10 @@
     }
   },
   "llm": {
+    "_comment": "base_url / model 必须与 api_key 是同一家服务商，因此模板里**故意留空**：此前填的是 SiliconFlow 的地址与模型名，而 config.json 不入库（.gitignore），新检出只能回退到这个模板——用户把自家（别家）密钥粘进预填表单，端点自然会回 401，界面又把它说成“密钥无效”，实测有人因此在 key 上白绕了两轮。留空后：配置页表单为空、首启引导出现，由使用者显式选择服务商（setup_wizard 提供 SiliconFlow 等服务商预设与“自定义 base_url”）。同理，embedding 段也留空——中转网关多半只有对话模型，拿 BAAI/bge-* 去打它只会得到“模型不存在”，表现是记忆检索悄悄降级。",
     "api_key": "YOUR_API_KEY",
-    "base_url": "https://api.siliconflow.cn/v1",
-    "model": "deepseek-ai/DeepSeek-V3",
+    "base_url": "",
+    "model": "",
     "model_roles": {
       "_comment": "按用途分级路由（planner/exec/judge）。留空即跟随主模型——首次只选一个服务/模型时，角色必须与之一致，不能继承模板里、该端点可能并不提供的模型名；要分级再显式填。",
       "planner": "",
@@ -48,9 +49,9 @@
     }
   },
   "embedding": {
-    "api_key": "YOUR_EMBEDDING_API_KEY",
-    "base_url": "https://api.siliconflow.cn/v1",
-    "model": "BAAI/bge-large-zh-v1.5"
+    "api_key": "",
+    "base_url": "",
+    "model": ""
   },
   "memory": {
     "_comment": "记忆治理（对标课程 3.4）：策略去重相似度阈值（Chroma L2 距离，越小越相似；完全一致≈0）、策略过期天数、对话上限（超出后按 timestamp 删最旧 10%）。可用环境变量 MEMORY_STRATEGY_DEDUP_THRESHOLD / MEMORY_STRATEGY_TTL_DAYS / MEMORY_CONVERSATIONS_MAX / MEMORY_CONVERSATION_DEDUP_HOURS 覆盖。",
@@ -69,7 +70,7 @@
     "_comment": "备用端点：主端点连续失败或余额不足时自动切换。留空即无兜底。model 必须是该端点真实提供的模型名（填不存在的名字，failover 时照样 404）；与主端点同名会启动时告警（能力不因切换而变）。",
     "api_key": "",
     "base_url": "",
-    "model": "tierflow_pro"
+    "model": ""
   },
   "users": {
     "admin": {

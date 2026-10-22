@@ -156,6 +156,8 @@ jobs:
         run: python test_source_exclusion_registry.py
       - name: "LLM stream fallback attribution, bad non-SSE response, probe path"
         run: python test_llm_stream_fallback_and_bad_response.py
+      - name: "Probe failure attribution (endpoint vs model vs transport) and template defaults"
+        run: python test_probe_error_attribution.py
       - name: "Orchestrator instance claim order (no cleanup before claim)"
         run: python test_orchestrator_claim_order.py
       - name: "Human review binding to current adopted version (F4)"

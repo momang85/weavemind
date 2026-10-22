@@ -83,3 +83,31 @@ test('端点状态不再直出 ok / unreachable（真机 settings.txt:28）', ()
   assert.match(weird, /状态未识别/)
   assert.match(weird, /weird_state_xyz/)
 })
+
+test('后端给了带域名的整句原因就原样展示，不再被枚举覆盖（2026-10-22 新人实例）', () => {
+  // 实测：tierflow 的 key 被填进模板预填的 SiliconFlow 端点 → 401。旧行为只显示
+  // 「密钥无效或无权限」，人先去换 key；key 本身有效，错在端点与密钥不同源。
+  const mismatch = balanceStatusText(
+    false, 'unauthorized',
+    'api.siliconflow.cn 返回 401：该接入点不认这把密钥——密钥与接入点必须是同一家服务商')
+  assert.match(mismatch, /api\.siliconflow\.cn/, '必须点明是哪个端点在拒绝')
+  assert.match(mismatch, /同一家服务商/, '必须给出「端点与密钥同源」这条判断')
+  assert.doesNotMatch(mismatch, /^密钥无效或无权限$/, '不得退回到没有信息量的枚举文案')
+
+  // 反向误判：模型名不被接入点支持（400/404）时，枚举是 unreachable，旧界面说「不可达」，
+  // 人会去查网络与代理；这类失败的成因在模型名，必须说出来。
+  const modelWrong = balanceStatusText(
+    false, 'unreachable',
+    'tierflow.cn 返回 400：请求被拒，模型名（当前模型名：tierflow_pro）可能不被该接入点支持')
+  assert.match(modelWrong, /模型名/, '模型名错不得被说成网络问题')
+  assert.match(modelWrong, /tierflow\.cn/)
+
+  // 真的连不上时仍说连不上（别把这条修成"所有失败都像配错"）
+  assert.match(balanceStatusText(false, 'unreachable', '连不上 api.x.com：timed out（网络/代理/DNS）'),
+    /连不上/)
+
+  // ok 恒为「正常」；没有 message 时行为与之前完全一致（老页面/老缓存不回归）
+  assert.equal(balanceStatusText(true, 'ok', '随便一句'), '正常')
+  assert.equal(balanceStatusText(false, 'unreachable'), '不可达')
+  assert.equal(balanceStatusText(false, 'unauthorized'), '密钥无效或无权限')
+})

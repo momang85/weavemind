@@ -280,7 +280,7 @@ export interface SystemStatus {
   llm_warning?: string
   llm_health?: {
     healthy?: boolean
-    balance?: Record<string, { ok?: boolean; reason?: string }>
+    balance?: Record<string, { ok?: boolean; reason?: string; message?: string }>
     diversity?: EndpointDiversity
   }
 }

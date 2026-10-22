@@ -433,8 +433,8 @@ export default function SettingsPage() {
           </div>
         ) : null}
         <div className="text-xs text-slate-500">
-          余额：主端点 {balanceStatusText(req?.balance?.primary?.ok, req?.balance?.primary?.reason)}
-          {' · '}备用 {balanceStatusText(req?.balance?.backup?.ok, req?.balance?.backup?.reason)}
+          余额：主端点 {balanceStatusText(req?.balance?.primary?.ok, req?.balance?.primary?.reason, req?.balance?.primary?.message)}
+          {' · '}备用 {balanceStatusText(req?.balance?.backup?.ok, req?.balance?.backup?.reason, req?.balance?.backup?.message)}
           {req?.budget?.limit_usd ? ` · 本月已用 $${req.budget.spend_usd ?? 0} / $${req.budget.limit_usd}` : ''}
           <span className="text-slate-600">
             （口径：主/备为 LLM 端点预检结果——能否连通、鉴权是否通过、额度是否够用，不是金额读数；
@@ -474,9 +474,14 @@ export default function SettingsPage() {
             {testResult[testable || ''] && (
               <div className={`text-xs rounded-lg px-3 py-2 ${testResult[testable || ''].ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>
                 {testResult[testable || ''].ok ? '连通正常' : '异常'} · {testResult[testable || ''].latency_ms}ms
-                {testResult[testable || ''].reason
-                  ? ` · ${balanceStatusText(testResult[testable || ''].ok, testResult[testable || ''].reason)}`
+                {testResult[testable || ''].reason || testResult[testable || ''].detail
+                  ? ` · ${balanceStatusText(testResult[testable || ''].ok, testResult[testable || ''].reason, testResult[testable || ''].detail)}`
                   : ''}
+                {/* detail 是后端给的「带端点域名的整句原因」（含 base/model 回显）：失败时
+                    单独一行显示，避免与上面的状态词挤成一句读不完的长行。 */}
+                {!testResult[testable || ''].ok && testResult[testable || ''].detail ? (
+                  <div className="mt-1 text-slate-400 break-all">{testResult[testable || ''].detail}</div>
+                ) : null}
               </div>
             )}
             {groups.length > 0 ? groups.map(g => (

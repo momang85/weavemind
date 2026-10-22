@@ -4,11 +4,22 @@
 
 import { resultLabel } from './statusMeta.ts'
 
-/** 上游端点状态：把后端 reason 的英文枚举翻成中文；识别不了的如实标注，不猜。 */
-export function balanceStatusText(ok: unknown, reason?: string | null): string {
+/** 上游端点状态：把后端 reason 的英文枚举翻成中文；识别不了的如实标注，不猜。
+ *
+ *  `message` 是后端新给的「带端点域名的一整句人话」（llm_client._probe_failure_message）。
+ *  为什么让它优先于 reason 枚举：同一个探测失败至少有三类互斥成因——端点不认这把
+ *  密钥（401）、接入点不认这个模型名（400/404）、真的连不上（超时/DNS）——枚举把
+ *  后两类折叠成 unreachable，界面据此只会说「不可达」，而 401 又只会说「密钥无效」。
+ *  实测 2026-10-22 的新人实例因此先换 key（其实 key 有效，错在端点）、后查代理
+ *  （其实错在模型名），两轮方向都被指反。所以后端给了 message 就原样展示，不再猜。
+ */
+export function balanceStatusText(ok: unknown, reason?: string | null, message?: string | null): string {
   const raw = String(reason ?? '').trim()
   const key = raw.toLowerCase()
-  if (!raw) return ok ? '正常' : '未回传原因'
+  const msg = String(message ?? '').trim()
+  if (ok) return '正常'
+  if (/[\u4e00-\u9fff]/.test(msg)) return msg
+  if (!raw) return msg || '未回传原因'
   if (/^ok$/.test(key) || key === 'healthy' || key === 'available') return '正常'
   if (key === 'unreachable') return '不可达'
   if (key === 'timeout' || key === 'timed out' || /timed?\s*out/.test(key)) return '超时'

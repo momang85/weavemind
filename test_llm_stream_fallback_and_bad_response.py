@@ -482,7 +482,9 @@ class TestRequestAndRetryPath(_F2Base):
                 "https://api.example/v1", "k", "m")
         after = lc.get_unattributed_diagnostics()
 
-        self.assertEqual(status, {"ok": True, "reason": "ok"})
+        # message 是给设置页的一整句人话（带端点域名，见 test_probe_error_attribution）：
+        # 成功时固定为空串，保持返回形状稳定，避免消费方需要判断字段是否存在。
+        self.assertEqual(status, {"ok": True, "reason": "ok", "message": ""})
         self.assertIs(seen.get("stream"), False,
                       "探测必须显式非流式（不制造 404→回退）")
         self.assertEqual(after["calls"], before["calls"] + 1,

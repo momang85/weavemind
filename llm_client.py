@@ -966,6 +966,86 @@ def _classify_probe_error(exc: Exception) -> str:
     return "unreachable"
 
 
+_SECRET_PATTERNS = (
+    # 上游错误体常常回显密钥片段（"invalid api_key sk-xxx"），而这句话会被写进
+    # /api/status、设置页与会话日志——先脱敏再拼进人话，避免诊断顺手泄露凭据。
+    (re.compile(r"sk-[A-Za-z0-9_\-]{6,}"), "sk-***"),
+    (re.compile(r"(?i)(authorization|api[_-]?key)\s*[:=]\s*\S+"), r"\1=***"),
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{6,}"), "Bearer ***"),
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """抹掉诊断文本里可能回显的凭据（只用于给人看的错误句子）。"""
+    out = str(text or "")
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _endpoint_host(base_url: str) -> str:
+    """base_url → 展示用主机名（去 scheme/路径，保留端口）。"""
+    raw = str(base_url or "").strip()
+    try:
+        from urllib.parse import urlsplit
+        netloc = urlsplit(raw).netloc
+        if netloc:
+            return netloc
+    except Exception:
+        pass
+    return raw[:80]
+
+
+def _probe_failure_message(exc: Exception, base_url: str, model: str) -> str:
+    """探测失败 → 一句带端点域名的人话（供设置页原样展示，不再二次翻译）。
+
+    为什么不能只靠 `_classify_probe_error` 的枚举：同一个"探测失败"至少有三类
+    互斥成因，而枚举把前两类折叠掉了——
+    - **端点错**（401/403）：这个接入点不认这把密钥。真实原因通常是"密钥与接入点
+      不是同一家服务商"（新检出没有 config.json 时配置回退随包模板，模板里是别家
+      端点，用户把自家 key 粘进去必然 401），但枚举只叫 unauthorized，界面据此写
+      "密钥无效或无权限"，把人指向换 key。
+    - **模型名错**（400/404）：接入点不认这个模型名（把 tierflow_pro 填到 SiliconFlow、
+      或把 bge 嵌入模型发给没有嵌入能力的网关）。枚举落进 unreachable，界面写"不可达"，
+      把人指向查网络与代理。
+    - **真连不上**（超时/DNS/代理）：这一类才该说"不可达"。
+
+    实测代价见 2026-10-22 的新人实例：一句话"密钥无效"让人先去换 key（换了才发现
+    问题在端点），随后又遇到"不可达"而去查代理——两轮都指向了错误的方向。
+    """
+    host = _endpoint_host(base_url) or "端点"
+    text = _scrub_secrets(str(exc or ""))
+    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    model_hint = f"（当前模型名：{model}）" if model else ""
+    m = re.search(r"HTTP[ _-]?(\d{3})", text)
+    if m:
+        code = m.group(1)
+        low = text.lower()
+        if any(k in low for k in ("insufficient", "balance", "credit")):
+            return f"{host} 返回 {code}：账户余额/额度不足，先充值或换端点"
+        if code == "402":
+            return f"{host} 返回 402：账户余额/额度不足"
+        if code in ("401", "403"):
+            why = ("该接入点不认这把密钥——密钥与接入点必须是同一家服务商"
+                   if code == "401" else
+                   "密钥被拒绝：可能是权限域/IP 限制，也可能不是这家服务商的密钥")
+            return f"{host} 返回 {code}：{why}"
+        if code == "404":
+            # 404 本身是歧义的：既可能是 base_url 路径不对，也可能是该端点不提供这个
+            # 模型（网关对未知模型常回 404 而不是 400）。两个可能都写出来，别二选一猜。
+            return (f"{host} 返回 404：接入点没有该路径、或没有这个模型{model_hint}"
+                    f"（检查 base_url 是否该以 /v1 结尾，以及模型名是否由该端点提供）")
+        if code in ("400", "422"):
+            return (f"{host} 返回 {code}：请求被拒，模型名{model_hint}"
+                    f"可能不被该接入点支持")
+        if code == "429":
+            return f"{host} 返回 429：请求过于频繁（限流），稍后重试"
+        tail = first_line[:120] if first_line else "上游返回错误"
+        return f"{host} 返回 {code}：{tail}"
+    tail = first_line[:120] if first_line else "连接失败"
+    return f"连不上 {host}：{tail}（网络/代理/DNS）"
+
+
 def _probe_endpoint_status(
     base_url: str, api_key: str, model: str, endpoint: str = "primary",
 ) -> dict:
@@ -1000,12 +1080,16 @@ def _probe_endpoint_status(
         if isinstance(_u, dict) and _u:
             tokens = (int(_u.get("prompt_tokens") or 0)
                       + int(_u.get("completion_tokens") or 0))
-        return {"ok": True, "reason": "ok"}
+        return {"ok": True, "reason": "ok", "message": ""}
     except Exception as exc:
         if getattr(exc, "thinking_budget_exhausted", False):
             # 端点可达且鉴权通过，只是探测预算被推理吃光
-            return {"ok": True, "reason": "ok"}
-        return {"ok": False, "reason": _classify_probe_error(exc)}
+            return {"ok": True, "reason": "ok", "message": ""}
+        # message 是给人看的一句话（带端点域名与状态码含义）；reason 仍是机器枚举，
+        # 路由/降级判定继续只用 reason，两者互不替代。
+        return {"ok": False,
+                "reason": _classify_probe_error(exc),
+                "message": _probe_failure_message(exc, base_url, model)}
     finally:
         if not get_task_context():
             _note_no_root_call("probe", "llm:probe", tokens=tokens, warn=False)
