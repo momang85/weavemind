@@ -154,6 +154,20 @@ jobs:
         run: python test_search_candidate_kept.py
       - name: "Source exclusion audit (candidate vs adopted vs excluded, package inclusion)"
         run: python test_source_exclusion_registry.py
+      - name: "Source admission (subject / period / purpose / as-of; pending vs rejected)"
+        run: python test_source_admission.py
+      - name: "Research intent & contract chain (free text research, scope boundary, no silent backfill)"
+        run: python test_research_intent.py
+      - name: "Trusted egress diagnosis (address classes, bounded probes, no secrets)"
+        run: python test_net_diag.py
+      - name: "Workspace addressing (stable root, read-only reads, history readability)"
+        run: python test_workspace_addressing.py
+      - name: "Search evidence audit (attempts vs adopted, stage budget, no-regain stop)"
+        run: python test_search_evidence.py
+      - name: "Build identity (disk vs loaded source, frontend build, no path/key leak)"
+        run: python test_build_identity.py
+      - name: "Test vs production log isolation (WEAVEMIND_LOG_DIR priority, tempdir fallback)"
+        run: python test_log_isolation.py
       - name: "LLM stream fallback attribution, bad non-SSE response, probe path"
         run: python test_llm_stream_fallback_and_bad_response.py
       - name: "Probe failure attribution (endpoint vs model vs transport) and template defaults"

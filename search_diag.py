@@ -54,10 +54,14 @@ KNOWN_DISCLOSURE_URL = "https://data.eastmoney.com/notices/detail/002304/AN20250
 
 # 错误分类（专项 §4 的类别表）。这一层的核心目的是区分
 # "正常没找到"（no_results / no_relevant_results）与"根本没有完成查询"（其余）。
+# P0-B（20261022）新增两个：`reserved_address`（解析成功但地址落在保留段，fake-IP 特征，
+# 与"解析失败"和"策略拒绝"分开——三者需要不同的下一步）；`connect_error`（连接被拒/
+# 被重置——此前归 parse_error，会把"连不上"误读成"解析坏了"）。
 ERROR_CLASSES = (
     "missing_dependency", "not_configured", "proxy_error", "dns_error", "tls_error",
-    "timeout", "policy_blocked", "auth_error", "rate_limited", "challenge",
-    "parse_error", "no_results", "no_relevant_results", "partial", "ok",
+    "timeout", "policy_blocked", "reserved_address", "connect_error", "auth_error",
+    "rate_limited", "challenge", "parse_error", "no_results", "no_relevant_results",
+    "partial", "ok",
 )
 _RESULT_CLASSES = ("ok", "no_results", "no_relevant_results", "partial")
 
@@ -118,12 +122,19 @@ def classify_error(exc: BaseException) -> str:
         return "parse_error"
     if isinstance(exc, ssl.SSLError) or "certificate verify failed" in text:
         return "tls_error"
+    # 策略拒绝里"解析到非公网地址"单列：它不是"站点坏了"，而是本机 DNS 落到了保留段
+    if "非公网地址" in text or "reserved_address" in text:
+        return "reserved_address"
     if isinstance(exc, socket.gaierror) or "getaddrinfo" in text or "nodename" in text \
             or "name or service not known" in text:
         return "dns_error"
     if isinstance(exc, (TimeoutError, socket.timeout)) or "timed out" in text \
             or "timeout" in text:
         return "timeout"
+    # 连接被拒/被重置：请求根本没出去或没建立成功，不是"解析坏了"也不是"站点坏了"
+    if isinstance(exc, (ConnectionRefusedError, ConnectionResetError,
+                        ConnectionAbortedError, BrokenPipeError)):
+        return "connect_error"
     if "proxy" in text:
         return "proxy_error"
     if "policy" in text or "disallowed" in text or "blocked" in text:

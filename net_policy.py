@@ -53,11 +53,28 @@ _KNOWN_METADATA_HOSTS = (
 
 
 class NetworkPolicyError(RuntimeError):
-    """策略拒绝（未登记端点 / 内容派生 URL 触达内网 / 配置非法）。"""
+    """策略拒绝（未登记端点 / 内容派生 URL 触达内网 / 配置非法）。
+
+    `category` 与 search_diag 的类别表对齐（P0-B，20261022）：让上层把"策略拒绝"再
+    分成 `policy_blocked` / `reserved_address` / `dns_error`，而不是统统压成
+    一句话——用户此前分不清"密钥问题"和"出口被 DNS 映射到保留段"。
+    """
+
+    def __init__(self, message: str, category: str = "policy_blocked"):
+        super().__init__(message)
+        self.category = str(category or "policy_blocked")
 
 
 class FetchError(RuntimeError):
-    """抓取在执行层失败（连接、TLS、超时、响应过大）——与策略拒绝区分开。"""
+    """抓取在执行层失败（连接、TLS、超时、响应过大）——与策略拒绝区分开。
+
+    `category`：执行层失败的细分（tls_error / connect_error / timeout / …），
+    由抛出点给出；分类规则与 search_diag 对齐。
+    """
+
+    def __init__(self, message: str, category: str = "connect_error"):
+        super().__init__(message)
+        self.category = str(category or "connect_error")
 
 
 # ── 出口方式（S2：显式区分继承代理 / 明确直连，不由异常分支擅自切换）──────
@@ -164,6 +181,24 @@ def _exception_chain(exc: BaseException) -> list:
     return out
 
 
+def _connect_error_category(exc: BaseException, default: str = "connect_error") -> str:
+    """连接阶段异常 → 细分诊断类别（P0-B）：TLS 失败单列，超时单列，其余算连接失败。
+
+    只看异常链的类型，不猜网络配置：TLS 握手失败（证书无效/不信任）必须与
+    "根本连不上"分开——前者通常是系统时间/CA 信任问题，后者才指向出口/DNS。
+    """
+    chain = _exception_chain(exc)
+    if any(isinstance(e, ssl.SSLError) for e in chain):
+        return "tls_error"
+    if any(isinstance(e, (socket.timeout, TimeoutError)) for e in chain):
+        return "timeout"
+    if any(isinstance(e, (ConnectionRefusedError, ConnectionResetError,
+                          ConnectionAbortedError, BrokenPipeError, OSError,
+                          socket.gaierror)) for e in chain):
+        return default
+    return default
+
+
 def _is_connect_stage_failure(exc: BaseException) -> bool:
     """失败是否发生在**连接建立阶段**（不是"已建连、正在说 HTTP 时断了"）。
 
@@ -212,7 +247,15 @@ def proxy_settings_report() -> dict:
 
 
 def classify_network_error(exc: BaseException) -> str:
-    """网络异常 → 与专项 §4 同一套诊断类别（代理失败单列 `proxy_error`）。"""
+    """网络异常 → 与专项 §4 同一套诊断类别（代理失败单列 `proxy_error`）。
+
+    P0-B（20261022）：本模块自己的 `NetworkPolicyError`/`FetchError` 已带细分
+    `category`，直接透传——上层不再把"策略拒了"与"连不上"混成一句话。
+    """
+    if isinstance(exc, NetworkPolicyError) and getattr(exc, "category", ""):
+        return str(exc.category)
+    if isinstance(exc, FetchError) and getattr(exc, "category", ""):
+        return str(exc.category)
     if is_proxy_failure(exc):
         return "proxy_error"
     try:
@@ -239,6 +282,9 @@ class Decision:
     url: str = ""
     kind: str = ""          # "public" | "registered"
     redacted: str = ""      # 审计用的脱敏目标
+    # 诊断类别（P0-B，20261022）：ok / policy_blocked / dns_error /
+    # reserved_address —— 与 search_diag 类别表对齐，上层据此可操作地表述
+    category: str = ""
 
     def __bool__(self) -> bool:      # 便于 `if decision:`
         return self.ok
@@ -392,16 +438,19 @@ def validate_public_url(url: str) -> Decision:
     try:
         parts = urllib.parse.urlsplit(str(url or ""))
     except Exception:
-        return Decision(False, "URL 无法解析", redacted=red)
+        return Decision(False, "URL 无法解析", redacted=red, category="unparsable_url")
     if parts.scheme not in ALLOWED_SCHEMES:
-        return Decision(False, f"协议不允许：{parts.scheme or '(空)'}", redacted=red)
+        return Decision(False, f"协议不允许：{parts.scheme or '(空)'}", redacted=red,
+                        category="policy_blocked")
     if parts.username or parts.password:
-        return Decision(False, "URL 不得携带用户凭据", redacted=red)
+        return Decision(False, "URL 不得携带用户凭据", redacted=red,
+                        category="policy_blocked")
     host = (parts.hostname or "").lower().rstrip(".")
     if not host:
-        return Decision(False, "缺少主机名", redacted=red)
+        return Decision(False, "缺少主机名", redacted=red, category="unparsable_url")
     if host == "localhost" or host.endswith(".localhost") or host in _KNOWN_METADATA_HOSTS:
-        return Decision(False, f"目标是本机/元数据服务：{host}", redacted=red)
+        return Decision(False, f"目标是本机/元数据服务：{host}", redacted=red,
+                        category="policy_blocked")
 
     literal = _parse_ip(host)
     if literal is not None:
@@ -409,11 +458,13 @@ def validate_public_url(url: str) -> Decision:
     else:
         ips, err = _resolve_all(host, parts.port or 0)
     if err:
-        return Decision(False, err, redacted=red)
+        return Decision(False, err, redacted=red, category="dns_error")
     bad = [a for a in ips if not _ip_is_public(_parse_ip(a))]
     if bad:
-        return Decision(False, f"解析到非公网地址：{','.join(bad)}", redacted=red)
-    return Decision(True, "", resolved=tuple(ips), url=url, kind="public", redacted=red)
+        return Decision(False, f"解析到非公网地址：{','.join(bad)}", redacted=red,
+                        category="reserved_address")
+    return Decision(True, "", resolved=tuple(ips), url=url, kind="public",
+                    redacted=red, category="ok")
 
 
 # ── 登记端点 ─────────────────────────────────────────────────────
@@ -426,39 +477,44 @@ def request_service(endpoint_id: str, operation: str = "", **kwargs) -> Decision
     """
     for forbidden in ("trusted", "allow_private", "allow_internal"):
         if kwargs.pop(forbidden, None):
-            return Decision(False, f"调用方不得自报 {forbidden}（私网例外只由登记项授予）")
+            return Decision(False, f"调用方不得自报 {forbidden}（私网例外只由登记项授予）",
+                            redacted=f"endpoint:{endpoint_id or ''}",
+                            category="policy_blocked")
     key = str(endpoint_id or "").strip()
     ep = load_registry().get(key)
     if ep is None:
-        return Decision(False, f"未登记的端点：{key or '(空)'}", redacted=f"endpoint:{key}")
+        return Decision(False, f"未登记的端点：{key or '(空)'}",
+                        redacted=f"endpoint:{key}", category="policy_blocked")
     if operation and ep.operations and operation not in ep.operations:
-        return Decision(False, f"端点 {key} 不允许操作 {operation}", redacted=f"endpoint:{key}")
+        return Decision(False, f"端点 {key} 不允许操作 {operation}",
+                        redacted=f"endpoint:{key}", category="policy_blocked")
 
     literal = _parse_ip(ep.host)
     if literal is not None:
         if not _ip_is_public(literal) and not ep.loopback_ok:
             return Decision(False, f"端点 {key} 指向内部地址但未标记为本地服务",
-                            redacted=f"endpoint:{key}")
+                            redacted=f"endpoint:{key}", category="reserved_address")
         return Decision(True, "", resolved=(str(literal),), url=ep.base_url(),
-                        kind="registered", redacted=f"endpoint:{key}")
+                        kind="registered", redacted=f"endpoint:{key}", category="ok")
 
     ips, err = _resolve_all(ep.host, ep.port)
     if err:
-        return Decision(False, f"端点 {key} 解析失败：{err}", redacted=f"endpoint:{key}")
+        return Decision(False, f"端点 {key} 解析失败：{err}",
+                        redacted=f"endpoint:{key}", category="dns_error")
     if not ep.loopback_ok:
         bad = [a for a in ips if not _ip_is_public(_parse_ip(a))]
         if bad:
             return Decision(False, f"端点 {key} 解析到非公网地址：{','.join(bad)}",
-                            redacted=f"endpoint:{key}")
+                            redacted=f"endpoint:{key}", category="reserved_address")
     return Decision(True, "", resolved=tuple(ips), url=ep.base_url(),
-                    kind="registered", redacted=f"endpoint:{key}")
+                    kind="registered", redacted=f"endpoint:{key}", category="ok")
 
 
 def require_service(endpoint_id: str, operation: str = "") -> str:
     """登记端点的 base_url（不通过即抛 `NetworkPolicyError`）。供客户端调用点使用。"""
     d = request_service(endpoint_id, operation)
     if not d.ok:
-        raise NetworkPolicyError(d.reason)
+        raise NetworkPolicyError(d.reason, category=d.category)
     return d.url
 
 
@@ -528,7 +584,7 @@ def fetch_document(url: str, *, timeout: float | None = None,
     decision = validate_public_url(url)
     audit_decision(decision, action="fetch_document")
     if not decision.ok:
-        raise NetworkPolicyError(decision.reason)
+        raise NetworkPolicyError(decision.reason, category=decision.category)
 
     parts = urllib.parse.urlsplit(url)
     host = (parts.hostname or "").lower()
@@ -557,14 +613,17 @@ def fetch_document(url: str, *, timeout: float | None = None,
         return root_deadline - time.monotonic()
 
     last_error = ""
+    last_category = "connect_error"
     for ip in decision.resolved:
         remain = _remaining()
         if remain <= 0:
-            raise FetchError(f"总截止 {budget:g}s 已用尽，未试完 {len(decision.resolved)} 个地址")
+            raise FetchError(f"总截止 {budget:g}s 已用尽，未试完 {len(decision.resolved)} 个地址",
+                             category="timeout")
         try:
             sock = _connect_pinned(ip, port, host, parts.scheme, remain)
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            last_category = _connect_error_category(exc)
             continue
         try:
             hdrs = {"Host": host, "User-Agent": "WeaveMind/1.0 (+policy:public-only)",
@@ -583,7 +642,7 @@ def fetch_document(url: str, *, timeout: float | None = None,
             sock.sendall(request)
             remain = _remaining()
             if remain <= 0:
-                raise FetchError(f"总截止 {budget:g}s 在发出请求后用尽")
+                raise FetchError(f"总截止 {budget:g}s 在发出请求后用尽", category="timeout")
             # 不预读、不提前关闭：解析器自己按截止线读，读完（或报错）才关连接
             return _read_http_response(sock, url=url, egress=egress, cap=cap,
                                        budget=remain)
@@ -591,13 +650,14 @@ def fetch_document(url: str, *, timeout: float | None = None,
             raise
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            last_category = _connect_error_category(exc, default=last_category)
             continue
         finally:
             try:
                 sock.close()
             except Exception:
                 pass
-    raise FetchError(last_error or "连接失败")
+    raise FetchError(last_error or "连接失败", category=last_category)
 
 
 def fetch_service(endpoint_id: str, *, path: str = "", params=None, headers=None,
@@ -652,14 +712,17 @@ def fetch_service(endpoint_id: str, *, path: str = "", params=None, headers=None
 
     egress = "registered_pinned"
     last_error = ""
+    last_category = "connect_error"
     for ip in decision.resolved:
         remain = _remaining()
         if remain <= 0:
-            raise FetchError(f"总截止 {budget:g}s 已用尽，未试完 {len(decision.resolved)} 个地址")
+            raise FetchError(f"总截止 {budget:g}s 已用尽，未试完 {len(decision.resolved)} 个地址",
+                             category="timeout")
         try:
             sock = _connect_pinned(ip, port, host, parts.scheme, remain)
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            last_category = _connect_error_category(exc)
             continue
         try:
             hdrs = {"Host": host, "User-Agent": "WeaveMind/1.0 (+policy:registered-service)",
@@ -675,20 +738,21 @@ def fetch_service(endpoint_id: str, *, path: str = "", params=None, headers=None
             sock.sendall(request)
             remain = _remaining()
             if remain <= 0:
-                raise FetchError(f"总截止 {budget:g}s 在发出请求后用尽")
+                raise FetchError(f"总截止 {budget:g}s 在发出请求后用尽", category="timeout")
             return _read_http_response(sock, url=base, egress=egress, cap=cap,
                                        budget=remain)
         except FetchError:
             raise
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            last_category = _connect_error_category(exc, default=last_category)
             continue
         finally:
             try:
                 sock.close()
             except Exception:
                 pass
-    raise FetchError(last_error or "连接失败")
+    raise FetchError(last_error or "连接失败", category=last_category)
 
 
 def invalidate_registry() -> None:
@@ -719,11 +783,12 @@ def _gunzip_bounded(raw: bytes, cap: int) -> bytes:
         data = obj.unconsumed_tail
         total += len(chunk)
         if total > cap:
-            raise FetchError(f"解压后超过上限 {cap} 字节（已在解压过程中停止）")
+            raise FetchError(f"解压后超过上限 {cap} 字节（已在解压过程中停止）",
+                             category="response_too_large")
         out.append(chunk)
     tail = obj.flush()
     if total + len(tail) > cap:
-        raise FetchError(f"解压后超过上限 {cap} 字节（收尾阶段）")
+        raise FetchError(f"解压后超过上限 {cap} 字节（收尾阶段）", category="response_too_large")
     out.append(tail)
     return b"".join(out)
 
@@ -755,22 +820,27 @@ def _read_http_response(sock, *, url: str, egress: str, cap: int, budget: float)
         resp.begin()
     except (TimeoutError, socket.timeout) as exc:
         _close_quietly(resp)
-        raise FetchError(f"读取超时（总截止 {budget:g}s，响应头未读完）：{str(exc)[:80]}")
+        raise FetchError(f"读取超时（总截止 {budget:g}s，响应头未读完）：{str(exc)[:80]}",
+                             category="timeout")
     except Exception as exc:                          # noqa: BLE001
         _close_quietly(resp)
-        raise FetchError(f"响应解析失败：{type(exc).__name__}: {str(exc)[:120]}")
+        raise FetchError(f"响应解析失败：{type(exc).__name__}: {str(exc)[:120]}",
+                             category="parse_error")
     status = int(getattr(resp, "status", 0) or 0)
     hdrs = {str(k).lower(): str(v) for k, v in (resp.getheaders() or [])}
     if 300 <= status < 400:
-        raise FetchError(f"目标返回重定向（{status}），按策略不自动跟随")
+        raise FetchError(f"目标返回重定向（{status}），按策略不自动跟随",
+                         category="policy_blocked")
     try:
         body = read_with_deadline(resp, deadline, max_bytes=cap)
     except ResponseTooLarge:
-        raise FetchError(f"响应体超过上限 {cap} 字节")
+        raise FetchError(f"响应体超过上限 {cap} 字节", category="response_too_large")
     except TimeoutError as exc:
-        raise FetchError(f"读取超时（总截止 {budget:g}s）：{str(exc)[:80]}")
+        raise FetchError(f"读取超时（总截止 {budget:g}s）：{str(exc)[:80]}",
+                         category="timeout")
     except Exception as exc:                          # noqa: BLE001
-        raise FetchError(f"读取失败：{type(exc).__name__}: {str(exc)[:120]}")
+        raise FetchError(f"读取失败：{type(exc).__name__}: {str(exc)[:120]}",
+                         category=_connect_error_category(exc, default="parse_error"))
     if str(hdrs.get("content-encoding") or "").lower() == "gzip":
         # **有界解压**（K0-c）：`gzip.decompress` 会先把整包解开再让我们检查上限——
         # 一个 8 MiB 的压缩炸弹能先展开成几 GB。这里逐块解、每块都查上限，超了立刻停。
@@ -779,7 +849,8 @@ def _read_http_response(sock, *, url: str, egress: str, cap: int, budget: float)
         except FetchError:
             raise
         except Exception as exc:                      # noqa: BLE001
-            raise FetchError(f"gzip 解码失败：{type(exc).__name__}: {str(exc)[:80]}")
+            raise FetchError(f"gzip 解码失败：{type(exc).__name__}: {str(exc)[:80]}",
+                             category="parse_error")
     charset = "utf-8"
     ctype = str(hdrs.get("content-type") or "")
     if "charset=" in ctype:

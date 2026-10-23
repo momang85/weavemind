@@ -387,7 +387,13 @@ def _candidate_inadmissible(title: str, url: str, contract: dict) -> bool:
     as_of = str((contract or {}).get("as_of") or "")
     try:
         if ne._subject_state(doc, company, code) == "mismatch":
-            return True
+            # P0-C 修正：上市主体**全称**（"内蒙古伊利实业集团股份有限公司"）同样
+            # 带"集团"后缀，会被上面的形态启发式误判成别家主体。归一后命中且是
+            # "股份有限公司"全称形态的，认定为同一主体（不误杀正确披露）；
+            # 集团/母公司名（"江苏洋河集团有限公司"，无"股份有限公司"）维持排除。
+            import source_admission as _sa
+            if not _sa._norm_subject_hit(doc, company, code, issuer_form_only=True):
+                return True
         parts = ne._date_parts(ne._published_at(doc))
         cut = ne._date_parts(as_of)
         if parts and cut and parts[1] == "day" and parts[0] > cut[0]:
@@ -2998,6 +3004,29 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 continue          # 已抓过的页面不再选（研究路径的第二个抓取步骤）
             if contract and _candidate_inadmissible(title, url, contract):
                 continue          # 元数据已证明不适用（错主体/晚于截止/期间不符）
+            # P0-C：**统一准入门槛**（与来源桶同一条判据）。宏观/行业背景、正文核验后
+            # 非本公司披露的候选**不抓**；待核验（元数据不足）允许受限抓取（有界验证），
+            # 但已准入的候选优先于待核验——此前最高分选择没有任何最低相关性门槛，
+            # 统计公报/轴承页照样被抓回并摘要（2026-10-22 诊断 P0-3）。
+            _adm_stage = ""
+            _adm: dict = {}
+            if contract and (str(contract.get("company") or "")
+                             or str(contract.get("company_id") or "")):
+                try:
+                    import source_admission as _sa
+                    _adm = _sa.admit(
+                        {"title": title, "url": url,
+                         "snippet": str(it.get("snippet") or it.get("summary") or "")},
+                        contract)
+                    _adm_stage = str(_adm.get("stage") or "")
+                except Exception:            # noqa: BLE001 - 判据不可用按原评分走
+                    _adm_stage = ""
+                if _adm_stage == "rejected":
+                    continue
+                if str(_adm.get("purpose") or "") in ("macro_background",
+                                                       "industry_background"):
+                    # 宏观/行业材料不是公司财务证据：即便"待核验"也不在这条通道抓
+                    continue
             low_t = title.lower()
             low_u = url.lower()
             score = 0
@@ -3052,6 +3081,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     else:
                         score -= 4
             # 平局时官方源优先（如标题关键词得分相同，港交所/IR 页胜出）
+            if _adm_stage == "admitted":
+                score += 4           # 已准入 > 待核验（同分时先抓已验证过主体的）
+            elif _adm_stage == "pending":
+                score -= 1           # 待核验：允许有界验证，但不与本已准入者争位
             if score > best_score or (
                 score == best_score and is_official and not best_is_official
             ):
@@ -3142,6 +3175,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     DEAD_SOURCES_FILE = "dead_sources.json"
     # F1：剔除审计（工作区 project/ 下；打包含为 audit/source_exclusions.json）
     SOURCE_EXCLUSIONS_FILE = "source_exclusions.json"
+    # P0-C：待核验（元数据不足，未完成有界验证）单列——它不是"已剔除"（可能是
+    # 正在路上的证据），也绝不是"已准入"。
+    SOURCE_PENDING_FILE = "source_pending.json"
     DEAD_FETCH_KEY_PREFIX = "dead_fetch:"
 
     def dead_sources_records(self, task_id: str) -> list:
@@ -3174,6 +3210,84 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return str(ws / self.DEAD_SOURCES_FILE)
         except Exception as exc:                # noqa: BLE001 - 辅助文件不阻断报告步骤
             logger.warning("dead_sources.json 写入失败（task=%s）：%s",
+                           task_id, str(exc)[:120])
+            return ""
+
+    def _record_source_exclusion(self, task_id: str, items, stage_hint: str = "") -> None:
+        """P0-C：把本轮判为**不进来源清单**的候选记进审计，按准入结论分两本账。
+
+        - `rejected`（明确不适用，含"只能作背景"）→ `_task_excluded_sources`
+          （`source_exclusions.json`，剔除审计）；
+        - `pending`（待核验：元数据不足，未完成有界验证）→ `_task_pending_sources`
+          （`source_pending.json`，待核验清单）——它不是"已剔除"（可能是正在路上
+          的证据，抓一次正文后按同一判据复核），也绝不是"已准入"。
+
+        判据：条目自带 `_admission.stage`；没有标记时按 reason 前缀"待核验"归
+        pending（向后兼容旧调用点）。两者 reason 都写清"对着谁判的"，报告缺口行
+        与交付包 audit/ 里如实区分，而不是混成一条"已剔除"。
+        """
+        if not hasattr(self, "_task_excluded_sources"):
+            self._task_excluded_sources = {}
+        if not hasattr(self, "_task_pending_sources"):
+            self._task_pending_sources = {}
+        with self._task_sources_lock:
+            _rej = self._task_excluded_sources.setdefault(task_id, [])
+            _pend = self._task_pending_sources.setdefault(task_id, [])
+            _known_rej = {str(x.get("url") or "") for x in _rej}
+            _known_pend = {str(x.get("url") or "") for x in _pend}
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                u = str(it.get("url") or "").strip()
+                if not u.startswith("http"):
+                    continue
+                stage = str((it.get("_admission") or {}).get("stage") or "")
+                reason = str(it.get("_exclude_reason") or "")
+                if stage_hint and not reason.startswith(stage_hint):
+                    reason = f"{stage_hint}{reason}"
+                is_pending = (stage == "pending") or (
+                    not stage and reason.startswith("待核验"))
+                if is_pending:
+                    if u in _known_pend:
+                        continue
+                    _pend.append({"url": u, "reason": reason or "待核验：证据不足"})
+                    _known_pend.add(u)
+                else:
+                    if u in _known_rej:
+                        continue
+                    _rej.append({"url": u, "reason": reason or "与本标的不适用"})
+                    _known_rej.add(u)
+
+    def _write_source_pending_file(self, task_id: str) -> str:
+        """P0-C：把本任务的**待核验清单**写进工作区 `project/source_pending.json`。
+
+        待核验 ≠ 已剔除：这些候选元数据不足（主体/时点没核到），抓一次正文后按
+        同一判据复核可能转正。单独成文件让交付包能如实区分三本账——已采用
+        （来源清单）、待核验（本文件）、已剔除（source_exclusions.json），
+        报告缺口行指到哪一份都说得清。内容只有 URL 与待核验理由（不含提示词、
+        响应体、密钥）；每次整体覆写（含空数组）。
+        """
+        try:
+            recs = list((getattr(self, "_task_pending_sources", {}) or {})
+                        .get(task_id, []))
+            ws = task_project_dir(task_id)
+            ws.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps({
+                "task_id": task_id,
+                "generated_at": self._now_iso(),
+                "note": ("检索候选 ≠ 正文采用。下列 URL 主体/期间/时点证据不足，"
+                         "按有界验证待核验（抓取正文后按同一判据复核），"
+                         "未进正文来源清单。"),
+                "count": len(recs),
+                "pending": [{"url": str(r.get("url") or ""),
+                             "reason": str(r.get("reason") or "")}
+                            for r in recs if r.get("url")],
+            }, ensure_ascii=False, indent=1)
+            (ws / self.SOURCE_PENDING_FILE).write_bytes(payload.encode("utf-8"))
+            logger.info("待核验清单已落盘 task=%s 条数=%d", task_id, len(recs))
+            return str(ws / self.SOURCE_PENDING_FILE)
+        except Exception as exc:                # noqa: BLE001 - 辅助文件不阻断报告步骤
+            logger.warning("source_pending.json 写入失败（task=%s）：%s",
                            task_id, str(exc)[:120])
             return ""
 
@@ -4357,11 +4471,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return {
             "capability": "content_summary",
             "instruction": (
-                "外部检索/抓取失败。"
+                "外部检索/抓取未成功：本轮**没有取得可核验的联网来源**（这是如实降级，"
+                "不是检索成功）。"
                 + (f"优先使用任务上下文中已提供的结构化财务数据{structured_hint}；"
                    if structured_hint else "")
-                + "其余内容基于已有知识直接完成，数值若无法溯源标注"
-                "'基于模型知识，未在本次检索中验证'，不要提及搜索或抓取失败："
+                + "其余内容只能基于模型知识整理，必须在正文开头与相关段落**明确标注**"
+                "「未在本次检索中验证」，并在结尾列出全部缺口（哪些来源没取到、"
+                "哪些数字没有任何来源）；不得声称已完成联网检索，也不得把模型知识"
+                "写成检索结果或披露原文。数值若无法溯源标注"
+                "'基于模型知识，未在本次检索中验证'。目标："
                 f"{goal[:300]}"
             ),
             "timeout": 120,
@@ -7618,6 +7736,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     best_report=best_report, gate_checked=gate_checked,
                     simple=simple, used_template=used_template,
                 ))
+                # P1-D：跨轮采纳来源总数（准入口径）——本轮没有新增合格来源时
+                # 记一次"无新材料轮"，供下一轮计划判断是否还值得重做。
+                try:
+                    _adopted_now = int(
+                        self._adopted_search(task_id).totals().get("admitted", 0))
+                except Exception:                  # noqa: BLE001 - 统计失败不影响执行
+                    _adopted_now = 0
+                if not hasattr(self, "_adopted_totals"):
+                    self._adopted_totals = {}
+                if not hasattr(self, "_search_stale_rounds"):
+                    self._search_stale_rounds = {}
+                _base_adopted = self._adopted_totals.get(task_id)
+                if _base_adopted is None:
+                    self._adopted_totals[task_id] = _adopted_now
+                    self._search_stale_rounds[task_id] = 0
+                elif _adopted_now > int(_base_adopted):
+                    self._adopted_totals[task_id] = _adopted_now
+                    self._search_stale_rounds[task_id] = 0
+                else:
+                    self._adopted_totals[task_id] = _adopted_now
+                    self._search_stale_rounds[task_id] = int(
+                        self._search_stale_rounds.get(task_id, 0)) + 1
                 # 反思收敛优化：反思产出的本轮执行后 best_report 与上一轮相同
                 # 或更短 → 提前终止循环，避免无意义多轮；验收 fail 时除外
                 # （验收为准，仍强制重做，长度不能作为放行依据）。
@@ -7972,6 +8112,29 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     for s in next_steps
                 )[:800],
             )
+            # P1-D 停损：下一轮只重复**已经试过的查询**（无新检索材料），且上一轮
+            # 没有新增合格来源 → 再重做只会拿到同一批候选/同一份空结果，停止昂贵
+            # 重做并把证据缺口如实呈现（缺哪些来源、多少轮没新增）。报告类修复
+            # （无 web_search/web_fetch 的 next_steps）不走这条停损，交给验收与
+            # 指纹规则处理，不因此少修报告。
+            _stop, _why = self._should_stop_search_redo(task_id, next_steps)
+            if _stop:
+                try:
+                    _store = self._adopted_search(task_id)
+                    _store.set_gap(reason=_why, missing=gaps,
+                                   round_no=iteration, at=self._now_iso())
+                    self._persist_search_audit(task_id)
+                except Exception as exc:           # noqa: BLE001
+                    logger.warning("证据缺口落盘失败（task=%s）：%s",
+                                   task_id, str(exc)[:120])
+                logger.warning("检索材料无新增，停止重做（task=%s）：%s", task_id, _why)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "evidence_gap", "agent": "web_search",
+                               "message": (f"{_why}（已采纳来源 "
+                                           f"{(getattr(self, '_adopted_totals', {}) or {}).get(task_id, 0)} 条；"
+                                           "缺口见 audit/search_adopted.json）"),
+                               "timestamp": self._now_iso()})
+                break
             iteration += 1
             for s in next_steps:
                 s["iteration"] = iteration
@@ -8418,6 +8581,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._task_sources.pop(task_id, None)
         if hasattr(self, "_task_excluded_sources"):
             self._task_excluded_sources.pop(task_id, None)
+        if hasattr(self, "_task_pending_sources"):
+            self._task_pending_sources.pop(task_id, None)
+        # P1-D：检索尝试轨迹与采纳证据在工作区落盘后清进程内副本（任务终态不再占用）
+        for d in ("_task_adopted_search", "_task_search_attempts",
+                  "_adopted_totals", "_search_stale_rounds"):
+            try:
+                getattr(self, d).pop(task_id, None)
+            except AttributeError:
+                pass
         for d in (
             "_task_goals", "_task_projects", "_task_user_ids",
             "_task_prompt_hints", "_task_market_resolution", "_task_starts",
@@ -8948,6 +9120,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             self._task_sources_lock = threading.Lock()
         if not hasattr(self, "_task_excluded_sources"):
             self._task_excluded_sources = {}
+        if not hasattr(self, "_task_pending_sources"):
+            self._task_pending_sources = {}
         # 状态真源：阶段名落库（进入步骤执行）
         try:
             import task_state
@@ -9006,6 +9180,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 # F1：剔除审计落盘——内存字典随任务终态/重启丢失，而报告里会写
                 # "剔除记录见交付包 audit/source_exclusions.json"，必须真有这份工件。
                 self._write_source_exclusions_file(task_id)
+                # P0-C：待核验清单另存一份（`audit/source_pending.json`）——
+                # 待核验 ≠ 已剔除，交付包里两本账都要能查。
+                self._write_source_pending_file(task_id)
+                # P1-D：检索尝试轨迹 / 已采纳证据落盘（`audit/search_attempts.json`
+                # 与 `audit/search_adopted.json`）——报告里的来源清单只写"采纳"的
+                # 那些，试过但没采纳的要能查、要有缺口说明。
+                self._persist_search_audit(task_id)
             base_instr = self._inject_step_context(step, completed, lock, task_id)
             if step.get("capability") in ("report_generator", "content_summary"):
                 # 注入前序搜索的数据来源 URL（任务级累计，跨迭代生效），
@@ -9219,19 +9400,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             "(%d candidates all 404/410) -> FAILED",
                             task_id, _raw_count,
                         )
-                    # 来源桶逐条相关性治理（P0-3）：整表相关性校验通过 ≠ 每条都相关。
-                    # 混在有效候选里的词典页/导航页此前会原样写入 `[数据来源]`，最终
-                    # 在报告里被当成证据来源。只作用于研究任务（其来源列表是交付内容
-                    # 的一部分）；非研究任务的多来源列表维持原语义，避免启发式误删。
+                    # 来源桶逐条相关性治理（P0-3 → P0-C）：整表相关性校验通过 ≠ 每条
+                    # 都相关。混在有效候选里的词典页/导航页此前会原样写入 `[数据来源]`，
+                    # 最终在报告里被当成证据来源。判据收敛到 `source_admission`
+                    # （主体/期间/用途/截止日，与抓取选择同源）；rejected 与 pending
+                    # 都不进来源清单，连同理由进剔除审计。
                     _src_items = parsed
                     _excluded_items: list = []
                     if self._is_research_task(task_id):
                         try:
-                            # F1：候选 / 采用 / 剔除三分。判为无关的候选不进来源桶，
-                            # 连同理由进剔除审计（`_task_excluded_sources`），报告步骤
-                            # 据此在正文里既不给编号、也不进 `## 数据来源`。
+                            # P0-C：候选 / 采用 / 待核验 / 剔除四分。判据与
+                            # `_pick_fetch_url` 的抓取前排除同源；无契约主体时
+                            # 判不准才 fail-open（不减损来源）。
                             _src_items, _excluded_items = self._partition_source_items(
-                                goal, parsed)
+                                goal, parsed, contract=self._goal_contract(goal))
                         except Exception as _src_exc:      # noqa: BLE001 - 过滤失败不减损来源
                             logger.warning(
                                 "source relevance filter failed for %s: %s",
@@ -9241,25 +9423,40 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                         else:
                             if _excluded_items:
                                 logger.info(
-                                    "web_search source-bucket relevance filter for %s: "
-                                    "dropped %d/%d candidates from 数据来源",
+                                    "web_search source-bucket admission for %s: "
+                                    "%d/%d candidates not admitted (rejected/pending)",
                                     task_id, len(_excluded_items), len(parsed))
-                                if hasattr(self, "_task_excluded_sources"):
-                                    with self._task_sources_lock:
-                                        _reg = self._task_excluded_sources.setdefault(
-                                            task_id, [])
-                                        _known = {str(x.get("url") or "")
-                                                  for x in _reg}
-                                        for it in _excluded_items:
-                                            u = str((it or {}).get("url") or "").strip()
-                                            if u.startswith("http") and u not in _known:
-                                                _reg.append({
-                                                    "url": u,
-                                                    "reason": str(
-                                                        (it or {}).get("_exclude_reason")
-                                                        or "与本目标无共同主题词"),
-                                                })
-                                                _known.add(u)
+                                self._record_source_exclusion(task_id, _excluded_items)
+                    # P0-C：**下游上下文不得含被拒来源**。此前只清洗来源桶，喂给模型
+                    # 的 step 结果仍是原候选列表 → 统计公报/轴承页照样被摘要、被正文引用，
+                    # 制造"联网研究过"的外观。按同一准入结论改写 step 结果（实现见
+                    # `_step_context_after_admission`）：被拒条目不再进入任何下游；
+                    # 待核验保留但打标记；全部被拒时如实判失败。
+                    if self._is_research_task(task_id):
+                        _ctx_items, _all_rejected = \
+                            OrchestratorV2._step_context_after_admission(
+                                parsed, _src_items, _excluded_items)
+                        if _ctx_items is not None:
+                            result["result"] = json.dumps(_ctx_items,
+                                                          ensure_ascii=False)
+                        if _all_rejected:
+                            # 全部不适用：如实判失败（不给"检索成功"的外观），
+                            # 让反思换查询词；理由已在剔除审计里逐条留下。
+                            result["status"] = "FAILED"
+                            result["result"] = (
+                                f"检索到 {len(parsed)} 条候选，经主体/期间/用途准入后"
+                                "均不适用（逐条理由见 audit/source_exclusions.json）；"
+                                "本步无可用来源，需更换查询词或补资料")
+                            with lock:
+                                has_failure = True
+                            logger.warning(
+                                "web_search candidates all rejected by admission for %s "
+                                "(%d candidates) -> FAILED", task_id, len(parsed))
+                        elif _ctx_items is not None:
+                            logger.info(
+                                "downstream context filtered for %s: "
+                                "kept=%d excluded=%d",
+                                task_id, len(_ctx_items), len(_excluded_items))
                     with self._task_sources_lock:
                         bucket = self._task_sources.setdefault(task_id, [])
                         for it in _src_items:
@@ -10077,16 +10274,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         候选稿与导出读的就是它。
 
     约定：
-        - 只对**落库研究契约**生效（`source == "stored"`）；其它任务直接 `status=not_applicable`；
+        - 对**落库研究契约**与**文本可解析契约**都生效（P0-C：自由文本也可能是公司
+          研究，不能因没落库契约就跳过官方发现）；文本契约记
+          `contract_source="text"` + `contract_confirmed=false`，身份只用于定位披露，
+          不改写用户请求；
+        - 契约缺公司/期间（含裸代码歧义）→ `status=needs_contract`：列出缺口请用户
+          确认（不猜主体、不伪造期间），**不是** not_applicable；
         - `until=as_of`：历史时点研究只看"当时已披露"的版本（更正/重述稿不得穿越回去）；
         - 每个任务**最多准入 1 份**正文（按 `prefer_body_candidates` 排序），失败时按顺序
           再试候选，候选数与下载次数都受本次调用预算约束（不循环、不重跑整任务）；
         - 任何异常都不抛出：写 `official_discovery.json` 如实记录状态/原因码/下一步。
         """
         out: dict = {"status": "not_applicable", "reason_code": "no_contract",
-                     "reason": "没有落库研究契约：不做官方发现", "next_steps": [],
-                     "contract": {}, "candidates": [], "material": {}, "admit": {},
-                     "located": 0}
+                     "reason": "没有可用契约（既无落库契约、文本也解析不出公司/期间）",
+                     "next_steps": [], "contract": {}, "candidates": [], "material": {},
+                     "admit": {}, "located": 0}
         try:
             from adapters import disclosure_ingest as di
             from working_paper_export import resolve_request
@@ -10115,13 +10317,30 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         periods = tuple(int(p) for p in (getattr(request, "periods", None) or [])
                         if str(p).strip().isdigit())
         as_of = str(getattr(request, "as_of", "") or "")
-        if source != "stored" or not (company or code) or len(periods) < 1:
-            out.update({"status": "not_applicable", "reason_code": "no_contract",
-                        "reason": ("没有落库研究契约（公司/期间）" if source != "stored"
-                                   else "契约缺公司或期间"),
-                        "next_steps": ["用表单提交研究请求（落库契约）后再跑"]})
+        if source not in ("stored", "text") or not (company or code) or len(periods) < 1:
+            # P0-C：文本契约（`source == "text"`）同样能定位官方披露，但**只在主体与
+            # 期间都到位时**才发起；缺字段返回 `needs_contract` 并列出要用户确认的项
+            # （不猜主体、不伪造期间）。真没有契约（普通任务）才 not_applicable。
+            out.update({
+                "status": "needs_contract" if source == "text" else "not_applicable",
+                "reason_code": "missing_contract_fields",
+                "reason": ("公司研究请求但契约缺公司/期间：不做官方发现，需用户确认字段"
+                           if source == "text" else "没有可用研究契约：不做官方发现"),
+                "contract_source": source,
+                "contract_confirmed": source == "stored",
+                "missing_fields": [str(g) for g in
+                                   (getattr(request, "gaps", None) or [])],
+                "next_steps": (["在研究表单里确认公司/代码、两个年度与资料截至日后重跑"]
+                               if source == "text"
+                               else ["用表单提交研究请求（落库契约）后再跑"]),
+            })
             self._write_discovery_artifact(task_id, project, out)
             return out
+        out["contract_source"] = source
+        out["contract_confirmed"] = source == "stored"
+        if source == "text":
+            out["contract_note"] = ("契约来自自由文本解析（identity_source=text）：只用于"
+                                    "定位官方披露，不改写用户请求；建议改用研究表单确认")
         out["contract"] = {"company": company, "company_code": code,
                            "periods": list(periods), "as_of": as_of, "source": source}
         # **共享台账**（L0-d，复核 S3）：总截止在 `discover` **之前**起算，发现阶段的每次
@@ -10317,6 +10536,186 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return sum(1 for it in data if isinstance(it, dict)
                    and str(it.get("url") or "").startswith("http"))
 
+    def _search_stage_plan(self) -> dict:
+        """P1-D：任务级检索预算的**阶段显式分配**（与上限同源，可环境覆盖）。
+
+        重试阶段只能用到"补洞轮预留"为止，避免前几轮重试把 6 次额度吃光、
+        后一阶段的反思补查注定被拒（"预算不能无限重置"的落地）。
+        """
+        total = 6
+        try:
+            from worker_base import search_ledger_limits
+            total, _secs = search_ledger_limits()
+        except Exception:                              # noqa: BLE001
+            pass
+        try:
+            import search_evidence as _se
+            return _se.environment_stage_plan(int(total))
+        except Exception:                              # noqa: BLE001
+            return {"initial": max(1, int(total)), "retry": 0, "repair": 0}
+
+    def _adopted_search(self, task_id: str):
+        """任务级"已采纳检索证据"索引（跨轮保留；首次从工作区读回）。"""
+        if not hasattr(self, "_task_adopted_search"):
+            self._task_adopted_search = {}
+        store = self._task_adopted_search.get(task_id)
+        if store is None:
+            import search_evidence as _se
+            try:
+                ws = task_project_dir(task_id)
+            except Exception:                          # noqa: BLE001
+                ws = None
+            store = _se.load_adopted(ws) if ws is not None else _se.AdoptedStore()
+            self._task_adopted_search[task_id] = store
+        return store
+
+    def _record_search_attempt(self, task_id: str, entry: dict) -> None:
+        """追加一条检索尝试轨迹（有上限，不落盘；落盘在 `_persist_search_audit`）。"""
+        if not hasattr(self, "_task_search_attempts"):
+            self._task_search_attempts = {}
+        bucket = self._task_search_attempts.setdefault(str(task_id or ""), [])
+        bucket.append(dict(entry or {}))
+        del bucket[:-200]
+
+    @staticmethod
+    def _search_query_text(step: dict, result: dict) -> str:
+        """尝试轨迹里的查询文本：优先 worker 回报的查询，其次契约里的 `[检索查询]`。"""
+        st = (result or {}).get("search_status") or {}
+        qs = st.get("queries") or st.get("query") or ""
+        if isinstance(qs, (list, tuple)):
+            qs = "；".join(str(q) for q in list(qs)[:4])
+        if not qs:
+            ins = str((step or {}).get("instruction") or "")
+            m = re.search(r"\[检索查询\]\s*(.+)", ins)
+            qs = (m.group(1) if m else ins)[:160]
+        return str(qs or "")[:300]
+
+    def _persist_search_audit(self, task_id: str) -> None:
+        """P1-D：把尝试轨迹与采纳证据落进工作区（交付包 `audit/` 与缺口行引用）。"""
+        try:
+            import search_evidence as _se
+            ws = task_project_dir(task_id)
+            self._adopted_search(task_id).save(ws)
+            _se.save_attempts(
+                ws,
+                (getattr(self, "_task_search_attempts", {}) or {}).get(task_id, []),
+                task_id=task_id, at=self._now_iso())
+        except Exception as exc:                       # noqa: BLE001 - 辅助文件不阻断主线
+            logger.warning("检索审计落盘失败（task=%s）：%s",
+                           task_id, str(exc)[:120])
+
+    def _note_search_adoption(self, task_id: str, step_id: str,
+                              offer: dict) -> None:
+        """把一次采纳决策推进度（失败静默：只影响可观测性）。"""
+        try:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "web_search",
+                           "message": (f"Step {step_id} 检索证据：{offer.get('reason')}"
+                                       f"（准入 {int((offer.get('chosen') or {}).get('admitted') or 0)} 条）"),
+                           "timestamp": self._now_iso()})
+        except Exception:                              # noqa: BLE001
+            pass
+
+    def _finalize_search_adoption(self, goal: str, step: dict,
+                                  result: dict, task_id: str) -> dict:
+        """P1-D：把本步结果并入"已采纳检索证据"，**更差的结果不覆盖**既有证据。
+
+        触发覆盖的三条真实路径：重试预算被拒（空数组）、重规划摘要代做（无来源）、
+        反思轮换查询后命中变差。命中任一条时返回既有采纳结果（状态 SUCCESS、来源
+        原样保留）并标注 `search_evidence_retained`；新结果更优时正常返回并标注
+        `search_evidence_adopted`。两条路径都留尝试轨迹，审计不删。
+        """
+        if str((step or {}).get("capability") or "") != "web_search":
+            return result
+        try:
+            import search_evidence as _se
+            store = self._adopted_search(task_id)
+            contract = self._goal_contract(goal)
+            _iter = int(step.get("iteration") or 0)
+            _offer = store.offer(
+                step.get("step_id", ""), result, contract=contract,
+                round_no=_iter,
+                stage=(_se.STAGE_REPAIR if _iter else _se.STAGE_INITIAL),
+                at=self._now_iso())
+            _chosen = _offer.get("chosen") or {}
+            _new_adm = int(_chosen.get("admitted") or 0)
+            _prev_adm = int(_offer.get("previous_admitted") or 0)
+            if not _offer.get("adopted") and _prev_adm > 0:
+                kept = dict(store.result_for(step.get("step_id", "")) or {})
+                if kept:
+                    kept["search_evidence_retained"] = True
+                    kept["retained_admitted"] = _prev_adm
+                    kept["superseded_result_status"] = str(result.get("status") or "")
+                    kept["retained_note"] = (
+                        f"本轮派发（{str(result.get('status') or '?')}，"
+                        f"候选 {_se.candidates_of(result)} 条/准入 "
+                        f"{_se.admitted_of(result, contract)} 条）不优于既有采纳检索证据"
+                        f"（准入 {_prev_adm} 条），保留既有来源，不覆盖")
+                    logger.info("检索证据保留（task=%s step=%s）：%s",
+                                task_id, step.get("step_id"), kept["retained_note"])
+                    result = kept
+            else:
+                # 采纳证据的诚实边界（20261023 实机 e2e 观察）：搜索候选多处于
+                # candidate/pending（未抓正文前无法核验），因此 admitted==0 **不等于**
+                # "无效来源"——不能据此把步结果判死。这里只如实带上准入计数，
+                # 让下游"来源桶/报告来源列表/验收"按同一口径处理：
+                #   admitted>0 → 有可引用证据；admitted==0 且 pending>0 → 待核验；
+                #   结果全是 rejected/background → 报告必须如实呈现"无可核验来源"。
+                result = dict(result or {})
+                result["search_evidence_adopted"] = True
+                result["adopted_admitted"] = _new_adm
+                if _new_adm <= 0:
+                    result["adopted_note"] = (
+                        "本步采纳的检索结果尚无可直接引用的已准入来源"
+                        "（候选未抓正文核验前为 pending）；报告引用需以正文核验为准")
+            self._note_search_adoption(task_id, step.get("step_id", ""), _offer)
+            self._persist_search_audit(task_id)
+        except Exception as exc:                       # noqa: BLE001 - 证据保留不阻断主线
+            logger.warning("检索采纳证据处理失败（task=%s）：%s",
+                           task_id, str(exc)[:150])
+        return result
+
+    def _next_round_has_new_material(self, task_id: str,
+                                     steps: list[dict]) -> bool:
+        """下一轮计划里是否含**新的**检索材料（否则重做只是重复同一个查询）。"""
+        tried: set[str] = set()
+        for a in (getattr(self, "_task_search_attempts", {}) or {}).get(task_id, []) or []:
+            q = str((a or {}).get("query") or "").strip().lower()
+            if q:
+                tried.add(q)
+        for s in steps or []:
+            cap = str((s or {}).get("capability") or "")
+            if cap == "web_fetch":
+                return True                            # 抓正文可能把待核验转正
+            if cap != "web_search":
+                continue
+            ins = str((s or {}).get("instruction") or "")
+            m = re.search(r"\[检索查询\]\s*(.+)", ins)
+            q = ((m.group(1) if m else ins[:160]) or "").strip().lower()
+            if not q or q not in tried:
+                return True
+        return False
+
+    def _should_stop_search_redo(self, task_id: str,
+                                 next_steps: list[dict]) -> tuple[bool, str]:
+        """P1-D 停损判定：下一轮是否只剩"重复已试查询"→ `(停止?, 理由)`。
+
+        只对**检索类** next_steps 生效（web_search/web_fetch）；纯报告修复不走这条
+        规则（验收与指纹规则负责），避免少修报告。没有新检索材料且上一轮没有新增
+        合格来源时停止，把证据缺口如实呈现。
+        """
+        import search_evidence as _se
+        _searches = [s for s in (next_steps or [])
+                     if str((s or {}).get("capability") or "")
+                     in ("web_search", "web_fetch")]
+        if not _searches:
+            return False, ""
+        if self._next_round_has_new_material(task_id, _searches):
+            return False, ""
+        _stale = int((getattr(self, "_search_stale_rounds", {}) or {})
+                     .get(task_id, 0) or 0)
+        return _se.stop_decision(stale_rounds=_stale, new_search_material=False)
+
     def _search_budget_left(self, task_id: str):
         """任务级检索预算余量 `(剩余次数, 剩余秒)`；读不到返回 None（按可重试处理）。
 
@@ -10350,6 +10749,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if (str(step.get("capability") or "") == "web_search"
                 and self._search_candidate_count(result)):
             best_search = dict(result)
+        # P1-D：每次派发都留一条尝试轨迹（阶段/状态/候选数/**准入数**）。
+        # 只统计通过准入的来源——未准入候选不是有效证据，不能拿来充"检索成功"。
+        import search_evidence as _se
+        _is_search_step = str(step.get("capability") or "") == "web_search"
+        _stage_plan = self._search_stage_plan() if _is_search_step else {}
+        _search_contract = self._goal_contract(goal) if _is_search_step else None
+        if _is_search_step:
+            self._record_search_attempt(task_id, _se.attempt_record(
+                round_no=int(step.get("iteration") or 0),
+                step_id=str(step.get("step_id") or ""),
+                stage=_se.STAGE_INITIAL, capability="web_search",
+                query=self._search_query_text(step, result),
+                status=str(result.get("status") or ""),
+                candidates=_se.candidates_of(result),
+                admitted=_se.admitted_of(result, _search_contract),
+                reason=str(result.get("result") or "")[:200],
+                at=self._now_iso()))
         # 任务15：**第一次尝试返回就记账**（策略拒绝/非 2xx 是确定性结果）。
         # 记账若只留在调用方（`_execute_steps` 的步骤返回点），下面的重试循环看不见它，
         # 同一坏 URL 仍会被重发 `_max_retry` 次。
@@ -10376,14 +10792,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 只会拿到 `refused_budget` 空数组（0 次真实请求），却会顶掉本步此前已
             # 取得的候选，再触发"重规划代做"让下游抓取全部没有 URL（实测
             # ui-d59152ebb9 / sched-f6e5440b8b）。读不到台账则照旧重试（不改变旧行为）。
-            if str(step.get("capability") or "") == "web_search":
+            if _is_search_step:
                 _left = self._search_budget_left(task_id)
-                if _left is not None and (_left[0] <= 0 or _left[1] <= 0):
+                # P1-D：阶段预留——重试阶段不得吃光"补洞轮"的额度（余额只够
+                # 预留时停手，把次数留给反思补查，而不是第三次注定被拒的派发）。
+                _reserve = _se.stage_reserve(_stage_plan, _se.STAGE_RETRY)
+                if _left is not None and (_left[0] <= _reserve or _left[1] <= 0):
                     tried.append("停止重试（任务级检索预算已耗尽）")
                     push_progress(self._messaging, task_id, "log",
                                   {"type": "info", "agent": "web_search",
                                    "message": (f"Step {step.get('step_id')} 停止重试："
-                                               "任务级检索预算已耗尽，不再派发检索"),
+                                               f"任务级检索预算余额 {_left[0]} 次/"
+                                               f"{_left[1]:.0f}s，已只够后续阶段预留"
+                                               f"（{_reserve} 次），不再派发检索"),
                                    "timestamp": self._now_iso()})
                     break
             # 任务15：**确定性策略拒绝不再重试**。net_policy 的拒绝是纯函数级结论
@@ -10458,6 +10879,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             result = self._dispatch(amended, task_id)
             # 任务15：每次尝试返回都记账（下一次循环开头据此拦住死链）
             self._note_fetch_dead_url(amended, result, task_id)
+            if _is_search_step:
+                self._record_search_attempt(task_id, _se.attempt_record(
+                    round_no=int(step.get("iteration") or 0),
+                    step_id=str(step.get("step_id") or ""),
+                    stage=_se.STAGE_RETRY, capability="web_search",
+                    query=self._search_query_text(amended, result),
+                    status=str(result.get("status") or ""),
+                    candidates=_se.candidates_of(result),
+                    admitted=_se.admitted_of(result, _search_contract),
+                    reason=(f"重试#{attempt}："
+                            + (issue or str(result.get("result") or ""))[:180]),
+                    at=self._now_iso()))
             issue = self._contract_issue(goal, amended, result)
             if issue and not first_issue:
                 first_issue = issue
@@ -10511,6 +10944,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 state["replan_used"] += 1
                 tried.append(f"重规划为 {alt.get('capability')}")
                 alt_result = self._dispatch(alt, task_id)
+                # P1-D：重规划代做也进尝试轨迹——摘要代做（content_summary）的
+                # 候选/准入数为 0，不能顶掉此前已经采纳的检索证据。
+                self._record_search_attempt(task_id, _se.attempt_record(
+                    round_no=int(step.get("iteration") or 0),
+                    step_id=str(step.get("step_id") or ""),
+                    stage=_se.STAGE_REPAIR,
+                    capability=str(alt.get("capability") or ""),
+                    query=self._search_query_text(alt, alt_result),
+                    status=str(alt_result.get("status") or ""),
+                    candidates=_se.candidates_of(alt_result),
+                    admitted=_se.admitted_of(alt_result, _search_contract),
+                    reason="反思/重规划代做（非检索结果不计入有效证据）",
+                    at=self._now_iso()))
                 # 任务14：重规划代做记账——任务历史里该步仍记**原能力**，
                 # 回传执行者却不具备它（如 web_search 步被重规划成 code_execution
                 # 代跑）→ 按原步骤能力留错配痕迹，供指标与反思归因。
@@ -10540,7 +10986,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 write_step_failure(task_id, diag)
             except Exception as exc:
                 logger.warning("step failure diagnosis write failed: %s", str(exc)[:120])
-        return result
+        # P1-D：并入任务级"已采纳检索证据"——本轮更差（预算拒绝/摘要代做/换查
+        # 后命中变差）不覆盖既有来源；返回给下游的仍是带来源的那份结果。
+        return self._finalize_search_adoption(goal, step, result, task_id)
 
     def _contract_issue(self, goal: str, step: dict, result: dict) -> str:
         """按能力返回契约校验步骤结果；返回问题文本（空串=通过）。
@@ -10655,35 +11103,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         """逐条来源相关性过滤（返回 (保留条目, 剔除条数)）——只服务于任务级
         来源桶（报告的 `## 数据来源` / `[数据来源]` 注入）。
 
-        背景（真机实测）：`_contract_issue` 的相关性校验是**整表判定**——候选里
-        混有无关条目时整表照样通过，于是一个汉语词典页（hanyuguoxue.com/cidian/…）
-        跟着有效候选一起进入来源桶，最终被写成报告的证据来源。
-        "整表通过"不等于"每条都相关"，这里把同一套判据下推到逐条。
-
-        判据与 `_search_results_irrelevant` 同源（行情关键词 / `_goal_search_tokens`）；
-        **一条都不剩时保留全部**：启发式判不准时不减损来源，与
-        `filter_dead_search_results` 的"检索可用性优先"同一原则。
-        只用于来源桶——step 结果（喂 LLM 上下文）与 search_results.json 不受影响。"""
-        items = [it for it in (results or []) if isinstance(it, dict)]
-        if not items:
-            return [], 0
-        if OrchestratorV2._is_market_goal(goal):
-            keys: list[str] = ["a股", "成交", "排行", "排名", "涨停",
-                               "跌幅", "前十", "股票"]
-        else:
-            keys = list(OrchestratorV2._goal_search_tokens(goal))
-        if not keys:
-            return items, 0
-        kept = [
-            it for it in items
-            if any(k in " ".join(
-                str(it.get(f) or "")
-                for f in ("title", "snippet", "url", "content", "summary")
-            ).lower() for k in keys)
-        ]
-        if not kept:
-            return items, 0
-        return kept, len(items) - len(kept)
+        P0-C：这里**不再自带 fail-open 兜底**，而是与 `_partition_source_items`
+        走同一套准入判据（`source_admission`）——"一条都不剩时保留全部"只有在
+        **判不准**（无主体锚点/无判据）时才允许；目标里有强主体而候选零命中是
+        可证的无关（实机 ui-b23642e5de：SKF 6008 轴承页），不得整批兜底放行。
+        """
+        kept, dropped = OrchestratorV2._partition_source_items(goal, results)
+        return kept, len(dropped)
 
     # 强主体锚点用的公司名后缀（**形态学**判据，不针对任何具体公司/URL 写死）：
     # 「研究某上市公司（600887）」「研究伊利股份」都能取到锚点；
@@ -10719,62 +11145,167 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return anchors
 
     @staticmethod
-    def _partition_source_items(goal: str, results: list) -> tuple[list, list]:
-        """把检索候选分成（可进来源清单, 剔除项）——F1「候选 / 采用 / 剔除」三分。
+    def _step_context_after_admission(parsed: list, src_items: list,
+                                      excluded_items: list) -> tuple:
+        """按准入结论改写 web_search 的 step 结果 → `(条目或 None, 是否全被拒)`。
 
-        与 `_filter_source_items` 的区别：后者在"一条都没命中"时**全保留**（fail-open，
-        怕启发式误删）。这个兜底在"目标里有强主体词、而没有任何候选含该主体"时是错的：
-        实机反例（2026-10-22，任务 ui-b23642e5de 研究伊利股份 600887）——检索返回
-        3 条全是 SKF 深沟球轴承 6008 / Windows 事件日志 6008 / 汉语词典页，与标的
-        毫无共同主题词，fail-open 把它们全放进来源桶，报告末尾 `## 数据来源`
-        因此列出了 3 条从未采用、甚至与标的不相关的 URL，而正文同时又声明
-        "已按来源纪律整体剔除"——一份交付里自相矛盾。
+        P0-C 的"下游一致"要求在这里落地：来源桶清洗了、喂给模型的上下文没清洗，
+        等于没修——统计公报/轴承页会被摘要并写进正文。返回：
 
-        判据（可证伪，不按公司名/URL 写死）：
-          · 目标里有**强主体词**（公司名/证券代码一类），且
-          · 没有任何候选在 title/snippet/url/content/summary 命中**任何**目标词，
-          ⇒ 这些候选不可能在讲这个标的，剔除并记理由；
-          · 否则维持 fail-open（启发式判不准时不减损来源）。
+        - `(None, False)`  → 没有待核验/被拒条目，不改写（保持原样，零风险）；
+        - `(items, False)` → 有：返回剔除被拒后的列表（每条带准入标记）；
+        - `(None, True)`   → 全部被拒：调用方据此如实判失败（不给检索成功的外观）。
+        """
+        adm: dict[str, dict] = {}
+        for it in list(src_items or []) + list(excluded_items or []):
+            if not isinstance(it, dict):
+                continue
+            u = str(it.get("url") or "").strip()
+            if u:
+                adm[u] = dict(it.get("_admission") or {})
+        touched = {u: a for u, a in adm.items()
+                   if str(a.get("stage") or "") in ("pending", "rejected")}
+        if not touched:
+            return None, False
+        rejected = {u for u, a in touched.items()
+                    if str(a.get("stage") or "") == "rejected"}
+        ctx: list = []
+        for it in parsed or []:
+            if not isinstance(it, dict):
+                continue
+            u = str(it.get("url") or "").strip()
+            if u in rejected:
+                continue
+            _a = adm.get(u) or {}
+            if str(_a.get("stage") or "") in ("admitted", "pending"):
+                it = dict(it, _admission=str(_a.get("stage") or ""),
+                          _admission_reason="；".join(
+                              str(x) for x in (_a.get("reasons") or [])[:2]))
+            ctx.append(it)
+        if ctx:
+            return ctx, False
+        return None, bool(parsed)
+
+    @staticmethod
+    def _partition_source_items(goal: str, results: list,
+                                contract: dict | None = None) -> tuple[list, list]:
+        """把检索候选分成（可进来源清单 / 剔除项）——候选 / 采用 / 剔除三分。
+
+        P0-C：判据收敛到 `source_admission`（主体、期间、文档类型与用途、资料截止日），
+        与抓取前选择（`_pick_fetch_url`）、下游上下文（web_search 结果改写）共用同一
+        结论；这里只决定"进不进来源清单"：
+
+        - `admitted`（含比较披露）→ 进来源清单；
+        - `rejected` → 剔除，带理由（主体不符/晚于截止/期间不符/宏观或行业背景
+          不能当公司财务证据/正文核验后仍非本公司披露）；
+        - `pending`（待核验）→ 同样**不进**来源清单（未核验 ≠ 证据），
+          理由写"待核验"，并打 `_admission_stage` 供审计单列；
+        - 无契约主体且词表也判不出 → 维持 fail-open（判不准时不减损来源）。
+
+        实机反例（2026-10-22 诊断 P0-3）：`ui-b23642e5de`（伊利 600887）三条候选
+        全是 SKF 6008 轴承页 / Windows 6008 事件日志 / 汉语词典页，旧实现 fail-open
+        整批放行，报告 `## 数据来源` 因此列出从未采用、与标的无关的 URL。
         """
         items = [it for it in (results or []) if isinstance(it, dict)]
         if not items:
             return [], []
+        if contract is None:
+            contract = OrchestratorV2._goal_contract(goal)
         if OrchestratorV2._is_market_goal(goal):
             keys: list[str] = ["a股", "成交", "排行", "排名", "涨停",
                                "跌幅", "前十", "股票"]
-            subject_keys: list[str] = []
-        else:
-            keys = list(OrchestratorV2._goal_search_tokens(goal))
+            kept = [it for it in items if any(k in OrchestratorV2._item_blob(it)
+                                             for k in keys)]
+            return (kept, []) if kept else (items, [])
+        import source_admission as sa
+        try:
+            batch = sa.admit_many(items, contract)
+        except Exception as exc:                 # noqa: BLE001 - 判据不可用不减损来源
+            logger.warning("来源准入判据不可用（退回词表判据）：%s", str(exc)[:120])
+            batch = None
+        if batch is not None:
+            kept = list(batch["admitted"])
+            dropped: list[dict] = []
+            for rec in batch["pending"]:
+                dropped.append(dict(rec, _exclude_reason=(
+                    "待核验：主体/期间/时点证据不足，未取得可定位依据前不作来源"
+                    + ("；" + sa.reason_text(rec.get("_admission") or {})
+                       if (rec.get("_admission") or {}).get("reasons") else ""))))
+            for rec in batch["rejected"]:
+                dropped.append(dict(rec, _exclude_reason=(
+                    sa.reason_text(rec.get("_admission") or {}) or "与本标的不适用")))
+            if kept:
+                return kept, dropped
+            # 没有一条准入：如果有强主体锚点，就是可证的无关（整批剔除）；
+            # 否则退回词表判据，词表也不命中才 fail-open。
+            anchors = []
             try:
-                subject_keys = OrchestratorV2._subject_anchors(goal)
-            except Exception:                      # noqa: BLE001 - 判不出主体就退回 fail-open
-                subject_keys = []
-        if not keys:
-            return items, []
-
-        def _blob(it: dict) -> str:
-            return " ".join(
-                str(it.get(f) or "")
-                for f in ("title", "snippet", "url", "content", "summary")
-            ).lower()
-
-        kept: list[dict] = []
-        dropped: list[dict] = []
-        for it in items:
-            blob = _blob(it)
-            if any(k in blob for k in keys):
-                kept.append(it)
-            else:
-                dropped.append(it)
-        if not kept:
-            if subject_keys:
-                # 有强主体却零命中：不是"判不准"，是可证的无关——整批剔除
+                anchors = OrchestratorV2._subject_anchors(goal)
+            except Exception:                    # noqa: BLE001
+                anchors = []
+            subject = str((contract or {}).get("company") or "") \
+                or str((contract or {}).get("company_id") or "")
+            if anchors or subject:
+                # 审计可查：零条准入时，剔除/待核验理由都要点名目标主体
+                # （"待核验"也要说清是"对着谁"没核验到，否则事后看不出判据）
+                _subj = "、".join((anchors or [subject])[:3])
+                if dropped:
+                    for _rec in dropped:
+                        if "目标主体" not in str(_rec.get("_exclude_reason") or ""):
+                            _rec["_exclude_reason"] = (
+                                str(_rec.get("_exclude_reason") or "")
+                                + f"（目标主体：{_subj}）")
+                    return [], dropped
                 return [], [dict(it, _exclude_reason=(
                     "与本标的不含任何共同主题词（目标主体："
-                    + "、".join(subject_keys[:3]) + "）")) for it in items]
-            return items, []                       # 无强主体：维持 fail-open
-        return kept, [dict(it, _exclude_reason="与本目标无共同主题词")
-                      for it in dropped]
+                    + _subj + "）")) for it in items]
+            keys = list(OrchestratorV2._goal_search_tokens(goal))
+            if keys:
+                hit = [it for it in items if any(k in OrchestratorV2._item_blob(it)
+                                                for k in keys)]
+                if hit:
+                    return hit, [it for it in items if it not in hit]
+            return items, []                     # 判不准：维持 fail-open
+        # 判据模块不可用：退回词表判据（与旧实现同口径，但不再整批兜底）
+        keys = list(OrchestratorV2._goal_search_tokens(goal))
+        if not keys:
+            return items, []
+        kept = [it for it in items if any(k in OrchestratorV2._item_blob(it) for k in keys)]
+        if not kept:
+            try:
+                anchors = OrchestratorV2._subject_anchors(goal)
+            except Exception:                    # noqa: BLE001
+                anchors = []
+            if anchors:
+                return [], [dict(it, _exclude_reason=(
+                    "与本标的不含任何共同主题词（目标主体："
+                    + "、".join(anchors[:3]) + "）")) for it in items]
+            return items, []
+        return kept, [it for it in items if it not in kept]
+
+    @staticmethod
+    def _item_blob(item: dict) -> str:
+        """候选的可判文本（标题/摘要/正文/URL，统一小写）。"""
+        return " ".join(str((item or {}).get(f) or "") for f in
+                        ("title", "snippet", "summary", "url", "content")).lower()
+
+    @staticmethod
+    def _goal_contract(goal: str) -> dict:
+        """从目标文本取**可解析契约**（主体/期间/截至日）供准入判据使用。
+
+        与 `working_paper_export.resolve_request` 同源（文本解析），但不需要 task_id：
+        来源桶/抓取选择在只知道 goal 的位置也能用同一套判据；判不出主体就返回空契约
+        （准入据此"不判定"，不减损来源）。
+        """
+        try:
+            import research_intent as ri
+            fields = (ri.assess(goal) or {}).get("fields") or {}
+            return {"company": str(fields.get("company") or ""),
+                    "company_id": str(fields.get("company_id") or ""),
+                    "periods": list(fields.get("periods") or []),
+                    "as_of": str(fields.get("as_of") or "")}
+        except Exception:                            # noqa: BLE001 - 判不出用空契约
+            return {"company": "", "company_id": "", "periods": [], "as_of": ""}
 
     @staticmethod
     def _classify_step_error(capability: str, result: dict, issue: str = "") -> str:

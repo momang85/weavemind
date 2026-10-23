@@ -46,11 +46,22 @@ RESEARCH_STATE_FILE = "research_state.json"
 RESEARCH_READY = "research_ready"
 RESEARCH_DRAFT = "research_draft"
 RESEARCH_NOT_APPLICABLE = "not_applicable"
+# P0-C（2026-10-22）：研究请求但**没有落库契约**——此前一律记 `not_applicable`
+# （"非研究任务"），研究质量检查因此没有适用对象，与机器验收 pass 并存。
+# 现在单列一态：明确"没做过研究检查"，并列出缺哪些字段、怎么补，便于用户区分
+# "一般任务"与"研究没跑成"。
+RESEARCH_CONTRACT_MISSING = "contract_missing"
+# P0-C（2026-10-22）：契约齐备但**还没有研究结构**（任务没跑完研究检查 / 结构未建）。
+# 与 contract_missing 分开：前者是"研究请求缺契约"，后者是"研究已在范围内、
+# 检查还没跑出结构"——把后者也说成"缺契约"会误导用户去重复补契约。
+RESEARCH_IN_SCOPE_UNASSESSED = "in_scope_no_structure"
 
 _RESEARCH_STATE_LABELS = {
     RESEARCH_READY: "研究就绪（关键问题有带定位依据）",
     RESEARCH_DRAFT: "研究草稿／待补原始披露",
     RESEARCH_NOT_APPLICABLE: "不适用（非研究任务或无需叙事）",
+    RESEARCH_CONTRACT_MISSING: "研究契约缺失（未做研究检查，待补契约）",
+    RESEARCH_IN_SCOPE_UNASSESSED: "范围内研究、检查未执行（无结构，待任务产出后重评）",
 }
 
 
@@ -239,6 +250,55 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
                 "optional_questions": [], "requires_narrative": True,
                 "binding": binding}
     if not st:
+        # P0-C：此前一律 `not_applicable`——但"用户要求公司研究、契约没落库"的任务
+        # 不是非研究任务，是**研究检查没有适用对象**（2026-10-22 诊断 P0-4：伊利/
+        # 海天/传奇影业三轮全部如此，与机器验收 pass 并存）。这里先做**意图裁决**
+        # （只读、零 LLM、不写库）：一般任务维持 not_applicable；研究请求 →
+        # `contract_missing` 并列出缺哪些字段；范围外 → 同态给出边界说明。
+        # 绝不回填契约、不悄悄补写历史状态。
+        try:
+            import research_intent as ri
+            _stored = None
+            try:
+                import task_state as _ts
+                _stored = (_ts.read_task(task_id) or {}).get("research_request") or None
+            except Exception:                    # noqa: BLE001 - 读不到按无契约处理
+                _stored = None
+            ia = ri.assess(goal, stored_request=_stored)
+        except Exception as _ia_exc:             # noqa: BLE001 - 意图模块不可用按旧行为
+            logger.warning("研究意图裁决失败（task=%s）：%s", task_id, str(_ia_exc)[:120])
+            ia = None
+        if ia and ia.get("intent") != ri.INTENT_GENERAL:
+            _in_scope = ia.get("status") == ri.STATUS_IN_SCOPE
+            _st = (ri.STATUS_IN_SCOPE if _in_scope
+                   else ri.STATUS_OUT_OF_SCOPE
+                   if ia.get("status") == ri.STATUS_OUT_OF_SCOPE
+                   else ri.STATUS_NEEDS_CONTRACT)
+            _reason = str(ia.get("boundary") or "") or str(ia.get("reason") or "")
+            if ia.get("status") == ri.STATUS_OUT_OF_SCOPE:
+                _reason = (str(ia.get("boundary") or "")
+                           + "（" + str(ia.get("reason") or "") + "）")
+            # 状态词四分（任务书 P0-C）：一般任务 → not_applicable；缺契约 →
+            # contract_missing；界外 → contract_missing 态但带边界说明；**界内** →
+            # in_scope_no_structure（契约齐备，只是研究检查还没跑出结构）。
+            _state = (RESEARCH_IN_SCOPE_UNASSESSED if _in_scope
+                      else RESEARCH_CONTRACT_MISSING)
+            return {"state": _state,
+                    "label": _RESEARCH_STATE_LABELS[_state],
+                    "intent": ia.get("intent"), "intent_status": _st,
+                    "source": ia.get("source"), "fields": ia.get("fields") or {},
+                    "missing_fields": list(ia.get("missing") or []),
+                    "questions": list(ia.get("questions") or []),
+                    "boundary": str(ia.get("boundary") or ""),
+                    "reason": _reason or "没有落库研究契约：研究检查未执行",
+                    "repair": ("用研究表单提交公司/期间/口径后重新研究；"
+                               "本任务的历史状态不做回填"),
+                    "backfill": "not_attempted",
+                    "located": 0, "missing_labels": [],
+                    "unproven_assertions": 0, "unsupported_claims": 0,
+                    "mandatory_supported": 0, "mandatory_total": 0,
+                    "optional_questions": [], "requires_narrative": True,
+                    "binding": binding}
         return {"state": RESEARCH_NOT_APPLICABLE,
                 "label": _RESEARCH_STATE_LABELS[RESEARCH_NOT_APPLICABLE],
                 "reason": "非研究任务（无结构化研究契约）", "located": 0,
@@ -1208,16 +1268,38 @@ def _exclusion_audit_members(ws) -> list:
     """F1 剔除审计成员：工作区 `project/source_exclusions.json` → 包内
     `audit/source_exclusions.json`（按名存在才进包，没有就返回空列表）。
 
+    P0-C 增：同目录 `source_pending.json`（待核验清单）→ `audit/source_pending.json`。
+    待核验 ≠ 已剔除：交付包必须能同时证明"哪些没采用""为什么没采用"，以及
+    "哪些还只是待核验"——三本账（已采用/待核验/已剔除）分开留痕。
+
     单独成函数是为了能被测试直接调用并核对"确有纳入"，而不是只在长函数里
     一行 `files.append(...)`、无法验证。
     """
+    out: list = []
+    base = Path(ws) / "project"
     try:
-        p = Path(ws) / "project" / "source_exclusions.json"
+        p = base / "source_exclusions.json"
         if p.is_file() and p.stat().st_size > 0:
-            return [(p, "audit/source_exclusions.json")]
+            out.append((p, "audit/source_exclusions.json"))
     except Exception as exc:                     # noqa: BLE001 - 不进包不影响主链
         logger.warning("打包：剔除审计读取失败：%s", str(exc)[:100])
-    return []
+    try:
+        p = base / "source_pending.json"
+        if p.is_file() and p.stat().st_size > 0:
+            out.append((p, "audit/source_pending.json"))
+    except Exception as exc:                     # noqa: BLE001
+        logger.warning("打包：待核验清单读取失败：%s", str(exc)[:100])
+    # P1-D：检索尝试轨迹与采纳证据分账（attempts = 试过什么；adopted = 采纳了什么）。
+    # 两本账进包，才能证明"来源不是覆盖出来的"：重试/摘要代做只留痕、不改采纳。
+    for name, member in (("search_attempts.json", "audit/search_attempts.json"),
+                         ("search_adopted.json", "audit/search_adopted.json")):
+        try:
+            p = base / name
+            if p.is_file() and p.stat().st_size > 0:
+                out.append((p, member))
+        except Exception as exc:                 # noqa: BLE001
+            logger.warning("打包：检索审计读取失败（%s）：%s", name, str(exc)[:100])
+    return out
 
 
 def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",

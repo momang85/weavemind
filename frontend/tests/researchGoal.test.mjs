@@ -197,3 +197,35 @@ test('没有底稿时不假装有', () => {
   assert.equal(s.goalMet, false)
   assert.deepEqual(s.facts, [])
 })
+
+// P0-C 契约链：自由文本的意图提示（形态学判据，无公司名白名单）
+import { looksLikeCompanyResearch, intentNotice } from '../src/lib/researchGoal.ts'
+
+test('自由文本公司研究可被识别（研究与主体/期间词）', () => {
+  assert.equal(looksLikeCompanyResearch('研究伊利股份 600887 2023 与 2024 年度经营'), true)
+  assert.equal(looksLikeCompanyResearch('对比一下贵州茅台两个年度的年报'), true)
+  assert.equal(looksLikeCompanyResearch('研究传奇影业'), true)
+})
+
+test('一般任务不误报', () => {
+  assert.equal(looksLikeCompanyResearch('总结一下这段文字的要点，列成条目'), false)
+  assert.equal(looksLikeCompanyResearch('帮我把这些数据清洗后画成柱状图'), false)
+  assert.equal(looksLikeCompanyResearch(''), false)
+})
+
+test('intentNotice：一般任务返回 null；缺契约给问题引导；界外给边界', () => {
+  assert.equal(intentNotice(null), null)
+  assert.equal(intentNotice({ intent: 'general', status: 'not_applicable' }), null)
+  const missing = intentNotice({
+    intent: 'company_research', status: 'needs_contract',
+    missing: ['公司', '两个年度', '报表口径'],
+    questions: ['研究哪家公司？', '对比哪两个年度？'],
+  })
+  assert.ok(missing?.includes('公司、两个年度、报表口径'))
+  assert.ok(missing?.includes('重新提交'))
+  const oos = intentNotice({
+    intent: 'out_of_scope', status: 'out_of_scope',
+    boundary: '首期只支持 A 股上市公司研究',
+  })
+  assert.ok(oos?.includes('超出首期研究范围'))
+})

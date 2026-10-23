@@ -28,6 +28,10 @@
 | `question_assessment.py` | 逐问题证据覆盖评估 |
 | `report_brief.py` → `acceptance_checker.py` → `report_version.py` / `delivery_pipeline.py` | 成稿 → 机器验收 → 版本重验/冻结快照/哈希交付包 |
 | `admission.py` | 成功经验准入的唯一显式谓词 |
+| `source_admission.py` | 检索来源准入（候选/待核验/采用/剔除四分）：主体、期间、文档用途、资料截止日四判据；宏观/行业材料只能作背景 |
+| `research_intent.py` | 提交意图与契约判定：一般任务 / 公司研究 / 界外请求四分，缺契约给问题清单（不编造、不回填） |
+| `search_evidence.py` | 检索尝试与采纳证据分账（P1-D）：`search_attempts.json` 试过什么、`search_adopted.json` 采纳了什么；阶段预算（initial/retry/repair）、更差结果不覆盖既有采纳证据、无新增材料停损 |
+| `build_identity.py` | 实例身份与构建指纹（P1-E）：文件字节哈希区分磁盘版本 / 启动时已加载版本 / 前端构建，`/api/health`·`/api/status` 暴露 `build.restart_required`；不用 git HEAD 冒充已加载代码，输出不含路径与密钥 |
 | `data_sources.py` | 用户自加数据源（设置页编辑）：HTTP JSON/MCP 两类，登记出站端点 `data_source:<id>`、注册工具 `finance_custom_<id>`、逐源探测；正文是否可入模型上下文由 `model_context` 决定 |
 | `credentials.py` | 本机密钥仓 `credentials.json`（0600，不进 git）：数据源/MCP 密钥只在此处，接口只回「已配置」布尔 |
 | `_trial_*.py`、`probe_batchA.py` | 一次性调试脚本（勿引用、勿"修复"） |
@@ -39,14 +43,14 @@
 ## 配置与扩展点
 
 - `config.json`：llm / embedding / planner / backup / redis / system / users，`model_roles` 做角色→模型映射。
-- 环境变量：`WEAVEMIND_DATA_DIR`、`REDIS_HOST`、`WEB_PORT`、`SKIP_DEP_CHECK` 等；`.env` 仅 Compose 用。
+- 环境变量：`WEAVEMIND_DATA_DIR`、`REDIS_HOST`、`WEB_PORT`、`SKIP_DEP_CHECK` 等；`.env` 仅 Compose 用。日志落地：`WEAVEMIND_LOG_DIR`（显式）> `WEAVEMIND_DATA_DIR/logs` > 测试进程系统临时目录 > 仓库 `logs/`；`WEAVEMIND_TEST_MODE=1` 强制按测试进程处理（测试日志绝不混入生产 `logs/`）。
 - 扩展点：adapters 的 `DATA_CAPABILITIES` 注册表、`data_sources.py`（用户自加数据源：HTTP JSON/MCP + 密钥仓，设置页可编辑）、`mcp_client.py`/`tool_dispatch.py`（MCP-lite）、`skills/`、prompts 运行时 overrides。
 
 ## 代理工作守则
 
 1. **根目录平坦布局**：202 个根级 .py 顶层互相 import。改公共模块前先全局搜引用。
 2. **巨文件**：orchestrator_v2.py 8445 行、web_ui.py 6522 行（212 方法）、acceptance_checker.py 3767 行、llm_client.py 2847 行。小步修改，别顺手重构；所谓拆分只是 Mixin 搬代码，不改耦合。
-3. **测试平铺根目录**（92 个 test_*.py，test_p0.py 412 用例）：按文件运行，别全量跑。
+3. **测试平铺根目录**（99 个 test_*.py，test_p0.py 438 用例）：按文件运行，别全量跑。
 4. **密钥**：`.env` 与 `config.json` 含真实 key；绝不提交、绝不粘贴到日志或回复。数据源/MCP 密钥走 `credentials.json`（0600，已被 .gitignore；环境变量 `WEAVEMIND_DATA_SOURCE_<ID>_KEY`/`WEAVEMIND_MCP_<NAME>_KEY` 优先），接口只回「已配置」不回明文。
 5. **三套 worker 基类并存**（根 `worker_base.py`、`workers/`、`async_worker_base.py`）：改动前先确认现役实现。
 6. 研究交付的语义红线：验收状态与人工复核分离，勿在代理侧"替用户"标记复核通过。

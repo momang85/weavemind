@@ -17,6 +17,7 @@ logger = logging.getLogger("web_ui")
 
 from workspace import (
     _safe_project,
+    existing_task_project_dir,
     list_projects,
     task_workspace,
 )
@@ -1406,6 +1407,16 @@ def _status_aux_snapshots() -> dict:
     return out
 
 
+def _build_identity_view() -> dict:
+    """P1-E：构建指纹视图（失败只降级为空对象，不阻断状态接口）。"""
+    try:
+        import build_identity as _build_identity
+        return _build_identity.identity()
+    except Exception as exc:                             # noqa: BLE001
+        logging.getLogger("web_ui").warning("构建指纹视图失败：%s", str(exc)[:120])
+        return {}
+
+
 def _system_status():
     try:
         db = sqlite3.connect(DB_PATH, timeout=10); db.row_factory = sqlite3.Row
@@ -1539,6 +1550,9 @@ def _system_status():
             "uptime_sec": int(time.time() - _START_TIME),
             "survival_rate": survival,
             "llm_usage": _get_llm_usage(),
+            # P1-E：与 /api/health 同源的实例身份 + 构建指纹（磁盘 vs 已加载），
+            # 状态页据此如实展示"当前实例在跑哪份代码、是否需要重启"。
+            "build": _build_identity_view(),
         }
     except Exception:
         # 兜底必须与正常返回**同形状、同告警面**：此前少了 llm_warning/embedding_health，
@@ -3129,6 +3143,15 @@ def _publish_task(
     except Exception:
         pass
     received_at = time.time()
+    # P0-C 契约链：提交时就算研究意图（一般任务 / 待补契约的研究 / 界内 / 界外），
+    # 随响应与编排器消息一起走——前端据此**当场**请求缺失字段，而不是等任务跑完
+    # 才发现缺契约（此前"自由文本不是公司研究"的默认归类让研究任务静默走泛流程）。
+    _intent = _research_intent_of(goal, stored_request=research_request or None)
+    if _intent and str(_intent.get("status") or "") == "needs_contract":
+        _events.append({
+            "event": "contract_missing", "ts": time.time(), "instance": "",
+            "detail": f"研究意图=company_research，契约缺 {len(_intent.get('missing') or [])} 项"
+                      "（编排器将按文本要素有界推进；补契约入口见响应 questions）"})
     try:
         import health_registry as _hr
         _instance = _hr.instance_id()
@@ -3170,7 +3193,8 @@ def _publish_task(
             _row = {}
         return {"task_id": _ref, "conversation_id": conversation_id,
                 "status": str(_row.get("status") or "QUEUED"),
-                "project": project, "deduplicated": True}
+                "project": project, "deduplicated": True,
+                "research_intent": _intent}
     if _verdict == "conflict":
         # 同作用域同键但**内容不同**：明确冲突，不发布（否则会执行一个与键不符的请求）
         raise RuntimeError(
@@ -3192,6 +3216,9 @@ def _publish_task(
             "parent_task_id": parent_task_id,
             # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
             "research_request": dict(research_request or {}),
+            # P0-C 契约链：研究意图判定随消息下发（编排器据此区分一般任务与待补契约的研究；
+            # 已有判据就不再重算，两侧同源）
+            "research_intent": dict(_intent or {}),
             # C3/H3b：幂等键 + 提交时间线的前两段（收到/发布意图）随请求下发
             "idempotency_key": idem,
             "submit_events": _events,
@@ -3238,7 +3265,8 @@ def _publish_task(
         if row and str(row.get("task_id") or "") == tid:
             return {"task_id": tid, "conversation_id": conversation_id,
                     "status": str(row.get("status") or "QUEUED"),
-                    "project": project, "ack_pending_consume": True}
+                    "project": project, "ack_pending_consume": True,
+                    "research_intent": _intent}
         raise RuntimeError(
             f"编排器未在 {timeout:.0f}s 内接收任务（服务未启动或正在重启）；"
             "任务未被创建，请确认 `python launcher.py status` 中 orchestrator 在线"
@@ -3251,7 +3279,8 @@ def _publish_task(
                 "conversation_id": conversation_id,
                 "status": "QUEUED", "project": project, "deduplicated": True}
     return {"task_id": tid, "conversation_id": conversation_id,
-            "status": "QUEUED", "project": project}
+            "status": "QUEUED", "project": project,
+            "research_intent": _intent}
 
 
 def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
@@ -3295,8 +3324,9 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     # （缺证据的项要能被清单看见：目标达成与否 + 缺口/待核验条数）
     paper_meta: dict = {}
     try:
-        from workspace import task_project_dir as _tpd
-        proj = _tpd(tid)
+        # 只读定位：清单登记不建目录（打开历史任务不得产生空 project/）
+        from workspace import existing_task_project_dir as _tpd
+        proj = _tpd(tid) or (task_workspace(tid) / "project")
         for key, name in (("working_paper_json", "working_paper.json"),
                           ("working_paper_csv", "working_paper.csv")):
             fp = proj / name
@@ -3384,6 +3414,40 @@ def _read_export_manifest(tid: str) -> dict:
             return {}
         return json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
+        return {}
+
+
+def _research_intent_of(goal: str, stored_request=None) -> dict:
+    """研究意图/契约判定（P0-C 契约链）：提交页、任务详情、编排器共用**一条判据**。
+
+    只读、零派发、零模型调用（纯规则解析）。返回 `research_intent.assess` 的
+    完整结构（intent/status/source/fields/missing/questions/boundary/reason/
+    repair/backfill/schema）；失败返回空 dict，不编判定。"""
+    try:
+        import research_intent as _ri
+        goal = str(goal or "").strip()
+        if not goal:
+            return {}
+        a = _ri.assess(goal, stored_request=stored_request)
+        return a if isinstance(a, dict) else {}
+    except Exception as exc:                      # noqa: BLE001 - 判定不可用如实返回空
+        logger.warning("研究意图判定失败（goal=%s）：%s", str(goal)[:60],
+                       str(exc)[:120])
+        return {}
+
+
+def _research_intent_payload(tid: str, data: dict | None = None) -> dict:
+    """任务详情里的研究意图块：goal 从任务行取，契约用**任务真实记录**（不编）。"""
+    try:
+        import task_state as _ts
+        row = dict(data or {})
+        if not row or not row.get("goal"):
+            row = _ts.read_task(tid) or {}
+        if not str(row.get("goal") or "").strip():
+            return {}
+        return _research_intent_of(row.get("goal"),
+                                   stored_request=row.get("research_request"))
+    except Exception:                             # noqa: BLE001
         return {}
 
 
@@ -3646,9 +3710,11 @@ def _get_task_working_paper_file(self, p):
             continue
         tid = p.split("/api/task/")[-1].rsplit(suffix, 1)[0]
         try:
-            from workspace import task_project_dir
-            fp = task_project_dir(tid) / name
-            if not fp.exists():
+            # 只读定位：底稿下载不建目录（任务不存在 → 404，不产生空 project/）
+            from workspace import existing_task_project_dir
+            proj = existing_task_project_dir(tid)
+            fp = (proj / name) if proj else None
+            if fp is None or not fp.exists():
                 return self._json({"error": "working paper not found"}, 404)
             raw = fp.read_bytes()
         except Exception as exc:
@@ -3853,6 +3919,7 @@ class Handler(BaseHTTPRequestHandler):
         if (
             path == "/api/config"
             or path == "/api/config/requirements"
+            or path.startswith("/api/diagnostics")
             or path == "/api/users"
             or path == "/api/notifications"
             or path == "/api/audit"
@@ -4514,6 +4581,14 @@ def _get_health(self, p):
             payload["llm"] = _llm_health_view()
         except Exception as exc:                         # noqa: BLE001
             logging.getLogger("web_ui").warning("LLM 熔断快照失败：%s", str(exc)[:120])
+        # P1-E：实例身份与构建指纹公开可见（探活/部署确认据此判断"在线是否已在
+        # 跑当前源码"）。只暴露短哈希/计数/时刻：不含绝对路径、环境变量值或密钥；
+        # 源码在启动后变过时 restart_required=true（如实呈现"待受控重启"）。
+        try:
+            import build_identity as _build_identity
+            payload["build"] = _build_identity.identity()
+        except Exception as exc:                         # noqa: BLE001 - 身份失败不坏探活
+            logging.getLogger("web_ui").warning("构建指纹失败：%s", str(exc)[:120])
         return self._json(payload)
 
 def _get_bootstrap(self, p):
@@ -4688,9 +4763,11 @@ def _get_task_working_paper(self, p):
     if p.startswith("/api/task/") and p.endswith("/working_paper"):
         tid = p.split("/api/task/")[-1].rsplit("/working_paper", 1)[0]
         try:
-            from workspace import task_project_dir
-            path = task_project_dir(tid) / "working_paper.json"
-            if not path.exists():
+            # 只读定位：打不开任务时不建目录（P0-A）
+            from workspace import existing_task_project_dir
+            proj = existing_task_project_dir(tid)
+            path = (proj / "working_paper.json") if proj else None
+            if path is None or not path.exists():
                 return self._json({"error": "not found"}, 404)
             with open(path, "r", encoding="utf-8") as f:
                 return self._json(json.load(f))
@@ -5542,6 +5619,9 @@ def _get_task_page(self, p):
             "logs": data.get("logs") or [],
             "project": data.get("project", ""),
             "revision": bool(data.get("revision")),
+            # P0-C 契约链：任务详情带研究意图判定（只读、同一条判据），页面据此
+            # 显示"一般任务 / 待补契约的研究（缺哪些字段） / 界内 / 界外"。
+            "research_intent": _research_intent_payload(tid, data),
             # B 批：验收结论与交付状态都以**选中版本**为准（同一份 payload 不得两个版本并存）
             "acceptance": (dict(data.get("acceptance") or {}, **(acceptance_bound or {}))
                            if isinstance(data.get("acceptance"), dict)
@@ -5751,8 +5831,9 @@ def _research_payload(tid: str, ws) -> dict | None:
             out["structure_current"] = False
         # 图表清单写在**项目目录**（渲染脚本的 cwd），工作区根目录只作回退
         try:
-            from workspace import task_project_dir as _tpd
-            _proj = _tpd(tid)
+            # 只读定位：图表清单读取不建目录（P0-A）
+            from workspace import existing_task_project_dir as _tpd
+            _proj = _tpd(tid) or ws
         except Exception:
             _proj = ws
         cp = _proj / "chart_manifest.json"
@@ -8365,6 +8446,33 @@ def _post_config(self, p, body, admin):
         return self._json({"status":"saved", "secrets": secret_stats})
 
 
+def _get_diagnostics_network(self, p):
+    """GET /api/diagnostics/network：公网出口 DNS 分类（RUNTIME-1022 P0-B，只读脱敏）。
+
+    设置页/运维排障用：资料域名被本机 DNS 映射到保留段（198.18.0.x、2001:2::x，
+    fake-IP 特征）时 SSRF 防线会拒绝——这个接口把"哪个目标、落在哪个保留段、下一步
+    看哪里"讲清楚，避免把出口问题误报成密钥问题或"没有数据"。只做 DNS 解析
+    （不发 HTTP 请求、不新建请求点），不返回完整配置/凭据；`?refresh=1` 强制重解析。
+    """
+    if p != "/api/diagnostics/network":
+        return
+    refresh = "refresh=1" in (self.path or "")
+    import net_policy as _np
+    report = {}
+    try:
+        import net_diag
+        report = net_diag.egress_report(refresh=refresh)
+    except Exception as exc:
+        report = {"state": "unknown", "summary": f"出口诊断不可读：{str(exc)[:80]}",
+                  "probed": 0, "counts": {}, "targets": [], "advice": []}
+    try:
+        proxy = _np.proxy_settings_report()
+    except Exception:
+        proxy = {}
+    return self._json({"network_egress": report, "proxy": proxy,
+                       "hint": "fake-IP 特征 ≠ 已识别代理软件；主机侧 DNS/代理调整需人工审批"})
+
+
 def _get_config_requirements(self, p):
     """GET /api/config/requirements：系统所需全部外部配置 + 当前状态。
 
@@ -10035,6 +10143,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/actionable"), _get_task_actionable),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/config/requirements", _get_config_requirements),
+    (lambda self, p: p == "/api/diagnostics/network", _get_diagnostics_network),
     (lambda self, p: p == "/api/users", _get_users),
     (lambda self, p: p == "/api/llm-mode", _get_llm_mode),
     (lambda self, p: p == "/api/notifications", _get_notifications),

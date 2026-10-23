@@ -295,10 +295,19 @@ class TestDataRootBoundaries(unittest.TestCase):
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
     def test_local_defaults_unchanged(self):
-        """本地不设数据根时沿用既有位置——不动用户机器上已有的产物目录。"""
+        """本地默认（RUNTIME-1022 P0-A 后）：
+
+        - 工作区根稳定在模块目录旁的 workspace/，不再依赖
+          tempfile.gettempdir()（DSH 会话 TEMP 每会话不同，此前随之漂移）；
+        - 分享记录、审计日志、提示词覆盖沿用既有位置（不动用户机器上的文件）。
+        """
         paths = self._paths()
         self.assertEqual(os.path.dirname(os.path.abspath(paths["share"])), str(ROOT))
-        self.assertIn("agent_workspace", paths["workspace"].replace("\\", "/"))
+        workspace_root = paths["workspace"].replace("\\", "/")
+        self.assertIn("/workspace", workspace_root)
+        self.assertNotIn("/temp/", workspace_root.lower())
+        self.assertNotIn("agent_workspace", workspace_root,
+                         "默认根不得再落在系统临时目录下（P0-A 漂移根因）")
         self.assertTrue(paths["audit"].replace("\\", "/").endswith("logs/audit.jsonl"))
         self.assertIn("prompts", paths["prompts"].replace("\\", "/"))
 

@@ -16,6 +16,7 @@ import { stepDisplayStatus } from '../lib/stepSkip'
 import { shouldCollapseResearchForm } from '../lib/consoleLayout'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
+import { intentNotice } from '../lib/researchGoal'
 
 type Tab = 'live' | 'context' | 'results' | 'materials'
 
@@ -290,6 +291,13 @@ export default function TaskConsole() {
       if (data.deduplicated) {
         addLog({ timestamp: new Date().toISOString(), type: 'info', agent: 'orchestrator',
                  message: '重复提交已合并到任务 ' + tid + '（未新建、未重复执行）' })
+      }
+      // P0-C 契约链：后端在提交时做研究意图判定并随响应返回。自由文本的公司研究
+      // 缺契约字段时**当场**告诉用户缺什么、怎么补（不拦截任务；一般任务静默）。
+      const notice = intentNotice(data.research_intent)
+      if (notice) {
+        addLog({ timestamp: new Date().toISOString(), type: 'info', agent: 'orchestrator',
+                 message: notice })
       }
       startTask(tid)
       // D17：新任务重置过期 UI（步骤检查器/验收缺口缓存）

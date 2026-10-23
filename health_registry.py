@@ -37,6 +37,7 @@ _NAME_MCP = "mcp"
 _NAME_LORA = "lora"
 _NAME_REDIS = "redis"  # 任务20
 _NAME_DATA_SOURCES = "data_sources"  # 用户自加数据源（设置页配置）
+_NAME_EGRESS = "network_egress"  # 公网出口 DNS 分类（RUNTIME-1022 P0-B）
 
 # 状态语义（专项 §6）：缺快照与过期都不能是绿色可用
 STATE_AVAILABLE = "available"
@@ -610,9 +611,42 @@ def probe_data_sources() -> dict:
                   state=STATE_AVAILABLE)
 
 
+def probe_network_egress() -> dict:
+    """公网出口的可诊断性（RUNTIME-1022 P0-B，20261022）：DNS 分类，只解析不发请求。
+
+    诊断快照里资料域名被本机 DNS 映射到 198.18.0.x / 2001:2::x（fake-IP 特征），应用
+    按 SSRF 防线拒绝——此前用户只看到"没搜到/没有数据"，被误当成密钥或站点问题。这里
+    把"哪个目标、落在哪个保留段、下一步看哪里"讲清楚：解析已登记公网端点与已知内容
+    主机，按保留段归类；**绿的条件是真解析出了公网地址**。全部被挡 = unavailable，
+    部分被挡 = degraded（其它目标仍可用，不夸大成"所有网络均不可用"）。
+    """
+    try:
+        import net_diag
+        rep = net_diag.egress_report()
+    except Exception as exc:
+        return _unknown_entry(_NAME_EGRESS, f"出口诊断不可读：{str(exc)[:80]}")
+    state = str(rep.get("state") or "unknown")
+    summary = str(rep.get("summary") or "")
+    if state == "unknown":
+        return _unknown_entry(_NAME_EGRESS, summary or "无可诊断目标",
+                              detail="no targets")
+    counts = rep.get("counts") or {}
+    detail = (f"{rep.get('probed', 0)} 个目标；"
+              + " ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if state == "unavailable":
+        return _entry(_NAME_EGRESS, False, summary, detail=detail,
+                      checked_at=rep.get("checked_at"), state=STATE_UNAVAILABLE)
+    if state == "degraded":
+        return _entry(_NAME_EGRESS, True, summary, detail=detail,
+                      checked_at=rep.get("checked_at"), state=STATE_DEGRADED)
+    return _entry(_NAME_EGRESS, True, "", detail=detail,
+                  checked_at=rep.get("checked_at"), state=STATE_AVAILABLE)
+
+
 _PROBES = (
     probe_llm, probe_search, probe_market_source, probe_embedding, probe_sandbox,
     probe_planner, probe_mcp, probe_lora, probe_redis, probe_data_sources,
+    probe_network_egress,
 )
 
 

@@ -95,6 +95,8 @@ config.json.bak.*
 # 数据源/MCP 密钥仓（设置页写入，0600；值绝不入库，只进本机）
 credentials.json
 credentials.json.*
+# 任务身份→产物根的持久绑定索引（与 agents.db 同目录；运行时写入，绝不上传）
+task_roots.json
 .zcode/
 
 # 运行时不需要的内容（已从跟踪移除，永久不上传）

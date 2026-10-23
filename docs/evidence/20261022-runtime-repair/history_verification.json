@@ -1,0 +1,412 @@
+{
+  "captured": "2026-10-22T22:14:41",
+  "workspace_root_new_default": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\workspace",
+  "roots_resolved": [
+    "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\workspace",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-INhT2D\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-18344-6a0eb2e1\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-18344-7905fb0c\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-18344-c412c669\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-18344-d12af580\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-18344-e45eab1d\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-0ac30ec3\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-0c3f1e8c\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-0c9d8a9b\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-1411f133\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-36e61328\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-57db4dcb\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-599b0574\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-6158c492\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7260442b\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-8513aa0e\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-b53d82e7\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-bf1885f4\\agent_workspace\\tasks",
+    "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-c44c9f07\\agent_workspace\\tasks"
+  ],
+  "records": [
+    {
+      "task_id": "ui-b23642e5de",
+      "name": "伊利股份",
+      "located": true,
+      "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\projects\\default\\ui-b23642e5de",
+      "root": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks",
+      "layout": "projects",
+      "source": "scan",
+      "conflict": false,
+      "empty": false,
+      "candidates": [
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\projects\\default\\ui-b23642e5de",
+          "source": "scan",
+          "markers": 5,
+          "files": 51
+        },
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\ui-b23642e5de",
+          "source": "scan",
+          "markers": 1,
+          "files": 0
+        }
+      ],
+      "file_count": 51,
+      "artifacts": {
+        "project/working_paper.json": {
+          "exists": true,
+          "sha256": "c00cc948fcb103b10e2d1dc0b3454d3f08043bebdd30e35a752f307185f32529",
+          "bytes": 58624
+        },
+        "project/financials.json": {
+          "exists": true,
+          "sha256": "a8c84d25a2b05693f57e10ac86c9295d99be6386e5bf1cacf49d7d69ce382c4d",
+          "bytes": 511160
+        },
+        "analysis/dataset.json": {
+          "exists": true,
+          "sha256": "4f28a8329dc6eb358b2331ccb94458303faf9a6e9fc8f994ac9b738a3d663ed8",
+          "bytes": 55866
+        },
+        "research_state.json": {
+          "exists": true,
+          "sha256": "bb326ba3fe030f5005a8e5f98ea99c76057c35f811104abdd478597566d46d46",
+          "bytes": 723
+        },
+        "acceptance_report.json": {
+          "exists": true,
+          "sha256": "06c4ad6259df18651e39f6e13a35a705d3127e85ab4794dcd8429b379e7fefa3",
+          "bytes": 34686
+        },
+        "reports": [
+          "report.md",
+          "report.pdf",
+          "report_appendix.md",
+          "report_body.md"
+        ],
+        "delivery_zips": [
+          {
+            "name": "deliverables_20261021_222233.zip",
+            "sha256": "868ba751688c2b0c8bc7372388917e5220f13caf4d4f9736747b72891c1ed793",
+            "bytes": 1177924
+          },
+          {
+            "name": "deliverables_20261021_223018_3c00b8.zip",
+            "sha256": "7e7863c4f4b3d991bd0209c6d16d96b31e7016aa6ed0d10078c091f0eb215154",
+            "bytes": 5955118
+          }
+        ]
+      },
+      "marker_files": {
+        "working_paper": true,
+        "financials": true,
+        "analysis_dataset": true
+      },
+      "matches_diagnosis_expectation": true
+    },
+    {
+      "task_id": "ui-a0d82a26c4",
+      "name": "贵州茅台",
+      "located": true,
+      "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\projects\\default\\ui-a0d82a26c4",
+      "root": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks",
+      "layout": "projects",
+      "source": "scan",
+      "conflict": false,
+      "empty": false,
+      "candidates": [
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\projects\\default\\ui-a0d82a26c4",
+          "source": "scan",
+          "markers": 5,
+          "files": 51
+        },
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\ui-a0d82a26c4",
+          "source": "scan",
+          "markers": 1,
+          "files": 0
+        }
+      ],
+      "file_count": 51,
+      "artifacts": {
+        "project/working_paper.json": {
+          "exists": true,
+          "sha256": "b534c7a0492123feaa6c32dcf69426f02ca590c517080fae8a49ccd4a2fd5392",
+          "bytes": 353641
+        },
+        "project/financials.json": {
+          "exists": true,
+          "sha256": "1272764e755a48111cd3a8f6074c3a72730ab66141e9180c94ba0b581c6bb80e",
+          "bytes": 463388
+        },
+        "analysis/dataset.json": {
+          "exists": true,
+          "sha256": "9be9df1f41172302a259f37a467c275df51026b3ab449e42ff15731a7351f001",
+          "bytes": 215318
+        },
+        "research_state.json": {
+          "exists": true,
+          "sha256": "ad00024bf56ca81caaf908f2a301db2e48cf9c4962618020f15045ec8d6e1c79",
+          "bytes": 5793
+        },
+        "acceptance_report.json": {
+          "exists": true,
+          "sha256": "33485d02ec7c3f32f2c049b82b288ee49ddc89ba0d8c8d07eefb682c1d3bd038",
+          "bytes": 41814
+        },
+        "reports": [
+          "report.md",
+          "report_appendix.md",
+          "report_body.md"
+        ],
+        "delivery_zips": [
+          {
+            "name": "deliverables_20261021_212027.zip",
+            "sha256": "70177ac177398129e68438685abdeb93ab36cbcbf65cca0c5150c32599434a86",
+            "bytes": 3746762
+          }
+        ]
+      },
+      "marker_files": {
+        "working_paper": true,
+        "financials": true,
+        "analysis_dataset": true
+      },
+      "matches_diagnosis_expectation": true
+    },
+    {
+      "task_id": "ui-d59152ebb9",
+      "name": "洋河股份",
+      "located": true,
+      "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\agent_workspace\\tasks\\projects\\default\\ui-d59152ebb9",
+      "root": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\agent_workspace\\tasks",
+      "layout": "projects",
+      "source": "scan",
+      "conflict": false,
+      "empty": false,
+      "candidates": [
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\agent_workspace\\tasks\\projects\\default\\ui-d59152ebb9",
+          "source": "scan",
+          "markers": 5,
+          "files": 60
+        },
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\ui-d59152ebb9",
+          "source": "scan",
+          "markers": 0,
+          "files": 2
+        },
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-INhT2D\\agent_workspace\\tasks\\ui-d59152ebb9",
+          "source": "scan",
+          "markers": 0,
+          "files": 2
+        }
+      ],
+      "file_count": 60,
+      "artifacts": {
+        "project/working_paper.json": {
+          "exists": true,
+          "sha256": "4e7bf712bac1930c2c3c9cad8cc6bf725057221b9ecfc1638b739968d3591baf",
+          "bytes": 410459
+        },
+        "project/financials.json": {
+          "exists": true,
+          "sha256": "9a9b02fa92edc1802e70ad5870091d2501838c514530adc06029170fc5110024",
+          "bytes": 348835
+        },
+        "analysis/dataset.json": {
+          "exists": true,
+          "sha256": "843534ad2124ea438c419bd69a9104a95c12f716644ee88b41416033791210b6",
+          "bytes": 252796
+        },
+        "research_state.json": {
+          "exists": true,
+          "sha256": "dd2ae0aeee5685ed6a3ce1c843004a8b2098c94cbf6a26e9ab7b0de800f960cd",
+          "bytes": 2249
+        },
+        "acceptance_report.json": {
+          "exists": true,
+          "sha256": "e495bdc630f9b56ed0440f6552a59392d8d66b673407016ac4959c67385dbaf7",
+          "bytes": 35742
+        },
+        "reports": [
+          "report.md",
+          "report.pdf",
+          "report_appendix.md",
+          "report_body.md"
+        ],
+        "delivery_zips": [
+          {
+            "name": "deliverables_20261021_145534.zip",
+            "sha256": "685b297ceb4f5d066f97fe49c75bc9760b7d0f538745edd06fbbfa1d3736215d",
+            "bytes": 4225206
+          },
+          {
+            "name": "deliverables_20261021_151250_2aabd6.zip",
+            "sha256": "9b8e960d3a2be999d793ab90a5f4fde1a9eead3be2f13a52d93aec0bd035b494",
+            "bytes": 5762196
+          },
+          {
+            "name": "deliverables_20261021_152053_9ab4b5.zip",
+            "sha256": "62d0c6fb15f571d70c0a012c280fe2c1c45873eb3558bf0aa3dcbaa87d7f2d53",
+            "bytes": 5790065
+          }
+        ]
+      },
+      "marker_files": {
+        "working_paper": true,
+        "financials": true,
+        "analysis_dataset": true
+      },
+      "matches_diagnosis_expectation": true
+    },
+    {
+      "task_id": "ui-8b28c95ab1",
+      "name": "海天味业",
+      "located": true,
+      "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\projects\\default\\ui-8b28c95ab1",
+      "root": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks",
+      "layout": "projects",
+      "source": "scan",
+      "conflict": false,
+      "empty": false,
+      "candidates": [
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-7b69ad23\\agent_workspace\\tasks\\projects\\default\\ui-8b28c95ab1",
+          "source": "scan",
+          "markers": 4,
+          "files": 26
+        }
+      ],
+      "file_count": 26,
+      "artifacts": {
+        "project/working_paper.json": {
+          "exists": false
+        },
+        "project/financials.json": {
+          "exists": false
+        },
+        "analysis/dataset.json": {
+          "exists": false
+        },
+        "research_state.json": {
+          "exists": true,
+          "sha256": "77f69f71bf743bb8313ef7fe7dd633bc619e57e8d18d2d44640567787f93d1b2",
+          "bytes": 723
+        },
+        "acceptance_report.json": {
+          "exists": true,
+          "sha256": "5198467de2330569fda2ca015cc4feddf4da3846bb0b2f1821d907618a46cb3e",
+          "bytes": 6608
+        },
+        "reports": [
+          "report.md",
+          "report_appendix.md",
+          "report_body.md"
+        ],
+        "delivery_zips": [
+          {
+            "name": "deliverables_20261021_190912.zip",
+            "sha256": "3bbb025aa4fa1c7da2a3a4afaaa9a7df1bbefd229d079183b1e97a0f1bc9ec7f",
+            "bytes": 66234
+          }
+        ]
+      },
+      "marker_files": {
+        "working_paper": false,
+        "financials": false,
+        "analysis_dataset": false
+      },
+      "matches_diagnosis_expectation": true
+    },
+    {
+      "task_id": "ui-cc853cf86b",
+      "name": "三一重工",
+      "located": true,
+      "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b",
+      "root": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks",
+      "layout": "projects",
+      "source": "scan",
+      "conflict": false,
+      "empty": false,
+      "candidates": [
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b",
+          "source": "scan",
+          "markers": 5,
+          "files": 57
+        },
+        {
+          "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b",
+          "source": "scan",
+          "markers": 0,
+          "files": 2
+        }
+      ],
+      "file_count": 57,
+      "artifacts": {
+        "project/working_paper.json": {
+          "exists": true,
+          "sha256": "5715aefe8c8f1fb5b27a24695c1f01659cf90126d5106607d2c089b685c56b1c",
+          "bytes": 153910
+        },
+        "project/financials.json": {
+          "exists": false
+        },
+        "analysis/dataset.json": {
+          "exists": true,
+          "sha256": "3ae222574d324a1543e3983b52fa5627bd2ddeb1fe21b0b5d2c1e8ce2d8cdf7c",
+          "bytes": 124762
+        },
+        "research_state.json": {
+          "exists": true,
+          "sha256": "948b8c1afeb7c945de9deefae768d402256b94cc978a30e162e7dd04c9d6d740",
+          "bytes": 2260
+        },
+        "acceptance_report.json": {
+          "exists": true,
+          "sha256": "2556e1551bf86df33e7a0ccf78cc49fbbf3ccf46839e4b6769adadf87ed35194",
+          "bytes": 87854
+        },
+        "reports": [
+          "report.md",
+          "report.pdf",
+          "report_appendix.md",
+          "report_body.md"
+        ],
+        "delivery_zips": [
+          {
+            "name": "deliverables_20261020_184232.zip",
+            "sha256": "1b8ef9893d4cf8d61cc950661e0160567a2f7f3f8d7cb6900356f3c30cb4b957",
+            "bytes": 140297
+          },
+          {
+            "name": "deliverables_20261020_201859_478d5a.zip",
+            "sha256": "5d7f7bb4035840c8b224639abd4c91ceee49c77a6726ae9b9b3f38f38138206e",
+            "bytes": 5545517
+          },
+          {
+            "name": "deliverables_20261020_204948_375af7.zip",
+            "sha256": "c8005aaaa7ca1eaf657c37679ba9bab31b3e02e0edbc818a273f0ad485dfb8e9",
+            "bytes": 5717706
+          }
+        ]
+      },
+      "marker_files": {
+        "working_paper": true,
+        "financials": false,
+        "analysis_dataset": true
+      },
+      "matches_diagnosis_expectation": true
+    }
+  ],
+  "summary": {
+    "all_located": true,
+    "any_conflict": false,
+    "mismatch_vs_diagnosis": [],
+    "exit": 0
+  }
+}

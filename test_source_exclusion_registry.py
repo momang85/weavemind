@@ -52,11 +52,31 @@ class TestSourcePartition(unittest.TestCase):
 
     def test_relevant_candidate_is_kept(self):
         good = {"title": "伊利股份 2024 年年度报告",
-                "url": "https://www.cninfo.com.cn/report.pdf",
+                "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/8.PDF",
                 "snippet": "营业收入 归母净利润 经营活动现金流净额 600887"}
         kept, dropped = OrchestratorV2._partition_source_items(GOAL, [good] + IRRELEVANT)
         self.assertEqual([it["url"] for it in kept], [good["url"]])
         self.assertEqual(len(dropped), 3, "混在有效候选里的无关条目仍要剔除")
+        self.assertTrue(all(str(it.get("_exclude_reason") or "") for it in dropped))
+
+    def test_undated_relevant_candidate_is_pending_not_admitted(self):
+        """主体/期间都对但**发布日不可核** → 待核验，不进来源清单、也不算"无关"。
+
+        P0-C 词汇：候选 / 待核验 / 采用 / 剔除。判不准 ≠ 无关：不得把"待核验"
+        写成"与本标的不含任何共同主题词"，也不得自动采用。
+        """
+        undated = {"title": "伊利股份 2024 年年度报告",
+                   "url": "https://www.cninfo.com.cn/report.pdf",
+                   "snippet": "营业收入 归母净利润 600887"}
+        kept, dropped = OrchestratorV2._partition_source_items(GOAL, [undated])
+        self.assertEqual(kept, [], "未核验时点前不得自动采用")
+        self.assertEqual(len(dropped), 1)
+        rec = dropped[0]
+        self.assertEqual(str((rec.get("_admission") or {}).get("stage") or ""), "pending")
+        self.assertIn("待核验", str(rec.get("_exclude_reason") or ""))
+        self.assertNotIn("与本标的不含任何共同主题词",
+                         str(rec.get("_exclude_reason") or ""),
+                         "不得把'判不准'说成'无关'")
 
     def test_goal_without_strong_subject_fails_open(self):
         """无强主体词时启发式判不准：维持 fail-open，不误删来源。"""
@@ -241,6 +261,46 @@ class TestExclusionAuditArtifact(unittest.TestCase):
             members = dp._exclusion_audit_members(ws)
             self.assertEqual([arc for _p, arc in members],
                              ["audit/source_exclusions.json"])
+
+    def test_pending_ledger_is_split_from_rejections_and_packaged(self):
+        """P0-C：pending / rejected 分两本账，两份都进交付包 audit/。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import delivery_pipeline as dp
+        from orchestrator_v2 import OrchestratorV2
+
+        rejected = dict(IRRELEVANT[0], _admission={"stage": "rejected"})
+        pending = dict(IRRELEVANT[1],
+                       _exclude_reason="待核验：主体/期间/时点证据不足",
+                       _admission={"stage": "pending"})
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td) / "project"
+            with patch.object(__import__("orchestrator_v2"),
+                              "task_project_dir", lambda tid: proj):
+                orch = OrchestratorV2.__new__(OrchestratorV2)
+                orch._task_sources_lock = __import__("threading").Lock()
+                orch._now_iso = lambda: "2026-10-22T12:00:00+08:00"
+                orch._record_source_exclusion("t-split", [rejected, pending])
+                out_r = orch._write_source_exclusions_file("t-split")
+                out_p = orch._write_source_pending_file("t-split")
+            self.assertTrue(out_r and out_p)
+            rej = json.loads((proj / "source_exclusions.json")
+                             .read_text(encoding="utf-8"))
+            pend = json.loads((proj / "source_pending.json")
+                              .read_text(encoding="utf-8"))
+            self.assertEqual([e["url"] for e in rej["excluded"]],
+                             [IRRELEVANT[0]["url"]], "rejected 只进剔除账")
+            self.assertEqual([e["url"] for e in pend["pending"]],
+                             [IRRELEVANT[1]["url"]], "pending 只进待核验账")
+            self.assertNotIn("待核验", rej["excluded"][0]["reason"])
+            ws = Path(td)
+            members = dp._exclusion_audit_members(ws)
+            self.assertEqual(sorted(arc for _p, arc in members),
+                             ["audit/source_exclusions.json",
+                              "audit/source_pending.json"],
+                             "交付包 audit/ 要同时装下两本账")
 
     def test_packaging_call_site_is_wired(self):
         """回归守卫：打包路径必须真的调用纳入函数（防有人删掉那一行）。"""

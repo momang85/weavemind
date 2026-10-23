@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from 'react'
 import { Loader2, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square, Building2, ArrowUpRight, Search, Table2, Archive, BookOpen } from 'lucide-react'
-import { buildResearchGoal, type ResearchFields, type ResearchForm } from '../../lib/researchGoal'
+import { buildResearchGoal, looksLikeCompanyResearch, type ResearchFields, type ResearchForm } from '../../lib/researchGoal'
 
 /** 快答结果卡片：正文 + 来源链接 + 诚实降级标签。 */
 function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
@@ -220,6 +220,12 @@ export default memo(function SubmitPanel({
                 disabled={isRunning || demoMode} />
             </label>
             {researchFields && <p className="text-xs text-brand">已附公司、年度与口径契约；手改目标将清除契约，可返回表单重新生成。</p>}
+            {!researchFields && looksLikeCompanyResearch(goal) && (
+              <p className="text-xs text-amber-700">
+                这看起来是公司研究：建议用上方「研究一家公司」表单补齐公司 / 两个年度 / 口径 / 资料截至日，
+                才能得到带底稿与来源定位的研究交付；直接提交会先按一般检索处理。
+              </p>
+            )}
             <button onClick={() => onSubmit(undefined, researchFields)} disabled={isRunning || demoMode || !goal.trim()}
               className="button-primary inline-flex items-center gap-2 rounded-lg px-5 py-3 text-sm font-medium">
               {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUpRight className="h-4 w-4" />}

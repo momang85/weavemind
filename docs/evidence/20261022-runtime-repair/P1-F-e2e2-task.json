@@ -1,0 +1,31 @@
+{
+  "task_id": "ui-7581c1a827",
+  "purpose": "修复后代码重启上线后的端到端实测（第二次）",
+  "build": {
+    "loaded_sha": "de24c0b55aba",
+    "disk_sha": "de24c0b55aba",
+    "restart_required": false,
+    "instance": "inst-cf0d8d8dd0",
+    "started_at": "2026-10-23T08:11:04+0800"
+  },
+  "research_intent": {
+    "intent": "company_research",
+    "status": "in_scope"
+  },
+  "final_status": "SUCCESS_WITH_ISSUES",
+  "acceptance_overall": "fail",
+  "research_state": "in_scope_no_structure",
+  "delivery_zip": "deliverables_20261023_083514.zip",
+  "manifest_members": 9,
+  "manifest_hash_mismatches": 0,
+  "search_ledger_used": 6,
+  "search_attempts": 5,
+  "adopted_totals": {
+    "admitted": 0,
+    "candidates": 5,
+    "steps": 1
+  },
+  "adopted_note_on_gaps": "修复后语义在线生效：note 如实披露 pending 需抓正文核验才转正",
+  "post_run_build_restart_required": false,
+  "completed_at_db": "2026-10-23 00:35:39 (UTC)"
+}

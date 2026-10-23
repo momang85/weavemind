@@ -1,0 +1,280 @@
+ M .github/workflows/ci.yml
+ M .gitignore
+ M AGENTS.md
+ M delivery_pipeline.py
+ M docs/evidence/20261012-c5-review/README.md
+ M evals/cases/auto_grown.json
+ M frontend/src/components/console/SubmitPanel.tsx
+ M frontend/src/lib/researchGoal.ts
+ M frontend/src/pages/TaskConsole.tsx
+ M frontend/tests/researchGoal.test.mjs
+ M health_registry.py
+ M logging_setup.py
+ M net_policy.py
+ M orchestrator_v2.py
+ M search_diag.py
+ M test_orchestrator_v2.py
+ M test_source_exclusion_registry.py
+ M test_task_persistence.py
+ M web_ui.py
+ M workspace.py
+?? .chart-data-1SZ4pF/
+?? .chart-data-Zv5Z5N/
+?? .chart-data-bgFPOf/
+?? .chart-data-dPflfU/
+?? .chart-data-nzqZ2W/
+?? .chart-data-ovlRv9/
+?? .chart-data-qO1cWt/
+?? .chart-data-uTsk3R/
+?? .local/
+?? .zcodeignore
+?? _dbg_ver.py
+?? _l3_probe_tmp.py
+?? _trial_files.py
+?? _trial_monitor.py
+?? _trial_nev.py
+?? _trial_peek.py
+?? _trial_submit.py
+?? _trial_ws.py
+?? build_identity.py
+?? docs/A批复核与补修指令_20260918.md
+?? docs/DSH下午增量复核与收口指令_20260928.md
+?? docs/DSH真实样本复核与下一批执行_20260928.md
+?? docs/Harness接续执行指令_20260927.md
+?? docs/arch_phase2_p0_metrics_split.md
+?? docs/arch_phase2_p1_dispatch_routing.md
+?? docs/arch_phase2_tasks15_16_17.md
+?? docs/arch_phase3_task18_acceptance_evidence.md
+?? docs/arch_phase3_task19_search_coverage.md
+?? docs/arch_phase3_task20_redis_degradation.md
+?? docs/arch_phase4_task21_supervise_default.md
+?? docs/arch_phase4_task22_report_compaction.md
+?? docs/arch_phase4_task23_llm_failover.md
+?? docs/evidence/20260917-target-fingerprints.json
+?? docs/evidence/20260918-A-review-fingerprints.json
+?? docs/evidence/20260918-review-fingerprints.json
+?? docs/evidence/20260919-F3-review-fingerprints.json
+?? docs/evidence/20260919-report-review-fingerprints.json
+?? docs/evidence/20260920-report-review-fingerprints.json
+?? docs/evidence/20260921-night-D-review-fingerprints.json
+?? docs/evidence/20260921-stage-D-review-fingerprints.json
+?? docs/evidence/20260922-D-review-fingerprints.json
+?? docs/evidence/20260923-D-delivery-review-fingerprints.json
+?? docs/evidence/20260923-noon-D-review-fingerprints.json
+?? docs/evidence/20260925-onboarding-review-fingerprints.json
+?? docs/evidence/20260926-network-probe.json
+?? docs/evidence/20260926-search-review-fingerprints.json
+?? docs/evidence/20260926-search-review.md
+?? docs/evidence/20260927-harness-command-sent.png
+?? docs/evidence/20260927-harness-handoff-fingerprints.json
+?? docs/evidence/20260927-system-review-fingerprints.json
+?? docs/evidence/20260928-afternoon-dsh-command-sent.png
+?? docs/evidence/20260928-afternoon-review-fingerprints.json
+?? docs/evidence/20260928-afternoon-review-probes.json
+?? docs/evidence/20260928-dsh-command-sent.png
+?? docs/evidence/20260928-dsh-review-fingerprints.json
+?? docs/evidence/20260928-dsh-review-probes.json
+?? docs/evidence/20260929-Q-command-sent.png
+?? docs/evidence/20260929-Q-review-fingerprints.json
+?? docs/evidence/20260929-acquisition-command-sent.png
+?? docs/evidence/20260929-acquisition-facts-review.md
+?? docs/evidence/20260929-acquisition-review-fingerprints.json
+?? docs/evidence/20260929-night-acceptance-review.md
+?? docs/evidence/20260929-night-command-sent.png
+?? docs/evidence/20260929-night-output-review.json
+?? docs/evidence/20260929-night-review-fingerprints.json
+?? docs/evidence/20260929-stage-review.md
+?? docs/evidence/20260930-Q-command-sent.png
+?? docs/evidence/20260930-Q-deepening-review.md
+?? docs/evidence/20260930-Q-review-fingerprints.json
+?? docs/evidence/20260930-afternoon-logic-command-sent.png
+?? docs/evidence/20260930-afternoon-logic-fingerprints.json
+?? docs/evidence/20260930-afternoon-logic-review.md
+?? docs/evidence/20260930-expanded-delivery-probes.json
+?? docs/evidence/20260930-expanded-delivery-probes.py
+?? docs/evidence/20260930-expanded-frontend-probes.cjs
+?? docs/evidence/20260930-expanded-frontend-probes.json
+?? docs/evidence/20260930-expanded-package-recompute.json
+?? docs/evidence/20260930-expanded-pdf/
+?? docs/evidence/20260930-expanded-review-fingerprints.json
+?? docs/evidence/20260930-expanded-stageT-command-sent.png
+?? docs/evidence/20260930-expanded-system-review.md
+?? docs/evidence/20261001-U-scale-guidance-sent.png
+?? docs/evidence/20261001-U-scale-review-fingerprints.json
+?? docs/evidence/20261001-U-scale-review.md
+?? docs/evidence/20261001-V-to-W-review-fingerprints.json
+?? docs/evidence/20261001-W-architecture-review.md
+?? docs/evidence/20261001-W-guidance-sent.png
+?? docs/evidence/20261001-W-to-X-review-fingerprints.json
+?? docs/evidence/20261001-X-guidance-sent.png
+?? docs/evidence/20261001-analysis-direction-command.png
+?? docs/evidence/20261001-analysis-direction-fingerprints.json
+?? docs/evidence/20261001-e2e-browser-run.json
+?? docs/evidence/20261001-e2e-dsh-guidance.png
+?? docs/evidence/20261001-e2e-task-submitted.png
+?? docs/evidence/20261001-readme-review-fingerprints.json
+?? docs/evidence/20261002-e2e-close-fingerprints.json
+?? docs/evidence/20261002-e2e-current-package-report.md
+?? docs/evidence/20261002-e2e-current-package-report.pdf
+?? docs/evidence/20261002-e2e-final-guidance-queued.png
+?? docs/evidence/20261002-e2e-final-workbench.png
+?? docs/evidence/20261002-e2e-independent-review.json
+?? docs/evidence/20261002-e2e-pdf-page-1.png
+?? docs/evidence/20261002-e2e-pdf-page-6.png
+?? docs/evidence/20261002-e2e-running-workbench.png
+?? docs/evidence/20261002-repair-boundary-fingerprints.json
+?? docs/evidence/20261002-repair-guidance-sent.png
+?? docs/evidence/20261003-incremental-guidance-sent.png
+?? docs/evidence/20261003-incremental-review-fingerprints.json
+?? docs/evidence/20261005-X1-guidance-sent.jpg
+?? docs/evidence/20261005-data-acquisition-plan-fingerprints.json
+?? docs/evidence/20261005-feasibility-roi-guidance-sent.png
+?? docs/evidence/20261005-feasibility-roi-review-fingerprints.json
+?? docs/evidence/20261005-research-view-review-fingerprints.json
+?? docs/evidence/20261005-review-report-page1.png
+?? docs/evidence/20261005-review-report-page9.png
+?? docs/evidence/20261005-three-domain-guidance-sent.png
+?? docs/evidence/20261005-three-domain-plan-fingerprints.json
+?? docs/evidence/20261007-stage-next-review/
+?? docs/evidence/20261008-architect-next-stage/
+?? docs/evidence/20261008-existing-data-b1/
+?? docs/evidence/20261008-offline-research-framework/
+?? docs/evidence/20261008-quant-methods-plan/
+?? docs/evidence/20261009-architect-b2/
+?? docs/evidence/20261009-architect-b3/
+?? docs/evidence/20261009-architecture-market/
+?? docs/evidence/20261010-architect-b4/
+?? docs/evidence/20261010-b4-product-review/
+?? docs/evidence/20261011-b4-c2a-review/
+?? docs/evidence/20261011-b4-c2b-review/
+?? docs/evidence/20261011-b4-c2c-review/
+?? docs/evidence/20261011-b4-c2d-review/
+?? docs/evidence/20261011-b4-c2e-review/
+?? docs/evidence/20261011-c2a-accept-next/
+?? docs/evidence/20261011-c2b-review/
+?? docs/evidence/20261011-c2c-accept/
+?? docs/evidence/20261011-c2d-accept/
+?? docs/evidence/20261011-c2e-accept/
+?? docs/evidence/20261011-c3-accept/
+?? docs/evidence/20261012-c5-review/c5_gui_20261013_entities.png
+?? docs/evidence/20261012-c5-review/c5_gui_20261013_reopened.png
+?? docs/evidence/20261012-c5-review/c5_gui_closure_20261013.json
+?? docs/evidence/20261017-main-merge-verified.png
+?? docs/evidence/20261018-phase3-e2e/
+?? docs/evidence/20261019-live-e2e/
+?? docs/evidence/20261019-phase4-task21-23/
+?? docs/evidence/20261021-architect-closeout/push_receipt.md
+?? docs/evidence/20261022-logic-audit/01-web-ui-routing-auth.md
+?? docs/evidence/20261022-logic-audit/02-orchestrator-dispatch-idempotency.md
+?? docs/evidence/20261022-logic-audit/03-task-state-projection-cache.md
+?? docs/evidence/20261022-logic-audit/04-delivery-version-binding.md
+?? docs/evidence/20261022-logic-audit/05-llm-client-accounting-retry.md
+?? docs/evidence/20261022-logic-audit/06-worker-queue-ack.md
+?? docs/evidence/20261022-logic-audit/07-acceptance-numbers.md
+?? docs/evidence/20261022-logic-audit/08-search-coverage-budget.md
+?? docs/evidence/20261022-logic-audit/09-material-intake-bounds.md
+?? docs/evidence/20261022-logic-audit/10-admission-predicates.md
+?? docs/evidence/20261022-logic-audit/11-concurrency-resources.md
+?? docs/evidence/20261022-logic-audit/12-three-state-separation.md
+?? docs/evidence/20261022-logic-audit/13-except-pass-hotspots.md
+?? docs/evidence/20261022-pages-fix/recheck/
+?? docs/evidence/20261022-pages-fix/shots/
+?? docs/evidence/20261022-runtime-diagnosis/
+?? docs/evidence/20261022-runtime-repair/
+?? docs/offline-install.md
+?? docs/三场景输出复核与F3执行指令_20260919.md
+?? docs/三域金融研究架构规划_20261005.md
+?? docs/代码逻辑收口与DSH下一批_20260930下午.md
+?? docs/分析卓越化_经营驱动研究与标杆案例_20261001.md
+?? docs/前端视觉与操作架构_20261022.md
+?? docs/历史架构指令_20260930.md
+?? docs/员工任务_研究运行闭环修复_20261022.md
+?? docs/报告成稿复核与下一步指导_20260920.md
+?? docs/报告质量二轮复核与F2补修指令_20260919.md
+?? docs/报告质量复核与产品化路线_20260919.md
+?? docs/搜索网络与金融资料获取专项_20260926.md
+?? docs/新人一键启动与首次研究体验_20260925.md
+?? docs/目标收敛与执行指令_20260917.md
+?? docs/真实研究闭环与阶段D收口_20260927.md
+?? docs/端到端复核_研究修复闭环_20261002.md
+?? docs/端到端实测_真实入口与研究数据贯通_20261001.md
+?? docs/路线图_市场对齐_20260927.md
+?? docs/金融分析与受控建模阶段Q_20260929.md
+?? docs/金融资料获取与事实化补链_20260929.md
+?? docs/阶段D交付真实性复验与执行_20260923.md
+?? docs/阶段D前置审查_报告与交付_20260921.md
+?? docs/阶段D夜间复核与纠偏_20260921.md
+?? docs/阶段D实机复核与下一批指令_20260922.md
+?? docs/阶段D收口复验与下一步_20260922.md
+?? docs/阶段D正常交付闭环执行指令_20260923.md
+?? docs/阶段D系统收敛与研究效能提升_20260923.md
+?? docs/阶段Q增量验收与产品闭环推进_20260929夜.md
+?? docs/阶段Q深化_可信分析与问题驱动建模_20260930.md
+?? docs/阶段T_可信研究内核与产品化路线_20260930.md
+?? docs/阶段V_从分析标杆到经营研究产品_20261001.md
+?? docs/阶段W_研究判断与有效经营情景_20261001.md
+?? docs/阶段X_可检验研究续页与简洁交付_20261001.md
+?? docs/阶段复核与下一步指令_20260918.md
+?? evals/a2_official_chain_20260929/000711-corrected/
+?? evals/a2_official_chain_20260929/000711/project/materials/797a3b25d1142a30/
+?? evals/a2_official_chain_20260929/002304-2023/
+?? evals/a2_official_chain_20260929/002304-2025/
+?? evals/a2_official_chain_20260929/002304-2025h1/
+?? evals/a2_official_chain_20260929/002304/project/materials/f42e747c73850b59/
+?? evals/a2_official_chain_20260929/600031/project/materials/0c3e82056e977adc/
+?? net_diag.py
+?? output/
+?? probe_batchA.py
+?? research_intent.py
+?? search_evidence.py
+?? source_admission.py
+?? test_build_identity.py
+?? test_log_isolation.py
+?? test_net_diag.py
+?? test_research_intent.py
+?? test_search_evidence.py
+?? test_source_admission.py
+?? test_workspace_addressing.py
+?? tmp/
+?? tmp43wusmyy/
+?? tmp9jgzllmm/
+?? tmpaof2bhxz/
+?? tmphb8wtlji/
+?? tmpiezqfnoz/
+?? tools/
+?? trial_tasks.json
+?? web_fetch_worker.py
+?? ~/
+
+=== diff stat ===
+warning: in the working copy of '.github/workflows/ci.yml', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'delivery_pipeline.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'evals/cases/auto_grown.json', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'frontend/src/components/console/SubmitPanel.tsx', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'frontend/src/lib/researchGoal.ts', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'net_policy.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'orchestrator_v2.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'test_orchestrator_v2.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'test_source_exclusion_registry.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'test_task_persistence.py', CRLF will be replaced by LF the next time Git touches it
+ .github/workflows/ci.yml                        |  14 +
+ .gitignore                                      |   2 +
+ AGENTS.md                                       |   8 +-
+ delivery_pipeline.py                            |  88 ++-
+ docs/evidence/20261012-c5-review/README.md      |   6 +-
+ evals/cases/auto_grown.json                     |  99 ++++
+ frontend/src/components/console/SubmitPanel.tsx |   8 +-
+ frontend/src/lib/researchGoal.ts                |  44 ++
+ frontend/src/pages/TaskConsole.tsx              |   8 +
+ frontend/tests/researchGoal.test.mjs            |  32 +
+ health_registry.py                              |  34 ++
+ logging_setup.py                                |  51 +-
+ net_policy.py                                   | 143 +++--
+ orchestrator_v2.py                              | 751 ++++++++++++++++++++----
+ search_diag.py                                  |  15 +-
+ test_orchestrator_v2.py                         |   6 +-
+ test_source_exclusion_registry.py               |  62 +-
+ test_task_persistence.py                        |  13 +-
+ web_ui.py                                       | 135 ++++-
+ workspace.py                                    | 517 +++++++++++++++-
+ 20 files changed, 1837 insertions(+), 199 deletions(-)

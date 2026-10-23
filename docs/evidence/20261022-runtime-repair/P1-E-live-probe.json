@@ -1,0 +1,23 @@
+{
+  "captured_at": "2026-10-23T00:10:39+08:00",
+  "live_instance": {
+    "pid": 24572,
+    "started_at_local": "2026-10-22T17:08:16.7735082+08:00",
+    "health_keys": [
+      "code_sandbox",
+      "llm",
+      "redis",
+      "service",
+      "status",
+      "time"
+    ],
+    "has_build_identity": false,
+    "service": "weavemind-web",
+    "status": "ok"
+  },
+  "local_source": {
+    "disk_sha": "fc6c445467d7",
+    "file_count": 13
+  },
+  "conclusion": "在线实例仍是 P1-E 之前构建：/api/health 无 build 字段；本地磁盘源码指纹已含 P1-E 改动 → 在线生效待受控重启"
+}

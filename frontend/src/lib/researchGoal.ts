@@ -117,6 +117,50 @@ export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   return { goal, fields, gaps: [] }
 }
 
+/**
+ * 自由文本是否**像公司研究请求**（纯形态学判据，无公司名白名单）：
+ * 研究类动词 + 主体/代码/期间词。界面据此提示"建议用研究表单补契约"，
+ * 只提示、不拦截——一般任务（"总结一下要点"）不含这些词，不受影响。
+ */
+export function looksLikeCompanyResearch(goal: string): boolean {
+  const s = String(goal ?? '')
+  if (!s) return false
+  const researchVerb = /研究|分析|对比|评估|梳理|测算|跟踪|年报解读|经营情况|经营状况/.test(s)
+  if (!researchVerb) return false
+  const subject = /股份|有限公司|公司|集团|银行|证券|保险|股票|上市公司|药业|乳业|科技|汽车|能源|电子|航空|传媒|影业|食品|酒业|钢铁|地产/.test(s)
+  const code = /\b\d{6}\b|\b\d{4,6}\.(SH|SZ|HK|ss|sz|hk)\b/i.test(s)
+  const period = /(19|20)\d{2}\s*(年度|年|年报|与)|两期|两个年度/.test(s)
+  return subject || code || period
+}
+
+/** 提交响应里的研究意图判定（与后端 `research_intent.assess` 同构，缺省安全）。 */
+export interface ResearchIntent {
+  intent?: string
+  status?: string
+  source?: string
+  missing?: string[]
+  questions?: string[]
+  boundary?: string
+  reason?: string
+  repair?: string
+}
+
+/** 把提交响应里的 research_intent 转成一条可展示的提示（一般任务返回 null）。 */
+export function intentNotice(intent: ResearchIntent | null | undefined): string | null {
+  if (!intent || !intent.intent || intent.intent === 'general') return null
+  if (intent.status === 'out_of_scope') {
+    return `超出首期研究范围：${intent.boundary || intent.reason || '详见任务说明'}`
+  }
+  if (intent.status === 'needs_contract') {
+    const missing = (intent.missing ?? []).join('、') || '未列明'
+    const q = (intent.questions ?? []).slice(0, 2).join(' ')
+    return (`这是公司研究请求，但缺契约字段（${missing}）。` +
+      `任务会先按一般检索处理、不做研究交付；` +
+      `用「两期经营研究」表单补齐公司/期间/口径后重新提交可得研究交付。${q ? ' 例：' + q : ''}`)
+  }
+  return null
+}
+
 /** 底稿里一条明细/派生行的展示字段（缺什么显示"未知"，不填 0）。 */
 export interface FactRow {
   factId: string
