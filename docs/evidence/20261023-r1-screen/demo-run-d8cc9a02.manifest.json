@@ -1,0 +1,36 @@
+{
+  "schema": "weavemind.stock_screen.manifest/1",
+  "run_id": "d8cc9a02b65b2893b8e6b0c2a29a7935",
+  "created_at": "2026-10-23T12:03:11+08:00",
+  "impl_version": "stock_screen/1.0.0",
+  "field_map_version": "1",
+  "as_of": "2025-04-30",
+  "pool": [
+    "002304.SZ",
+    "600031.SH"
+  ],
+  "rules_hash": "81ca2cf923240193a1ca85499294971530dfa6decf53a58ea138b325ca8959e8",
+  "snapshot_id": "0ec623ec1b75c19aa34e83a85e9b5ac7eb9038f2909d20de0e8ecfc636544382",
+  "result_hash": "cf232933a8490aa90a718fa1974c1f013363d79e42ad3b0bdd33d828c1e1559c",
+  "counts": {
+    "pass": 1,
+    "fail": 1,
+    "insufficient": 0,
+    "total": 2
+  },
+  "source": {
+    "label": "official_disclosure_cache",
+    "sha256": "4dc828ef0bea63acbc4548e44448f5fbdf5ca35af82eaed0fef273bc332cb059",
+    "row_count": 6,
+    "synthetic": false,
+    "user_provided": false,
+    "origin": "tmp/q1-real-inputs/financials.json"
+  },
+  "files": [
+    {
+      "name": "run.json",
+      "bytes": 62233,
+      "sha256": "5499d893c6af715f9b178fcd586e9290ae87df2ea936e332ebe60378f1285c10"
+    }
+  ]
+}

@@ -521,10 +521,18 @@ function UsersSection() {
   const [users, setUsers] = useState<any[]>([])
   const [error, setError] = useState('')
   const [form, setForm] = useState({ username: '', password: '', role: 'viewer' })
+  const [selfRoles, setSelfRoles] = useState<string[]>([])
   const demoMode = useTaskStore(s => s.demoMode)
 
   const load = useCallback(() => {
     fetch('/api/users').then(r => r.json()).then(d => setUsers(d.users || [])).catch(() => setError('加载用户失败'))
+  }, [])
+  // 自助研究角色由 config.json → screen.research_roles 决定（B1）：只在管理员页动态出现，
+  // 不把角色集合写死在前端，也不放开任意字符串。
+  useEffect(() => {
+    fetch('/api/screen/capabilities').then(r => r.json())
+      .then(d => setSelfRoles(Array.isArray(d?.self_service_roles) ? d.self_service_roles : []))
+      .catch(() => setSelfRoles([]))
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -565,6 +573,7 @@ function UsersSection() {
             className="bg-surface-raised border border-line-strong rounded-lg px-2 py-1 text-xs text-ink disabled:opacity-40">
             <option value="admin">管理员</option>
             <option value="viewer">只读用户</option>
+            {selfRoles.map(r => <option key={r} value={r}>{roleLabel(r)}</option>)}
           </select>
           <button onClick={() => {
             const pwd = window.prompt(`为 ${u.username} 设置新密码（至少 8 位）`)
@@ -590,6 +599,7 @@ function UsersSection() {
           className="bg-surface-raised border border-line-strong rounded-lg px-3 py-2 text-sm text-ink">
           <option value="viewer">只读用户</option>
           <option value="admin">管理员</option>
+          {selfRoles.map(r => <option key={r} value={r}>{roleLabel(r)}</option>)}
         </select>
         <button onClick={async () => {
           const ok = await act('POST', '/api/users', form)

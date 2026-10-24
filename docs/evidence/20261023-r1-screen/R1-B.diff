@@ -1,0 +1,1706 @@
+diff --git a/screen_store.py b/screen_store.py
+new file mode 100644
+index 0000000..af28223
+--- /dev/null
++++ b/screen_store.py
+@@ -0,0 +1,656 @@
++# -*- coding: utf-8 -*-
++"""可解释选股 MVP（R1-SCREEN-1023，R1-B）：结果持久化、身份哈希与证据绑定。
++
++边界（`docs/员工任务_R1可解释选股MVP_20261023.md` §3-B、§4）：
++
++- **结果不可变**：一次执行 = 一个 `run_id` = `sha256(快照身份 + 规则身份 + 实现/字段版本)`。
++  同一身份重复执行返回同一份（`reused=True`，不覆盖、不新增）；换规则/换截止日/换数据
++  = 另一个 `run_id`，旧结果原样保留。「查看原版」只读存下来的 `run.json`，**永不重算**。
++- **持久根不是 TEMP**：`WEAVEMIND_SCREEN_DIR` 或 `<repo>/workspace/screen-results`
++  （`workspace/` 已在 .gitignore，运行产物不进 git、不进系统临时目录）。
++- **输入身份**：输入来自官方缓存文件（`WEAVEMIND_SCREEN_CACHE` 可覆盖），每次执行记录
++  **文件字节哈希**；数据一变 `snapshot_id` 就变，旧结果不会被新数据冒充。
++- **证据绑定**：读数里的 `fact_id` 在 `run.json` 的 `observations` 里可解析到值、单位、
++  期间、口径与来源 URL；证据页绑 `(run_id, entity_id)`，不绑「最近一次任务」。
++- **目录安全**：目录名 = `run_id`（8–64 位小写十六进制），只认持久根下的**直系子目录**并
++  做前缀匹配；路径分隔符、`..`、绝对路径一律拒绝（复用 research-study 的既有做法）。
++"""
++from __future__ import annotations
++
++import datetime as _dt
++import hashlib
++import json
++import os
++import re
++import tempfile
++
++import stock_screen as ss
++
++RUN_SCHEMA = "weavemind.stock_screen.run/1"
++_RUN_ID_RE = re.compile(r"^[0-9a-f]{8,64}$")
++_REPO = os.path.dirname(os.path.abspath(__file__))
++
++
++# ============================================================
++# 路径与身份
++# ============================================================
++
++def screen_root() -> str:
++    """结果持久根：环境变量覆盖，默认仓库下 `workspace/screen-results`（非 TEMP）。"""
++    raw = str(os.environ.get("WEAVEMIND_SCREEN_DIR") or "").strip()
++    if raw:
++        return os.path.abspath(raw)
++    return os.path.join(_REPO, "workspace", "screen-results")
++
++
++def default_cache_path() -> str:
++    """官方披露缓存路径：环境变量覆盖，默认仓库下 `data/screen_cache/official_disclosure_cache.json`。"""
++    raw = str(os.environ.get("WEAVEMIND_SCREEN_CACHE") or "").strip()
++    if raw:
++        return os.path.abspath(raw)
++    return os.path.join(_REPO, "data", "screen_cache", "official_disclosure_cache.json")
++
++
++def run_identity(snapshot_id: str, rules_hash: str) -> str:
++    """一次执行的身份：快照 + 规则 + 实现/字段版本（不含时间，故同一身份恒等）。"""
++    blob = json.dumps({"schema": RUN_SCHEMA, "impl": ss.IMPL_VERSION,
++                       "field_map_version": ss.FIELD_MAP_VERSION,
++                       "snapshot_id": snapshot_id, "rules_hash": rules_hash},
++                      ensure_ascii=False, sort_keys=True)
++    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
++
++
++def _now() -> str:
++    return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
++
++
++def run_dir(run_id: str) -> str | None:
++    """按 run_id 定位结果目录：只允许持久根下的直系子目录，且按前 16 位前缀匹配。"""
++    rid = str(run_id or "").strip()
++    if not _RUN_ID_RE.match(rid):
++        return None
++    root = screen_root()
++    try:
++        names = os.listdir(root)
++    except OSError:
++        return None
++    for name in sorted(names):
++        cand = os.path.join(root, name)
++        if os.path.isdir(cand) and name.startswith(rid[:16]) and _RUN_ID_RE.match(name):
++            return cand
++    return None
++
++
++# ============================================================
++# 输入来源：官方缓存（或测试用同契约文件）
++# ============================================================
++
++def load_source(path: str | None = None) -> tuple[dict, list[str], dict]:
++    """读输入源 → `(载荷, 错误, 来源身份)`。
++
++    来源身份记录**文件字节哈希**（进快照身份）；读不到文件照实报错，不拿别的文件顶替。
++    """
++    p = str(path or default_cache_path())
++    payload, errors = ss.load_payload_file(p)
++    meta_raw = (payload.get("metadata") or {}) if isinstance(payload, dict) else {}
++    meta = {
++        "label": str(meta_raw.get("source") or os.path.basename(p) or "screen_input"),
++        "sha256": ss.payload_sha256(p),
++        "row_count": len(payload.get("rows") or []) if isinstance(payload, dict) else 0,
++        "synthetic": bool(meta_raw.get("synthetic")),
++        "user_provided": bool(meta_raw.get("user_provided")),
++        "origin": str(meta_raw.get("provenance", {}).get("origin_file") or ""),
++    }
++    if errors:
++        return {}, errors, meta
++    return payload, [], meta
++
++
++def available_pool(payload: dict) -> list[dict]:
++    """输入源里**真实可用**的主体（选股表单的股票池候选，来自数据本身，不预置公司清单）。"""
++    from facts import market_of_code
++    groups: dict[str, list[dict]] = {}
++    for row in payload.get("rows") or []:
++        code = str(row.get("code") or row.get("entity_id") or "").strip().upper()
++        if not code:
++            continue
++        market, ambiguous = market_of_code(code)
++        if ambiguous or market != "cn":
++            continue                      # 界外主体不进候选池（与快照规则一致）
++        groups.setdefault(code, []).append(row)
++    out: list[dict] = []
++    for code in sorted(groups):
++        rows = groups[code]
++        periods = sorted({str(r.get("period") or "")[:10] for r in rows if r.get("period")})
++        avails = sorted({str(r.get("available_at") or r.get("disclosed_at") or "")[:10]
++                         for r in rows if r.get("available_at") or r.get("disclosed_at")})
++        out.append({
++            "code": code, "entity": str(rows[0].get("entity") or code),
++            "rows": len(rows), "periods": periods,
++            "first_available": avails[0] if avails else "",
++            "last_available": avails[-1] if avails else "",
++            "pending_rows": sum(1 for r in rows
++                                if not (r.get("available_at") or r.get("disclosed_at"))),
++        })
++    return out
++
++
++# ============================================================
++# 预览 / 执行（纯函数，HTTP 层只做参数与状态码）
++# ============================================================
++
++def pool_catalog(source_path: str | None = None) -> tuple[dict, list[str]]:
++    """选股表单的股票池目录：来源身份 + 输入里真实可用的主体（不预置公司清单）。"""
++    payload, errors, meta = load_source(source_path)
++    if errors:
++        return {}, errors
++    return {"status": "ok", "source": meta,
++            "available_pool": available_pool(payload)}, []
++
++
++def preview(*, pool, as_of: str, rules_raw=None, source_path: str | None = None) -> tuple[dict, list[str]]:
++    """输入预览：股票池可用性、PIT 排除/待核验、字段与规则校验；**不执行、不落结果**。"""
++    payload, errors, meta = load_source(source_path)
++    if errors:
++        return {}, errors
++    snap, snap_errors = ss.build_snapshot(
++        payload, pool=pool, as_of=as_of, source_label=meta["label"],
++        source_sha256=meta["sha256"], synthetic=meta["synthetic"],
++        user_provided=meta["user_provided"])
++    if snap_errors:
++        return {}, snap_errors
++    rules, rule_errors = (), []
++    if rules_raw is not None:
++        rules, rule_errors = ss.parse_rules(rules_raw)
++        if rule_errors:
++            # 规则错误与输入错误一样是硬错误：不静默忽略、不"猜一个相近字段"
++            return {}, rule_errors
++    in_cache = {row["code"] for row in available_pool(payload)}
++    wanted = [str(c or "").strip().upper() for c in (pool or []) if str(c or "").strip()]
++    missing = [c for c in sorted(set(wanted)) if c not in in_cache]
++    ready = [e for e in snap.entities if e["dataset"].manifest.periods]
++    desc = ss.describe_snapshot(snap)
++    desc.update({
++        "status": "ok",
++        "source": meta,
++        "available_pool": available_pool(payload),
++        "missing_pool_codes": missing,
++        "entities_ready": len(ready),
++        "entities_without_periods": len(snap.entities) - len(ready),
++        "rules": [r.as_dict() for r in rules],
++        "rules_errors": rule_errors,
++        "field_map_version": ss.FIELD_MAP_VERSION,
++        "impl_version": ss.IMPL_VERSION,
++        "schema": ss.SCHEMA_VERSION,
++    })
++    return desc, []
++
++
++def execute(*, pool, as_of: str, rules_raw, sort: dict | None = None,
++            source_path: str | None = None, store: bool = True) -> tuple[dict, list[str]]:
++    """执行一次筛选（确定性），并把**不可变结果**落到持久根；同一身份重复执行复用原结果。"""
++    payload, errors, meta = load_source(source_path)
++    if errors:
++        return {}, errors
++    rules, rule_errors = ss.parse_rules(rules_raw or [])
++    if rule_errors:
++        return {}, rule_errors
++    snap, snap_errors = ss.build_snapshot(
++        payload, pool=pool, as_of=as_of, source_label=meta["label"],
++        source_sha256=meta["sha256"], synthetic=meta["synthetic"],
++        user_provided=meta["user_provided"])
++    if snap_errors:
++        return {}, snap_errors
++    result = ss.evaluate(snap, rules, sort=sort)
++    run_id = run_identity(snap.snapshot_id, result.rules_hash)
++    run = {
++        "schema": RUN_SCHEMA, "impl_version": ss.IMPL_VERSION,
++        "field_map_version": ss.FIELD_MAP_VERSION,
++        "run_id": run_id, "created_at": _now(),
++        "as_of": snap.as_of, "pool": list(snap.pool),
++        "sort": dict(sort) if sort else None,
++        "rules": [r.as_dict() for r in result.rules],
++        "rules_hash": result.rules_hash, "snapshot_id": snap.snapshot_id,
++        "result_hash": result.result_hash, "period_pin": result.period_pin,
++        "counts": result.counts, "notes": list(result.notes),
++        "source": dict(meta),
++        "entities": _entities_payload(snap),
++        "excluded": [dict(x) for x in snap.excluded],
++        "rows": {"pass": [r.as_dict() for r in result.pass_rows],
++                 "fail": [r.as_dict() for r in result.fail_rows],
++                 "insufficient": [r.as_dict() for r in result.insufficient_rows]},
++    }
++    if not store:
++        return run, []
++    stored, reused = save_run(run)
++    stored["reused"] = reused
++    return stored, []
++
++
++def _entities_payload(snapshot) -> list[dict]:
++    """快照 → 结果文件里的主体证据段（观察全量，读数靠 fact_id 在这里解析）。"""
++    out: list[dict] = []
++    for ent in snapshot.entities:
++        ds = ent["dataset"]
++        out.append({
++            "entity": ent["entity"], "entity_id": ent["entity_id"],
++            "dataset_hash": ds.dataset_hash,
++            "periods": list(ds.manifest.periods),
++            "caliber": ds.manifest.caliber,
++            "gaps": list(ds.manifest.gaps),
++            "conflicts": list(ds.manifest.conflicts),
++            "excluded": [dict(x) for x in ent["excluded"]],
++            "pending_pit": [dict(x) for x in ent["pending_pit"]],
++            "observations": [o.as_dict() for o in ds.observations],
++        })
++    return out
++
++
++# ============================================================
++# 落盘（不可变 + 原子写 + 同身份复用）
++# ============================================================
++
++def save_run(run: dict) -> tuple[dict, bool]:
++    """把 run 落盘 → `(读回的 run, 是否复用已有结果)`；同身份绝不覆盖。"""
++    rid = str(run.get("run_id") or "")
++    if not _RUN_ID_RE.match(rid):
++        raise ValueError(f"run_id 非法：{rid!r}")
++    root = screen_root()
++    os.makedirs(root, exist_ok=True)
++    target = os.path.join(root, rid)
++    if os.path.isdir(target):
++        existing = load_run(rid)
++        if existing[0] is not None:
++            return existing[0], True
++        # 目录在但清单坏了（上次写到一半）：修一次，并如实记录
++        _write_atomic(target, run)
++        loaded = load_run(rid)
++        if loaded[0] is None:
++            raise RuntimeError(f"结果目录无法修复：{target}")
++        return loaded[0], True
++    try:
++        os.makedirs(target, exist_ok=False)
++    except FileExistsError:            # 并发下另一个进程刚建：按复用处理
++        existing = load_run(rid)
++        if existing[0] is None:
++            raise
++        return existing[0], True
++    _write_atomic(target, run)
++    return run, False
++
++
++def _write_atomic(target: str, run: dict) -> None:
++    """先写临时文件再替换：不会留下半截 run.json（清单**最后**写，清单在即完整）。"""
++    _write_one(target, "run.json", run)
++    _write_one(target, "manifest.json", _manifest_of(run, target))
++
++
++def _write_one(target: str, name: str, obj) -> None:
++    blob = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
++    fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=target)
++    try:
++        with os.fdopen(fd, "wb") as fh:
++            fh.write(blob)
++            fh.flush()
++            os.fsync(fh.fileno())
++        os.replace(tmp, os.path.join(target, name))
++    finally:
++        if os.path.exists(tmp):
++            try:
++                os.remove(tmp)
++            except OSError:
++                pass
++
++
++def _manifest_of(run: dict, target: str) -> dict:
++    entries = []
++    for name in ("run.json",):
++        p = os.path.join(target, name)
++        try:
++            with open(p, "rb") as fh:
++                raw = fh.read()
++        except OSError:
++            raw = b""
++        entries.append({"name": name, "bytes": len(raw),
++                        "sha256": hashlib.sha256(raw).hexdigest()})
++    return {
++        "schema": "weavemind.stock_screen.manifest/1",
++        "run_id": run.get("run_id"), "created_at": run.get("created_at"),
++        "impl_version": run.get("impl_version"),
++        "field_map_version": run.get("field_map_version"),
++        "as_of": run.get("as_of"), "pool": list(run.get("pool") or ()),
++        "rules_hash": run.get("rules_hash"), "snapshot_id": run.get("snapshot_id"),
++        "result_hash": run.get("result_hash"), "counts": dict(run.get("counts") or {}),
++        "source": dict(run.get("source") or {}),
++        "files": entries,
++    }
++
++
++def load_run(run_id: str) -> tuple[dict | None, dict | None]:
++    """读一份存下来的结果 → `(run, manifest)`；`run` 为 None 表示目录/文件缺失或损坏。
++
++    完整性：用清单里的文件哈希校验 `run.json`；不一致 → `run["integrity"]="hash_mismatch"`
++    （照样返回内容，但明确标注「与清单不一致」，不让篡改过的文件冒充原版）。
++    """
++    d = run_dir(run_id)
++    if d is None:
++        return None, None
++    try:
++        with open(os.path.join(d, "run.json"), encoding="utf-8") as fh:
++            raw = fh.read()
++        run = json.loads(raw)
++    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
++        return None, None
++    try:
++        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
++            manifest = json.loads(fh.read())
++    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
++        manifest = {}
++    integrity = "ok"
++    want = ""
++    for item in (manifest.get("files") or []):
++        if item.get("name") == "run.json":
++            want = str(item.get("sha256") or "")
++    got = hashlib.sha256(raw.encode("utf-8")).hexdigest()
++    if not want:
++        integrity = "manifest_missing"
++    elif want != got:
++        integrity = "hash_mismatch"
++    run["integrity"] = integrity
++    return run, manifest
++
++
++def list_runs(limit: int = 50) -> list[dict]:
++    """历史结果摘要（新到旧）：只列**清单可读**的目录，坏目录标出来不静默丢。"""
++    root = screen_root()
++    try:
++        names = sorted(os.listdir(root))
++    except OSError:
++        return []
++    out: list[dict] = []
++    for name in names:
++        d = os.path.join(root, name)
++        if not os.path.isdir(d) or not _RUN_ID_RE.match(name):
++            continue
++        run, manifest = load_run(name)
++        if run is None:
++            out.append({"run_id": name, "integrity": "unreadable"})
++            continue
++        out.append({
++            "run_id": run.get("run_id"), "created_at": run.get("created_at"),
++            "as_of": run.get("as_of"), "pool": list(run.get("pool") or ()),
++            "counts": dict(run.get("counts") or {}),
++            "result_hash": run.get("result_hash"),
++            "rules_hash": run.get("rules_hash"), "snapshot_id": run.get("snapshot_id"),
++            "source": dict(run.get("source") or {}),
++            "integrity": run.get("integrity"),
++        })
++    out.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
++    return out[:max(1, int(limit))]
++
++
++# ============================================================
++# 证据绑定：run + entity → 可核对清单
++# ============================================================
++
++def evidence(run: dict, entity_id: str) -> dict | None:
++    """把**某一份结果里的某家公司**的证据取出来（绑 run_id + entity_id，不绑"最近任务"）。
++
++    返回逐字段读数 + 每条读数引用到的观察（值/单位/期间/口径/来源 URL/可用时点），
++    外加该主体的 PIT 排除行与待核验行。找不到该主体 → None（上层返回 404）。
++    """
++    eid = str(entity_id or "").strip().upper()
++    if not eid:
++        return None
++    ent = next((e for e in (run.get("entities") or [])
++                if str(e.get("entity_id") or "").upper() == eid), None)
++    row = None
++    for group in ("pass", "fail", "insufficient"):
++        for cand in (run.get("rows") or {}).get(group) or []:
++            if str(cand.get("entity_id") or "").upper() == eid:
++                row = cand
++                break
++        if row is not None:
++            break
++    if ent is None and row is None:
++        return None
++    obs = {str(o.get("fact_id") or ""): o for o in (ent or {}).get("observations") or []}
++    readings: list[dict] = []
++    for item in (row or {}).get("readings") or []:
++        inputs = [str(x) for x in item.get("inputs") or []]
++        detail = []
++        for fid in inputs:
++            o = obs.get(fid)
++            if not o:
++                continue
++            detail.append({"fact_id": fid, "metric": o.get("metric"),
++                           "metric_label": o.get("metric_label"),
++                           "period": o.get("period"), "value": o.get("value"),
++                           "unit": o.get("unit"), "currency": o.get("currency"),
++                           "caliber": o.get("caliber"),
++                           "period_kind": o.get("period_kind"),
++                           "period_start": o.get("period_start"),
++                           "period_end": o.get("period_end"),
++                           "as_of": o.get("as_of"), "state": o.get("state"),
++                           "source_url": o.get("source_url"),
++                           "source_hash": o.get("source_hash"),
++                           "verify_state": o.get("verify_state")})
++        readings.append({
++            "field": item.get("field"), "label": item.get("label"),
++            "status": item.get("status"), "value": item.get("value"),
++            "unit": item.get("unit"), "display": item.get("display"),
++            "formula": item.get("formula"), "reason": item.get("reason"),
++            "inputs": detail,
++            "unresolved_inputs": [f for f in inputs if f not in obs],
++        })
++    urls = sorted({d["source_url"] for r in readings for d in r["inputs"]
++                   if d.get("source_url")})
++    return {
++        "schema": "weavemind.stock_screen.evidence/1",
++        "run_id": run.get("run_id"), "result_hash": run.get("result_hash"),
++        "snapshot_id": run.get("snapshot_id"), "as_of": run.get("as_of"),
++        "created_at": run.get("created_at"),
++        "source": dict(run.get("source") or {}),
++        "entity": (ent or {}).get("entity") or (row or {}).get("entity"),
++        "entity_id": eid,
++        "verdict": (row or {}).get("verdict"),
++        "eval_period": (row or {}).get("eval_period"),
++        "dataset_hash": (row or {}).get("dataset_hash"),
++        "reasons": list((row or {}).get("reasons") or ()),
++        "readings": readings,
++        "periods": list((ent or {}).get("periods") or ()),
++        "gaps": list((ent or {}).get("gaps") or ()),
++        "conflicts": list((ent or {}).get("conflicts") or ()),
++        "excluded": [dict(x) for x in (ent or {}).get("excluded") or ()],
++        "pending_pit": [dict(x) for x in (ent or {}).get("pending_pit") or ()],
++        "source_urls": urls,
++        "integrity": run.get("integrity", "ok"),
++    }
++
++
++# ============================================================
++# 预设：股票池 + 规则（可保存、可编辑、可删除；与结果快照互不影响）
++# ============================================================
++#
++# 边界（§3-D）：预设是**可变的用户偏好**，结果是**不可变快照**。
++# 改预设不改变任何已执行结果；预设里也不存结果哈希，避免"预设 = 结论"的误读。
++# 读写都要求已登录（写仅管理员，见 web_ui），目录只认持久根下的直系文件，
++# id 只接受 8–64 位小写十六进制。
++
++PRESET_SCHEMA = "weavemind.stock_screen.preset/1"
++_PRESET_ID_RE = re.compile(r"^[0-9a-f]{8,64}$")
++_MAX_PRESET_NAME = 80
++_MAX_POOL_CODES = 200
++_MAX_PRESET_RULES = 20
++
++
++def preset_root() -> str:
++    """预设持久根：环境变量覆盖，默认仓库下 `workspace/screen-presets`（非 TEMP）。"""
++    raw = str(os.environ.get("WEAVEMIND_SCREEN_PRESETS") or "").strip()
++    if raw:
++        return os.path.abspath(raw)
++    return os.path.join(_REPO, "workspace", "screen-presets")
++
++
++def _preset_path(preset_id: str) -> str | None:
++    """按 id 定位预设文件：只允许持久根下的直系文件（拒绝路径分隔符与 `..`）。"""
++    pid = str(preset_id or "").strip()
++    if not _PRESET_ID_RE.match(pid):
++        return None
++    return os.path.join(preset_root(), f"{pid}.json")
++
++
++def _clean_pool(pool) -> tuple[list[str], list[str]]:
++    if isinstance(pool, str):
++        pool = [p for p in re.split(r"[,，\s]+", pool) if p]
++    if not isinstance(pool, (list, tuple)):
++        return [], ["股票池必须是代码数组"]
++    out: list[str] = []
++    for raw in pool:
++        code = str(raw or "").strip().upper()
++        if not code:
++            continue
++        if len(code) > 16 or any(ch in code for ch in "/\\:"):
++            return [], [f"代码「{code}」不合法（不接受路径/前缀，只接受市场代码）"]
++        if code not in out:
++            out.append(code)
++    if not out:
++        return [], ["股票池不能为空"]
++    if len(out) > _MAX_POOL_CODES:
++        return [], [f"股票池最多 {_MAX_POOL_CODES} 个代码"]
++    return out, []
++
++
++def _clean_name(name) -> tuple[str, list[str]]:
++    text = str(name or "").strip()
++    if not text:
++        return "", ["预设名称不能为空"]
++    if len(text) > _MAX_PRESET_NAME:
++        return "", [f"预设名称最长 {_MAX_PRESET_NAME} 字"]
++    if any(ord(ch) < 32 for ch in text):
++        return "", ["预设名称不能包含控制字符"]
++    return text, []
++
++
++def save_preset(*, name, pool, rules_raw, as_of: str = "", note: str = "",
++                preset_id: str = "") -> tuple[dict | None, list[str]]:
++    """新增或更新一份预设 → `(预设, 错误)`；有错就一个字段都不落盘。"""
++    errors: list[str] = []
++    clean_name, name_errors = _clean_name(name)
++    errors.extend(name_errors)
++    codes, pool_errors = _clean_pool(pool)
++    errors.extend(pool_errors)
++    rules, rule_errors = ss.parse_rules(list(rules_raw or [])[:_MAX_PRESET_RULES])
++    errors.extend(rule_errors)
++    asof = ""
++    raw_asof = str(as_of or "").strip()
++    if raw_asof:
++        asof = ss._iso_date(raw_asof)
++        if not asof:
++            errors.append(f"截止日「{raw_asof}」不是 YYYY-MM-DD 日期")
++    if errors:
++        return None, errors
++
++    old: dict | None = None
++    pid = str(preset_id or "").strip()
++    if pid:
++        path = _preset_path(pid)
++        if path is None:
++            return None, ["预设 id 非法"]
++        old = load_preset(pid)
++        if old is None:
++            return None, [f"预设不存在：{pid}"]
++    else:
++        pid = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
++
++    now = _now()
++    preset = {
++        "schema": PRESET_SCHEMA,
++        "preset_id": pid,
++        "name": clean_name,
++        "note": str(note or "").strip()[:200],
++        "pool": codes,
++        "as_of": asof,
++        "rules": [r.as_dict() for r in rules],
++        "rules_hash": ss.rules_hash(rules),
++        "created_at": (old or {}).get("created_at") or now,
++        "updated_at": now,
++    }
++    root = preset_root()
++    os.makedirs(root, exist_ok=True)
++    target = os.path.join(root, f"{pid}.json")
++    blob = json.dumps(preset, ensure_ascii=False, indent=2).encode("utf-8")
++    fd, tmp = tempfile.mkstemp(prefix=".preset.", dir=root)
++    try:
++        with os.fdopen(fd, "wb") as fh:
++            fh.write(blob)
++            fh.flush()
++            os.fsync(fh.fileno())
++        os.replace(tmp, target)
++    finally:
++        if os.path.exists(tmp):
++            try:
++                os.remove(tmp)
++            except OSError:
++                pass
++    return preset, []
++
++
++def load_preset(preset_id: str) -> dict | None:
++    """读一份预设；不存在/坏文件/契约不符都返回 None（不猜、不返回半份）。"""
++    path = _preset_path(preset_id)
++    if path is None or not os.path.isfile(path):
++        return None
++    try:
++        with open(path, "r", encoding="utf-8") as fh:
++            data = json.load(fh)
++    except (OSError, ValueError):
++        return None
++    if not isinstance(data, dict) or data.get("schema") != PRESET_SCHEMA:
++        return None
++    if not _PRESET_ID_RE.match(str(data.get("preset_id") or "")):
++        return None
++    return data
++
++
++def list_presets(limit: int = 50) -> list[dict]:
++    """预设摘要（最近更新在前）；坏文件跳过，不阻断列表、也不冒充可用预设。"""
++    root = preset_root()
++    try:
++        names = os.listdir(root)
++    except OSError:
++        return []
++    items: list[dict] = []
++    for name in sorted(names):
++        if not name.endswith(".json") or name.startswith("."):
++            continue
++        pid = name[:-5]
++        preset = load_preset(pid)
++        if preset is None:
++            continue
++        items.append({
++            "preset_id": preset.get("preset_id"), "name": preset.get("name"),
++            "note": preset.get("note", ""), "pool": list(preset.get("pool") or []),
++            "as_of": preset.get("as_of", ""), "rules": list(preset.get("rules") or []),
++            "rules_hash": preset.get("rules_hash", ""),
++            "created_at": preset.get("created_at"), "updated_at": preset.get("updated_at"),
++        })
++    items.sort(key=lambda x: (str(x.get("updated_at") or ""), str(x.get("preset_id"))),
++               reverse=True)
++    try:
++        capped = max(1, min(int(limit), 200))
++    except (TypeError, ValueError):
++        capped = 50
++    return items[:capped]
++
++
++def delete_preset(preset_id: str) -> bool:
++    """删除一份预设（只删预设，永不触碰结果快照）。"""
++    path = _preset_path(preset_id)
++    if path is None or not os.path.isfile(path):
++        return False
++    try:
++        os.remove(path)
++    except OSError:
++        return False
++    return True
+diff --git a/test_screen_api.py b/test_screen_api.py
+new file mode 100644
+index 0000000..6b93d4e
+--- /dev/null
++++ b/test_screen_api.py
+@@ -0,0 +1,405 @@
++# -*- coding: utf-8 -*-
++"""R1-SCREEN-1023（R1-B）：筛选 HTTP API 测试（隔离替身，不启生产端口）。
++
++覆盖：
++- 鉴权：未登录 401（GET/POST 全部）；viewer 写操作 403、只读可看；admin 全通。
++- 路由：fields / preview / run / runs / run / evidence 六个入口的正反路径。
++- 参数：坏 JSON、缺 as_of、未知字段、路径穿越式 run_id。
++- 证据跳转：从 run 到 evidence 绑 (run_id, entity_id)；错误主体 404 不猜。
++- 隔离：WEAVEMIND_SCREEN_DIR/CACHE 指向临时目录；会话与任务缓存照 test_auth_audit 方式隔离。
++"""
++from __future__ import annotations
++
++import io
++import json
++import os
++import shutil
++import tempfile
++import unittest
++
++import audit_logger
++import web_ui
++import workspace as ws_mod
++
++
++def _row(entity, code, period, *, avail, url="http://example.com/report.pdf", **metrics):
++    base = {"entity": entity, "code": code, "period": period, "unit": "元",
++            "currency": "CNY", "caliber": "合并", "period_type": "年度",
++            "source_url": url, "source": "synthetic_test"}
++    if avail is not None:
++        base["available_at"] = avail
++        base["disclosed_at"] = avail
++    base.update(metrics)
++    return base
++
++
++def _make_handler():
++    """与 test_auth_audit 相同的最小替身：直接驱动 web_ui.Handler 路由。"""
++    class FakeHandler(web_ui.Handler):
++        def __init__(self, path, method="GET", body=None, token=None, cookie=None):
++            self.path = path
++            self.command = method
++            self.request_version = "HTTP/1.1"
++            self.client_address = ("127.0.0.1", 0)
++            self.headers = {"Host": "localhost:8080"}
++            if token:
++                self.headers["Authorization"] = "Bearer " + token
++            if cookie:
++                self.headers["Cookie"] = cookie
++            raw = b""
++            if body is not None:
++                raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
++                self.headers["Content-Length"] = str(len(raw))
++            self.rfile = io.BytesIO(raw)
++            self.wfile = io.BytesIO()
++            self._status = 200
++            self._headers = {}
++
++        def send_response(self, code):
++            self._status = code
++
++        def send_header(self, key, value):
++            self._headers[key] = value
++
++        def end_headers(self):
++            pass
++
++        def json_body(self):
++            return json.loads(self.wfile.getvalue().decode("utf-8"))
++
++    return FakeHandler
++
++
++class TestScreenApi(unittest.TestCase):
++    """HTTP 层主回归（隔离实例）。"""
++
++    @classmethod
++    def setUpClass(cls):
++        cls._tmp = tempfile.mkdtemp(prefix="weavemind_screen_api_")
++        rows = [
++            _row("甲公司", "000001.SZ", "2023-12-31", avail="2024-04-20",
++                 revenue=200_000_000, gross_profit=50_000_000, net_profit=25_000_000,
++                 operating_cashflow=30_000_000, total_assets=200_000_000,
++                 total_liabilities=80_000_000),
++            _row("甲公司", "000001.SZ", "2024-12-31", avail="2025-04-18",
++                 revenue=220_000_000, gross_profit=55_000_000, net_profit=30_000_000,
++                 operating_cashflow=36_000_000, total_assets=210_000_000,
++                 total_liabilities=84_000_000),
++        ]
++        cls._cache = os.path.join(cls._tmp, "cache.json")
++        with open(cls._cache, "w", encoding="utf-8") as fh:
++            json.dump({"metadata": {"source": "synthetic_test", "synthetic": True},
++                       "rows": rows}, fh, ensure_ascii=False)
++
++    def setUp(self):
++        self._saved_env = {k: os.environ.get(k) for k in
++                           ("WEAVEMIND_SCREEN_DIR", "WEAVEMIND_SCREEN_CACHE",
++                            "WEAVEMIND_SCREEN_PRESETS")}
++        os.environ["WEAVEMIND_SCREEN_DIR"] = os.path.join(self._tmp, f"runs-{id(self)}")
++        os.environ["WEAVEMIND_SCREEN_CACHE"] = self._cache
++        os.environ["WEAVEMIND_SCREEN_PRESETS"] = os.path.join(self._tmp, f"presets-{id(self)}")
++        self._saved = {
++            "share": web_ui.SHARE_FILE, "db": web_ui.DB_PATH,
++            "config": web_ui.CONFIG_PATH, "audit": audit_logger.AUDIT_FILE,
++            "root": ws_mod.WORKSPACE_ROOT, "ttl": web_ui.SESSION_TTL_SECONDS,
++            "sessions": dict(web_ui._sessions), "results": dict(web_ui._task_results),
++        }
++        self._H = _make_handler()
++        web_ui.SHARE_FILE = os.path.join(self._tmp, "share_links.json")
++        web_ui.DB_PATH = os.path.join(self._tmp, "test_screen.db")
++        web_ui.CONFIG_PATH = os.path.join(self._tmp, "config.json")
++        audit_logger.AUDIT_FILE = os.path.join(self._tmp, "audit.jsonl")
++        ws_mod.configure_workspace_root(self._tmp)
++        with web_ui._sessions_lock:
++            web_ui._sessions.clear()
++        with web_ui._task_lock:
++            web_ui._task_results.clear()
++        self.addCleanup(self._restore)
++        self._seed_users()
++        self.admin = self._login("admin", "admin123")
++        self.viewer = self._login("viewer", "viewer123")
++        self.rules = [{"field": "gross_margin", "op": ">=", "value": 20},
++                      {"field": "cashflow_coverage", "op": ">=", "value": 100}]
++        self.body = {"pool": ["000001.SZ"], "as_of": "2026-01-31", "rules": self.rules}
++
++    def _restore(self):
++        for k, v in self._saved_env.items():
++            if v is None:
++                os.environ.pop(k, None)
++            else:
++                os.environ[k] = v
++        web_ui.SHARE_FILE = self._saved["share"]
++        web_ui.DB_PATH = self._saved["db"]
++        web_ui.CONFIG_PATH = self._saved["config"]
++        audit_logger.AUDIT_FILE = self._saved["audit"]
++        ws_mod.WORKSPACE_ROOT = self._saved["root"]
++        web_ui.SESSION_TTL_SECONDS = self._saved["ttl"]
++        with web_ui._sessions_lock:
++            web_ui._sessions.clear()
++            web_ui._sessions.update(self._saved["sessions"])
++        with web_ui._task_lock:
++            web_ui._task_results.clear()
++            web_ui._task_results.update(self._saved["results"])
++        shutil.rmtree(os.path.join(self._tmp, f"runs-{id(self)}"), ignore_errors=True)
++        shutil.rmtree(os.path.join(self._tmp, f"presets-{id(self)}"), ignore_errors=True)
++
++    def _seed_users(self):
++        with open(web_ui.CONFIG_PATH, "w", encoding="utf-8") as f:
++            json.dump({"llm": {"model": "test"},
++                       "users": {
++                           "admin": {"password_hash": web_ui._hash_password("admin123"),
++                                     "role": "admin"},
++                           "viewer": {"password_hash": web_ui._hash_password("viewer123"),
++                                      "role": "viewer"},
++                       }}, f, ensure_ascii=False, indent=2)
++
++    def _req(self, path, method="GET", body=None, token=None):
++        h = self._H(path, method, body, token)
++        if method == "GET":
++            web_ui.Handler.do_GET(h)
++        else:
++            web_ui.Handler.do_POST(h)
++        return h
++
++    def _login(self, username, password):
++        h = self._req("/api/login", "POST", {"username": username, "password": password})
++        self.assertEqual(h._status, 200, h.json_body())
++        import re
++        m = __import__("re").search(r"session=([^;]+)", h._headers.get("Set-Cookie", ""))
++        self.assertIsNotNone(m)
++        return m.group(1)
++
++    # ---------- 鉴权 ----------
++
++    def test_unauthenticated_gets_401(self):
++        for path in ("/api/screen/fields", "/api/screen/runs", "/api/screen/run?id=x",
++                     "/api/screen/evidence?run=x&entity=y"):
++            h = self._req(path)
++            self.assertEqual(h._status, 401, path)
++
++    def test_unauthenticated_post_401_and_viewer_403(self):
++        h = self._req("/api/screen/preview", "POST", self.body)
++        self.assertEqual(h._status, 401)
++        h = self._req("/api/screen/run", "POST", self.body, token=self.viewer)
++        self.assertEqual(h._status, 403, "viewer 不能执行筛选（写操作）")
++        h = self._req("/api/screen/preview", "POST", self.body, token=self.viewer)
++        self.assertEqual(h._status, 403, "viewer 不能预览（POST 属写操作面）")
++
++    def test_viewer_can_read_results(self):
++        run = self._req("/api/screen/run", "POST", self.body,
++                        token=self.admin).json_body()["run"]
++        h = self._req("/api/screen/runs", token=self.viewer)
++        self.assertEqual(h._status, 200)
++        self.assertEqual(len(h.json_body()["runs"]), 1)
++        h = self._req(f"/api/screen/run?id={run['run_id']}", token=self.viewer)
++        self.assertEqual(h._status, 200)
++        self.assertEqual(h.json_body()["run"]["result_hash"], run["result_hash"])
++        h = self._req(f"/api/screen/evidence?run={run['run_id']}&entity=000001.SZ",
++                      token=self.viewer)
++        self.assertEqual(h._status, 200)
++
++    # ---------- 字段目录 ----------
++
++    def test_fields_catalog(self):
++        h = self._req("/api/screen/fields", token=self.admin)
++        self.assertEqual(h._status, 200)
++        d = h.json_body()
++        self.assertEqual(d["schema"], "weavemind.stock_screen/1")
++        ids = [f["field_id"] for f in d["fields"]]
++        self.assertEqual(ids, ["revenue_growth", "gross_margin", "operating_cashflow",
++                               "debt_ratio", "cashflow_coverage"])
++        gm = next(f for f in d["fields"] if f["field_id"] == "gross_margin")
++        self.assertEqual(gm["kind"], "pct")
++        self.assertEqual(gm["numerator"], "gross_profit")
++
++    # ---------- 预览 ----------
++
++    def test_preview_ok_and_lists_pool_availability(self):
++        h = self._req("/api/screen/preview", "POST",
++                      {**self.body, "pool": ["000001.SZ", "999999.SZ"]},
++                      token=self.admin)
++        self.assertEqual(h._status, 200)
++        d = h.json_body()
++        self.assertEqual(d["missing_pool_codes"], ["999999.SZ"])
++        self.assertEqual([p["code"] for p in d["available_pool"]], ["000001.SZ"])
++        self.assertEqual(d["entities_ready"], 1)
++        self.assertEqual(d["source"]["synthetic"], True)
++
++    def test_preview_contract_errors_400(self):
++        h = self._req("/api/screen/preview", "POST",
++                      {"pool": ["000001.SZ"]}, token=self.admin)   # 缺 as_of
++        self.assertEqual(h._status, 400)
++        self.assertIn("as_of", h.json_body()["error"])
++        h = self._req("/api/screen/preview", "POST",
++                      {**self.body, "rules": [{"field": "net_margin", "op": ">=", "value": 1}]},
++                      token=self.admin)
++        self.assertEqual(h._status, 400)
++        self.assertIn("未知字段", h.json_body()["error"])
++        h = self._req("/api/screen/preview", "POST",
++                      {**self.body, "rules": []}, token=self.admin)
++        self.assertEqual(h._status, 400)
++        self.assertIn("至少需要一条筛选条件", h.json_body()["error"])
++        # 不带 rules：预览输入本身仍可用（表单第 1 步还没写规则）
++        h = self._req("/api/screen/preview", "POST", {"pool": ["000001.SZ"],
++                                                      "as_of": "2026-01-31"},
++                      token=self.admin)
++        self.assertEqual(h._status, 200)
++        self.assertEqual(h.json_body()["rules"], [])
++
++    # ---------- 执行 ----------
++
++    def test_run_executes_and_audits(self):
++        h = self._req("/api/screen/run", "POST", self.body, token=self.admin)
++        self.assertEqual(h._status, 200)
++        d = h.json_body()
++        run = d["run"]
++        self.assertEqual(run["counts"]["pass"], 1)
++        self.assertEqual(run["counts"]["fail"] + run["counts"]["insufficient"], 0)
++        self.assertFalse(run.get("reused"))
++        # 第二次执行 → 复用
++        h2 = self._req("/api/screen/run", "POST", self.body, token=self.admin)
++        self.assertTrue(h2.json_body()["run"].get("reused"))
++        self.assertEqual(h2.json_body()["run"]["run_id"], run["run_id"])
++        # 审计已落（screen.run）
++        entries = [a for a in audit_logger.read_audit(50) if a["action"] == "screen.run"]
++        self.assertTrue(entries)
++        self.assertEqual(entries[-1]["result"], "ok")
++
++    def test_run_contract_error_400_no_partial_result(self):
++        bad = {**self.body, "rules": [{"field": "gross_margin", "op": "~", "value": 1}]}
++        h = self._req("/api/screen/run", "POST", bad, token=self.admin)
++        self.assertEqual(h._status, 400)
++        self.assertIn("比较符", h.json_body()["error"])
++
++    # ---------- 查看原版 ----------
++
++    def test_view_original_never_recomputes(self):
++        run = self._req("/api/screen/run", "POST", self.body,
++                        token=self.admin).json_body()["run"]
++        # 改缓存数据（新输入 → 新身份），但原版读取不变
++        with open(self._cache, encoding="utf-8") as fh:
++            data = json.loads(fh.read())
++        data["rows"][1]["revenue"] = 999_000_000
++        with open(self._cache, "w", encoding="utf-8") as fh:
++            json.dump(data, fh, ensure_ascii=False)
++        h = self._req(f"/api/screen/run?id={run['run_id']}", token=self.admin)
++        self.assertEqual(h._status, 200)
++        again = h.json_body()["run"]
++        self.assertEqual(again["result_hash"], run["result_hash"], "查看原版必须原样")
++        self.assertEqual(again["rows"]["pass"][0]["readings"][0]["display"],
++                         run["rows"]["pass"][0]["readings"][0]["display"])
++        # 重新筛选 → 新 snapshot/run
++        h2 = self._req("/api/screen/run", "POST", self.body, token=self.admin)
++        self.assertEqual(h2._status, 200)
++        fresh = h2.json_body()["run"]
++        self.assertNotEqual(fresh["snapshot_id"], run["snapshot_id"])
++        self.assertNotEqual(fresh["run_id"], run["run_id"])
++
++    def test_run_not_found_404_and_bad_ids(self):
++        h = self._req("/api/screen/run?id=does-not-exist", token=self.admin)
++        self.assertEqual(h._status, 404)
++        h = self._req("/api/screen/run?id=..%2F..%2Fetc%2Fpasswd", token=self.admin)
++        self.assertEqual(h._status, 404, "路径穿越必须 404（不是 500）")
++
++    # ---------- 证据 ----------
++
++    def test_evidence_bound_to_run_and_entity(self):
++        run = self._req("/api/screen/run", "POST", self.body,
++                        token=self.admin).json_body()["run"]
++        h = self._req(f"/api/screen/evidence?run={run['run_id']}&entity=000001.SZ",
++                      token=self.admin)
++        self.assertEqual(h._status, 200)
++        ev = h.json_body()["evidence"]
++        self.assertEqual(ev["run_id"], run["run_id"])
++        self.assertEqual(ev["verdict"], "pass")
++        gm = next(r for r in ev["readings"] if r["field"] == "gross_margin")
++        self.assertEqual({d["metric"] for d in gm["inputs"]}, {"gross_profit", "revenue"})
++        # 错误主体：该 run 里没有 → 404，不拿别的 run/别的主体顶替
++        h = self._req(f"/api/screen/evidence?run={run['run_id']}&entity=888888.SZ",
++                      token=self.admin)
++        self.assertEqual(h._status, 404)
++        self.assertIn("不猜", h.json_body()["error"])
++        h = self._req("/api/screen/evidence?run=zzzz&entity=000001.SZ", token=self.admin)
++        self.assertEqual(h._status, 404)
++
++    # ---------- 预设（股票池 + 规则） ----------
++
++    def test_presets_requires_login_and_write_is_admin_only(self):
++        h = self._req("/api/screen/presets")
++        self.assertEqual(h._status, 401)
++        h = self._req("/api/screen/preset", "POST",
++                      {"name": "x", "pool": ["000001.SZ"], "rules": self.rules},
++                      token=self.viewer)
++        self.assertEqual(h._status, 403)
++        h = self._req("/api/screen/preset/delete", "POST", {"preset_id": "0123456789abcdef"},
++                      token=self.viewer)
++        self.assertEqual(h._status, 403)
++        # 只读方能看到别人存的预设（同一实例的研究台，不跨实例/跨文件系统）
++        self._req("/api/screen/preset", "POST",
++                  {"name": "高毛利", "pool": ["000001.SZ"], "rules": self.rules,
++                   "as_of": "2026-01-31"}, token=self.admin)
++        h = self._req("/api/screen/presets", token=self.viewer)
++        self.assertEqual(h._status, 200)
++        self.assertEqual(len(h.json_body()["presets"]), 1)
++
++    def test_preset_save_read_update_delete(self):
++        created = self._req("/api/screen/preset", "POST",
++                            {"name": "甲", "pool": ["000001.SZ"], "rules": self.rules,
++                             "as_of": "2026-01-31"}, token=self.admin)
++        self.assertEqual(created._status, 200, created.json_body())
++        pid = created.json_body()["preset"]["preset_id"]
++        got = self._req(f"/api/screen/preset?id={pid}", token=self.admin)
++        self.assertEqual(got._status, 200)
++        self.assertEqual(got.json_body()["preset"]["name"], "甲")
++        upd = self._req("/api/screen/preset", "POST",
++                        {"preset_id": pid, "name": "乙",
++                         "pool": ["000001.SZ"], "rules": self.rules}, token=self.admin)
++        self.assertEqual(upd._status, 200)
++        self.assertEqual(upd.json_body()["preset"]["preset_id"], pid)
++        h = self._req("/api/screen/presets", token=self.admin)
++        self.assertEqual([p["name"] for p in h.json_body()["presets"]], ["乙"])
++        dele = self._req("/api/screen/preset/delete", "POST", {"preset_id": pid},
++                         token=self.admin)
++        self.assertEqual(dele._status, 200)
++        self.assertEqual(self._req(f"/api/screen/preset?id={pid}", token=self.admin)._status, 404)
++
++    def test_preset_contract_errors_400(self):
++        h = self._req("/api/screen/preset", "POST",
++                      {"name": "未知字段", "pool": ["000001.SZ"],
++                       "rules": [{"field": "net_margin", "op": ">=", "value": 1}]},
++                      token=self.admin)
++        self.assertEqual(h._status, 400)
++        self.assertIn("未知字段", h.json_body()["error"])
++        h = self._req("/api/screen/preset", "POST",
++                      {"name": "", "pool": [], "rules": self.rules}, token=self.admin)
++        self.assertEqual(h._status, 400)
++        # 预设 id 越界：400 且不落盘
++        h = self._req("/api/screen/preset", "POST",
++                      {"preset_id": "../../etc/passwd", "name": "越界",
++                       "pool": ["000001.SZ"], "rules": self.rules}, token=self.admin)
++        self.assertEqual(h._status, 400)
++        self.assertEqual(self._req("/api/screen/presets", token=self.admin)
++                         .json_body()["presets"], [])
++
++    def test_preset_delete_missing_404(self):
++        h = self._req("/api/screen/preset/delete", "POST",
++                      {"preset_id": "0123456789abcdef"}, token=self.admin)
++        self.assertEqual(h._status, 404)
++        h = self._req("/api/screen/preset/delete", "POST", {}, token=self.admin)
++        self.assertEqual(h._status, 400)
++
++    def test_run_payload_exposes_identity_for_staleness(self):
++        """原版必须带 impl_version / field_map_version / source.sha256：前端据此判断「过期」而不是靠猜。"""
++        import stock_screen
++        run = self._req("/api/screen/run", "POST", self.body,
++                        token=self.admin).json_body()["run"]
++        self.assertEqual(run["impl_version"], stock_screen.IMPL_VERSION)
++        self.assertEqual(run["field_map_version"], stock_screen.FIELD_MAP_VERSION)
++        self.assertTrue(run["source"]["sha256"], "输入摘要为空会让「输入已变」无法判断")
++        self.assertEqual(run["source"]["sha256"],
++                         __import__("hashlib").sha256(
++                             open(self._cache, "rb").read()).hexdigest())
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=1)
+diff --git a/test_screen_store.py b/test_screen_store.py
+new file mode 100644
+index 0000000..0c4cf01
+--- /dev/null
++++ b/test_screen_store.py
+@@ -0,0 +1,412 @@
++# -*- coding: utf-8 -*-
++"""R1-SCREEN-1023（R1-B）：筛选结果持久化、身份哈希与证据绑定测试。
++
++覆盖：
++- 不可变：同一身份重复执行复用同一结果（不覆盖、不新增）；规则/截止日/数据一变就是新
++  run_id，旧结果原样保留；「查看原版」只读存档。
++- 完整性：清单哈希校验，篡改过的 run.json 必须标出来，不冒充原版。
++- 目录安全：run_id 只允许十六进制、直系子目录、前缀匹配；路径分隔符与 `..` 拒绝。
++- 证据绑定：读数 fact_id 可解析到观察（值/单位/期间/口径/来源 URL）；证据绑
++  (run_id, entity_id)，不绑「最近任务」。
++- 隔离：全程用 WEAVEMIND_SCREEN_DIR / WEAVEMIND_SCREEN_CACHE 指向临时目录，
++  不碰生产持久根与真实缓存文件。
++"""
++from __future__ import annotations
++
++import json
++import os
++import shutil
++import tempfile
++import unittest
++
++import screen_store as st
++
++
++def _row(entity, code, period, *, avail, url="http://example.com/report.pdf",
++         unit="元", currency="CNY", caliber="合并", **metrics):
++    base = {"entity": entity, "code": code, "period": period, "unit": unit,
++            "currency": currency, "caliber": caliber, "period_type": "年度",
++            "source_url": url, "source": "synthetic_test"}
++    if avail is not None:
++        base["available_at"] = avail
++        base["disclosed_at"] = avail
++    base.update(metrics)
++    return base
++
++
++# 合成边界样例（手算：收入 200→220 = +10%；毛利 50/200 = 25%；
++# 负债 80/资产 200 = 40%；现金流 30 / 归母 25 = 120%）
++_A = _row("甲公司", "000001.SZ", "2023-12-31", avail="2024-04-20",
++          revenue=200_000_000, gross_profit=50_000_000, net_profit=25_000_000,
++          operating_cashflow=30_000_000, total_assets=200_000_000,
++          total_liabilities=80_000_000)
++_B = _row("甲公司", "000001.SZ", "2024-12-31", avail="2025-04-18",
++          revenue=220_000_000, gross_profit=55_000_000, net_profit=30_000_000,
++          operating_cashflow=36_000_000, total_assets=210_000_000,
++          total_liabilities=84_000_000)
++_FUTURE = _row("甲公司", "000001.SZ", "2025-12-31", avail="2026-04-30",
++               revenue=500_000_000)
++_NOPIT = {**_row("甲公司", "000001.SZ", "2025-12-31", avail=None,
++                 revenue=400_000_000)}
++_B = {**_B}   # 复制避免测试间共享可变对象
++
++
++def _write_cache(path: str) -> str:
++    payload = {"metadata": {"source": "synthetic_test", "synthetic": True,
++                            "user_provided": False},
++               "rows": [_A, _B, _FUTURE, _NOPIT]}
++    with open(path, "w", encoding="utf-8") as fh:
++        json.dump(payload, fh, ensure_ascii=False)
++    return path
++
++
++RULES = [{"field": "gross_margin", "op": ">=", "value": 20},
++         {"field": "cashflow_coverage", "op": ">=", "value": 100}]
++
++
++class TestScreenStore(unittest.TestCase):
++    """持久化与身份。"""
++
++    def setUp(self):
++        self._tmp = tempfile.mkdtemp(prefix="weavemind_screen_test_")
++        self._saved = {k: os.environ.get(k) for k in
++                       ("WEAVEMIND_SCREEN_DIR", "WEAVEMIND_SCREEN_CACHE")}
++        os.environ["WEAVEMIND_SCREEN_DIR"] = os.path.join(self._tmp, "runs")
++        os.environ["WEAVEMIND_SCREEN_CACHE"] = _write_cache(
++            os.path.join(self._tmp, "cache.json"))
++        self.addCleanup(self._restore)
++
++    def _restore(self):
++        for k, v in self._saved.items():
++            if v is None:
++                os.environ.pop(k, None)
++            else:
++                os.environ[k] = v
++        shutil.rmtree(self._tmp, ignore_errors=True)
++
++    def _run(self, **kw):
++        args = dict(pool=["000001.SZ"], as_of="2026-01-31", rules_raw=RULES)
++        args.update(kw)
++        run, errors = st.execute(**args)
++        return run, errors
++
++    # ---------- 身份与复用 ----------
++
++    def test_execute_persists_and_reuses_same_identity(self):
++        run1, errs1 = self._run()
++        self.assertEqual(errs1, [])
++        run2, errs2 = self._run()
++        self.assertEqual(errs2, [])
++        self.assertEqual(run1["run_id"], run2["run_id"])
++        self.assertFalse(run1.get("reused"))
++        self.assertTrue(run2.get("reused"))
++        # 结果文件只有一份，且内容哈希一致（第二次没有改写第一次）
++        with open(os.path.join(st.screen_root(), run1["run_id"], "run.json"),
++                  encoding="utf-8") as fh:
++            again = json.loads(fh.read())
++        self.assertEqual(again["result_hash"], run1["result_hash"])
++        self.assertEqual(again["created_at"], run1["created_at"])
++
++    def test_rule_change_makes_new_run_and_keeps_old(self):
++        run1, _ = self._run()
++        with open(os.path.join(st.screen_root(), run1["run_id"], "run.json"), "rb") as fh:
++            before = fh.read()
++        run2, errs = self._run(rules_raw=[{"field": "gross_margin", "op": ">=", "value": 99}])
++        self.assertEqual(errs, [])
++        self.assertNotEqual(run1["run_id"], run2["run_id"])
++        self.assertFalse(run2.get("reused"))
++        with open(os.path.join(st.screen_root(), run1["run_id"], "run.json"), "rb") as fh:
++            after = fh.read()
++        self.assertEqual(before, after, "旧结果必须原样保留")
++
++    def test_asof_change_makes_new_run(self):
++        run1, _ = self._run()
++        run2, _ = self._run(as_of="2025-01-01")
++        self.assertNotEqual(run1["run_id"], run2["run_id"])
++
++    def test_run_identity_is_deterministic_and_short(self):
++        rid = st.run_identity("snap-1", "rules-1")
++        self.assertEqual(rid, st.run_identity("snap-1", "rules-1"))
++        self.assertNotEqual(rid, st.run_identity("snap-2", "rules-1"))
++        self.assertRegex(rid, r"^[0-9a-f]{32}$")
++
++    # ---------- 读取与完整性 ----------
++
++    def test_load_run_roundtrip_and_integrity(self):
++        run, _ = self._run()
++        loaded, manifest = st.load_run(run["run_id"])
++        self.assertIsNotNone(loaded)
++        self.assertEqual(loaded["integrity"], "ok")
++        self.assertEqual(loaded["result_hash"], run["result_hash"])
++        self.assertEqual(manifest["run_id"], run["run_id"])
++        self.assertTrue(manifest["files"])
++        self.assertTrue(all(f["sha256"] for f in manifest["files"]))
++
++    def test_tampered_run_is_flagged_not_silent(self):
++        run, _ = self._run()
++        p = os.path.join(st.screen_root(), run["run_id"], "run.json")
++        with open(p, encoding="utf-8") as fh:
++            data = json.loads(fh.read())
++        data["notes"] = ["篡改过的注记"]
++        with open(p, "w", encoding="utf-8") as fh:
++            json.dump(data, fh, ensure_ascii=False)
++        loaded, _ = st.load_run(run["run_id"])
++        self.assertEqual(loaded["integrity"], "hash_mismatch")
++        self.assertIn("篡改过的注记", loaded["notes"])   # 内容照给，但明确标注
++
++    def test_missing_manifest_flagged(self):
++        run, _ = self._run()
++        os.remove(os.path.join(st.screen_root(), run["run_id"], "manifest.json"))
++        loaded, manifest = st.load_run(run["run_id"])
++        self.assertEqual(loaded["integrity"], "manifest_missing")
++        self.assertEqual(manifest, {})
++
++    def test_bad_run_ids_rejected(self):
++        for bad in ("../../etc/passwd", "ZZZZ", "a/b", "", None, "a" * 65, "."):
++            self.assertIsNone(st.run_dir(bad), bad)
++            loaded, _ = st.load_run(bad)
++            self.assertIsNone(loaded, bad)
++
++    def test_run_dir_prefix_match(self):
++        run, _ = self._run()
++        rid = run["run_id"]
++        self.assertEqual(st.run_dir(rid), st.run_dir(rid[:8]))
++        self.assertTrue(os.path.isdir(st.run_dir(rid)))
++
++    # ---------- 落盘健壮性 ----------
++
++    def test_broken_dir_is_repaired_on_same_identity(self):
++        run, _ = self._run()
++        rid = run["run_id"]
++        os.remove(os.path.join(st.screen_root(), rid, "manifest.json"))
++        os.remove(os.path.join(st.screen_root(), rid, "run.json"))
++        again, errs = self._run()
++        self.assertEqual(errs, [])
++        self.assertEqual(again["run_id"], rid)
++        loaded, _ = st.load_run(rid)
++        self.assertEqual(loaded["integrity"], "ok")
++
++    def test_missing_cache_is_explicit_error(self):
++        os.environ["WEAVEMIND_SCREEN_CACHE"] = os.path.join(self._tmp, "nope.json")
++        run, errors = self._run()
++        self.assertEqual(run, {})
++        self.assertTrue(any("文件不存在" in e for e in errors), errors)
++
++    # ---------- 预览与股票池 ----------
++
++    def test_preview_creates_no_run_dir(self):
++        payload, errors = st.preview(pool=["000001.SZ", "999999.SZ"],
++                                     as_of="2026-01-31", rules_raw=RULES)
++        self.assertEqual(errors, [])
++        self.assertEqual(payload["status"], "ok")
++        self.assertFalse(os.path.isdir(st.screen_root()))
++        self.assertEqual(payload["missing_pool_codes"], ["999999.SZ"])
++        self.assertEqual([p["code"] for p in payload["available_pool"]], ["000001.SZ"])
++        self.assertEqual(payload["entities_ready"], 1)
++        # PIT：未来行被排除、缺时点行待核验
++        self.assertEqual(len(payload["excluded"]), 1)
++        self.assertEqual(len(payload["pending"]), 1)
++
++    def test_available_pool_is_cn_and_sorted(self):
++        payload, _errors, _meta = st.load_source()
++        payload["rows"].append(_row("腾讯控股", "00700.HK", "2024-12-31",
++                                    avail="2025-04-01", revenue=1))
++        pool = st.available_pool(payload)
++        codes = [p["code"] for p in pool]
++        self.assertEqual(codes, ["000001.SZ"])   # HK 界外，不进候选
++
++    def test_real_cache_sample_two_companies(self):
++        """真实缓存（data/screen_cache）：来源身份可用，洋河/三一在候选池。"""
++        import screen_store as st2
++        os.environ["WEAVEMIND_SCREEN_CACHE"] = os.path.join(
++            os.path.dirname(os.path.abspath(st.__file__)),
++            "data", "screen_cache", "official_disclosure_cache.json")
++        payload, errors, meta = st2.load_source()
++        self.assertEqual(errors, [])
++        self.assertEqual(meta["label"], "official_disclosure_cache")
++        self.assertFalse(meta["synthetic"])
++        self.assertEqual(meta["sha256"], st2.ss.payload_sha256(st2.default_cache_path()))
++        pool = st2.available_pool(payload)
++        self.assertEqual([p["code"] for p in pool], ["002304.SZ", "600031.SH"])
++        run, errs = st2.execute(pool=["002304.SZ", "600031.SH"],
++                                as_of="2025-04-30",
++                                rules_raw=[{"field": "gross_margin", "op": ">=", "value": 70},
++                                           {"field": "debt_ratio", "op": "<=", "value": 60}])
++        self.assertEqual(errs, [])
++        # 洋河过（毛利 73.16% ≥ 70，负债 23.24% ≤ 60）；三一毛利 26.43% 不达标
++        self.assertEqual(run["counts"], {"pass": 1, "fail": 1, "insufficient": 0,
++                                         "total": 2})
++        self.assertEqual(run["rows"]["pass"][0]["entity_id"], "002304.SZ")
++
++    # ---------- 证据绑定 ----------
++
++    def test_evidence_binding_resolves_fact_ids(self):
++        run, _ = self._run()
++        ev = st.evidence(run, "000001.SZ")
++        self.assertIsNotNone(ev)
++        self.assertEqual(ev["run_id"], run["run_id"])
++        self.assertEqual(ev["entity_id"], "000001.SZ")
++        self.assertEqual(ev["verdict"], "pass")
++        self.assertEqual(ev["eval_period"], "2024年")
++        readings = {r["field"]: r for r in ev["readings"]}
++        gm = readings["gross_margin"]
++        self.assertEqual(len(gm["inputs"]), 2)
++        self.assertTrue(all(d["source_url"].startswith("http://example.com/")
++                            for d in gm["inputs"]))
++        self.assertEqual(gm["unresolved_inputs"], [])
++        self.assertEqual({d["metric"] for d in gm["inputs"]},
++                         {"gross_profit", "revenue"})
++        # 每条观察带可用时点与期间身份
++        for d in gm["inputs"]:
++            self.assertTrue(d["period"].endswith("年"))
++            self.assertTrue(d["period_end"])
++            self.assertTrue(d["caliber"])
++        # 证据页还应给出 PIT 排除/待核验行
++        self.assertEqual(len(ev["excluded"]), 1)
++        self.assertEqual(len(ev["pending_pit"]), 1)
++
++    def test_evidence_unknown_entity_is_none(self):
++        run, _ = self._run()
++        self.assertIsNone(st.evidence(run, "888888.SZ"))
++        self.assertIsNone(st.evidence(run, ""))
++        self.assertIsNone(st.evidence({}, "000001.SZ"))
++
++    def test_synthetic_flag_propagates_into_run(self):
++        run, _ = self._run()
++        self.assertTrue(run["source"]["synthetic"])
++        self.assertTrue(any("合成演示" in n for n in run["notes"]))
++
++    # ---------- 历史列表 ----------
++
++    def test_list_runs_newest_first_with_summary(self):
++        run1, _ = self._run()
++        run2, _ = self._run(rules_raw=[{"field": "gross_margin", "op": ">=", "value": 30}])
++        runs = st.list_runs()
++        self.assertEqual(len(runs), 2)
++        self.assertEqual({r["run_id"] for r in runs},
++                         {run1["run_id"], run2["run_id"]})
++        created = [r["created_at"] for r in runs]
++        self.assertEqual(created, sorted(created, reverse=True))
++        for r in runs:
++            self.assertIn("counts", r)
++            self.assertIn("integrity", r)
++            self.assertIn("source", r)
++
++    def test_list_runs_empty_root(self):
++        self.assertEqual(st.list_runs(), [])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=1)
++
++
++class TestPresets(unittest.TestCase):
++    """预设（股票池+规则）：可保存、可编辑、可删除，且永不改动已冻结结果。"""
++
++    def setUp(self):
++        self._tmp = tempfile.mkdtemp(prefix="weavemind_preset_test_")
++        self._saved = {k: os.environ.get(k) for k in
++                       ("WEAVEMIND_SCREEN_DIR", "WEAVEMIND_SCREEN_CACHE",
++                        "WEAVEMIND_SCREEN_PRESETS")}
++        os.environ["WEAVEMIND_SCREEN_DIR"] = os.path.join(self._tmp, "runs")
++        os.environ["WEAVEMIND_SCREEN_CACHE"] = _write_cache(
++            os.path.join(self._tmp, "cache.json"))
++        os.environ["WEAVEMIND_SCREEN_PRESETS"] = os.path.join(self._tmp, "presets")
++        self.addCleanup(self._restore)
++
++    def _restore(self):
++        for k, v in self._saved.items():
++            if v is None:
++                os.environ.pop(k, None)
++            else:
++                os.environ[k] = v
++        shutil.rmtree(self._tmp, ignore_errors=True)
++
++    def test_save_list_load_roundtrip(self):
++        preset, errors = st.save_preset(name="白酒高毛利", pool=["000001.SZ"],
++                                        rules_raw=[{"field": "gross_margin",
++                                                    "op": ">=", "value": 70}],
++                                        as_of="2026-01-31")
++        self.assertEqual(errors, [])
++        listed = st.list_presets()
++        self.assertEqual([p["preset_id"] for p in listed], [preset["preset_id"]])
++        back = st.load_preset(preset["preset_id"])
++        self.assertEqual(back["pool"], ["000001.SZ"])
++        self.assertEqual(back["rules"][0]["field"], "gross_margin")
++        self.assertEqual(back["as_of"], "2026-01-31")
++        self.assertEqual(back["created_at"], back["updated_at"])
++
++    def test_update_keeps_id_and_created_at(self):
++        first, _ = st.save_preset(name="甲", pool=["000001.SZ"],
++                                  rules_raw=[{"field": "gross_margin", "op": ">=", "value": 70}])
++        second, errors = st.save_preset(name="乙", pool=["000001.SZ", "600031.SH"],
++                                        rules_raw=[{"field": "debt_ratio", "op": "<=", "value": 60}],
++                                        preset_id=first["preset_id"])
++        self.assertEqual(errors, [])
++        self.assertEqual(second["preset_id"], first["preset_id"])
++        self.assertEqual(second["created_at"], first["created_at"])
++        self.assertEqual(second["name"], "乙")
++        self.assertEqual(len(st.list_presets()), 1)     # 更新不是新增
++
++    def test_unknown_field_rejected_and_nothing_written(self):
++        preset, errors = st.save_preset(name="坏的", pool=["000001.SZ"],
++                                        rules_raw=[{"field": "net_margin", "op": ">=", "value": 1}])
++        self.assertIsNone(preset)
++        self.assertTrue(any("未知字段" in e for e in errors), errors)
++        self.assertEqual(st.list_presets(), [])
++
++    def test_empty_name_or_pool_rejected(self):
++        _, errors = st.save_preset(name="  ", pool=["000001.SZ"],
++                                    rules_raw=[{"field": "gross_margin", "op": ">=", "value": 1}])
++        self.assertTrue(any("名称" in e for e in errors))
++        _, errors = st.save_preset(name="空的", pool=[],
++                                    rules_raw=[{"field": "gross_margin", "op": ">=", "value": 1}])
++        self.assertTrue(any("股票池" in e for e in errors))
++
++    def test_bad_asof_rejected(self):
++        _, errors = st.save_preset(name="日期坏", pool=["000001.SZ"],
++                                    rules_raw=[{"field": "gross_margin", "op": ">=", "value": 1}],
++                                    as_of="2025-13-45")
++        self.assertTrue(any("截止日" in e for e in errors), errors)
++
++    def test_path_traversal_rejected(self):
++        _, errors = st.save_preset(name="越界", pool=["000001.SZ"],
++                                    rules_raw=[{"field": "gross_margin", "op": ">=", "value": 1}],
++                                    preset_id="../../../etc/passwd")
++        self.assertTrue(errors)
++        self.assertIsNone(st.load_preset("../../etc/passwd"))
++        self.assertFalse(st.delete_preset("..\\..\\windows\\win.ini"))
++        # 合法 id 但不存在：读/删都诚实返回空/False
++        self.assertIsNone(st.load_preset("0123456789abcdef"))
++        self.assertFalse(st.delete_preset("0123456789abcdef"))
++
++    def test_delete_does_not_touch_runs(self):
++        run, errors = st.execute(pool=["000001.SZ"], as_of="2026-01-31", rules_raw=RULES)
++        self.assertEqual(errors, [])
++        preset, _ = st.save_preset(name="会删", pool=["000001.SZ"], rules_raw=RULES)
++        self.assertTrue(st.delete_preset(preset["preset_id"]))
++        self.assertEqual(st.list_presets(), [])
++        back, _man = st.load_run(run["run_id"])
++        self.assertIsNotNone(back)                       # 结果不受影响
++        self.assertEqual(back["run_id"], run["run_id"])
++
++    def test_broken_preset_file_skipped(self):
++        root = st.preset_root()
++        os.makedirs(root, exist_ok=True)
++        with open(os.path.join(root, "0123456789abcdef.json"), "w", encoding="utf-8") as fh:
++            fh.write("{ not json")
++        st.save_preset(name="好的", pool=["000001.SZ"], rules_raw=RULES)
++        listed = st.list_presets()
++        self.assertEqual([p["name"] for p in listed], ["好的"])
++
++    def test_pool_codes_are_normalized_and_deduped(self):
++        preset, errors = st.save_preset(name="去重", pool=["000001.sz", "000001.SZ", " "],
++                                        rules_raw=RULES)
++        self.assertEqual(errors, [])
++        self.assertEqual(preset["pool"], ["000001.SZ"])
++
++    def test_preset_hash_matches_rules(self):
++        rules = [{"field": "gross_margin", "op": ">=", "value": 70}]
++        preset, _ = st.save_preset(name="哈希", pool=["000001.SZ"], rules_raw=rules)
++        parsed, _errs = st.ss.parse_rules(rules)
++        self.assertEqual(preset["rules_hash"], st.ss.rules_hash(parsed))
+diff --git a/web_ui.py b/web_ui.py
+index 7636687..c45396a 100644
+--- a/web_ui.py
++++ b/web_ui.py
+@@ -10112,11 +10112,199 @@ def _post_research_study_hypothesis_card(self, p, body, admin):
+                        "note": "待人工确认；本入口不代签，也不采纳为交付"})
+ 
+ 
++# ============================================================
++# 可解释选股 MVP（R1-SCREEN-1023，R1-B）：预览/执行/查看原版/证据
++#
++# 边界：写操作仅 admin（do_POST 统一 _require_admin）；GET 只读走
++# _role_allowed_get（viewer 可看结果历史）；筛选纯计算零模型调用；
++# 结果不可变（screen_store），「查看原版」永不重算。
++# ============================================================
++
++def _screen_fields_payload() -> dict:
++    """字段目录（表单第 2 步的候选与单位提示）。"""
++    import stock_screen as _ss
++    return {
++        "schema": _ss.SCHEMA_VERSION, "impl_version": _ss.IMPL_VERSION,
++        "field_map_version": _ss.FIELD_MAP_VERSION,
++        "ops": list(_ss.OPS),
++        "amount_units": ["元", "万", "亿"],
++        "fields": [spec.as_dict() for spec in _ss.FIELD_SPECS.values()],
++    }
++
++
++def _get_screen_fields(self, p):
++    return self._json({"status": "ok", **_screen_fields_payload()})
++
++
++def _get_screen_pool(self, p):
++    """`GET /api/screen/pool`：表单第 1 步的股票池目录（来源身份 + 输入里真实可用的主体）。
++
++    不预置公司清单、不猜代码：目录里有什么，选择器才显示什么。
++    """
++    import screen_store
++    payload, errors = screen_store.pool_catalog()
++    if errors:
++        return self._json({"error": "；".join(errors), "errors": errors}, 500)
++    return self._json(payload)
++
++
++def _get_screen_runs(self, p):
++    """`GET /api/screen/runs`：历史结果摘要（新到旧；viewer 可看）。"""
++    from urllib.parse import parse_qs
++    import screen_store
++    q = parse_qs(urlparse(self.path).query)
++    limit = int((q.get("limit") or ["50"])[0] or 50)
++    return self._json({"status": "ok", "runs": screen_store.list_runs(min(max(limit, 1), 200))})
++
++
++def _get_screen_run(self, p):
++    """`GET /api/screen/run?id=<run_id>`：读一份存下来的结果（查看原版，永不重算）。"""
++    from urllib.parse import parse_qs
++    import screen_store
++    q = parse_qs(urlparse(self.path).query)
++    rid = (q.get("id") or [""])[0].strip()
++    run, manifest = screen_store.load_run(rid)
++    if run is None:
++        return self._json({"error": "结果不存在或不可读（run_id 非法也会返回此项）"}, 404)
++    return self._json({"status": "ok", "run": run, "manifest": manifest,
++                       "note": "原版结果：与执行时冻结的哈希绑定；重新筛选请走 POST /api/screen/run"})
++
++
++def _get_screen_evidence(self, p):
++    """`GET /api/screen/evidence?run=<run_id>&entity=<code>`：某一份结果里某家公司的证据。
++
++    绑 (run_id, entity_id)，不绑「最近一次任务」；观察带 fact_id/来源 URL 可核对。
++    """
++    from urllib.parse import parse_qs
++    import screen_store
++    q = parse_qs(urlparse(self.path).query)
++    rid = (q.get("run") or [""])[0].strip()
++    entity = (q.get("entity") or [""])[0].strip()
++    run, _manifest = screen_store.load_run(rid)
++    if run is None:
++        return self._json({"error": "结果不存在或不可读"}, 404)
++    ev = screen_store.evidence(run, entity)
++    if ev is None:
++        return self._json({"error": f"该结果里没有主体 {entity}（不绑最近任务，不猜）"}, 404)
++    return self._json({"status": "ok", "evidence": ev})
++
++
++def _post_screen_preview(self, p, body, admin):
++    """`POST /api/screen/preview`：输入预览（股票池可用性、PIT 排除、规则校验）。
++
++    body：`{pool: [code...], as_of: YYYY-MM-DD, rules?: [...]}`。
++    只做**预览**：不执行筛选、不落结果、不发模型调用；契约错误 400 逐条说明。
++    """
++    import screen_store
++    pool = body.get("pool")
++    as_of = str(body.get("as_of") or "").strip()
++    payload, errors = screen_store.preview(pool=pool, as_of=as_of,
++                                           rules_raw=body.get("rules"))
++    if errors:
++        return self._json({"error": "；".join(errors), "errors": errors}, 400)
++    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
++              "screen.preview", target=str(payload.get("snapshot_id"))[:16],
++              result="ok",
++              detail=f"pool={len(payload.get('pool') or [])} as_of={payload.get('as_of')}")
++    return self._json(payload)
++
++
++def _post_screen_run(self, p, body, admin):
++    """`POST /api/screen/run`：执行一次筛选并落**不可变结果**（同一身份重复执行复用）。
++
++    body：`{pool, as_of, rules, sort?}`；返回完整 run（页面直接渲染）。
++    「用当前数据重新筛选」= 同参数再次 POST：数据一变 snapshot_id 就变 → 新 run_id，
++    旧结果原样保留；返回 `reused: true` 表示哈希相同、原样复用。
++    """
++    import screen_store
++    pool = body.get("pool")
++    as_of = str(body.get("as_of") or "").strip()
++    sort = body.get("sort") if isinstance(body.get("sort"), dict) else None
++    run, errors = screen_store.execute(pool=pool, as_of=as_of,
++                                       rules_raw=body.get("rules"), sort=sort)
++    if errors:
++        return self._json({"error": "；".join(errors), "errors": errors}, 400)
++    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
++              "screen.run", target=str(run.get("run_id")),
++              result="ok",
++              detail=(f"pool={len(run.get('pool') or [])} as_of={run.get('as_of')} "
++                      f"counts={run.get('counts')} reused={run.get('reused')}"))
++    return self._json({"status": "ok", "run": run, "note": "结果已冻结：规则/数据变更会生成新结果，旧结果原样保留"})
++
++
++def _get_screen_presets(self, p):
++    """`GET /api/screen/presets`：已保存的股票池+规则预设（viewer 可看）。"""
++    from urllib.parse import parse_qs
++    import screen_store
++    q = parse_qs(urlparse(self.path).query)
++    try:
++        limit = int((q.get("limit") or ["50"])[0] or 50)
++    except (TypeError, ValueError):
++        limit = 50
++    try:
++        presets = screen_store.list_presets(min(max(limit, 1), 200))
++    except Exception as exc:                       # noqa: BLE001 - 接口不吞异常成 200
++        return self._json({"error": f"读取预设失败：{exc}"}, 500)
++    return self._json({"status": "ok", "presets": presets,
++                       "note": "预设可编辑；它只是偏好，不改变任何已冻结结果"})
++
++
++def _get_screen_preset(self, p):
++    """`GET /api/screen/preset?id=`：读一份预设（表单回填用）。"""
++    from urllib.parse import parse_qs
++    import screen_store
++    q = parse_qs(urlparse(self.path).query)
++    pid = (q.get("id") or [""])[0].strip()
++    preset = screen_store.load_preset(pid) if pid else None
++    if preset is None:
++        return self._json({"error": "预设不存在或不可读"}, 404)
++    return self._json({"status": "ok", "preset": preset})
++
++
++def _post_screen_preset(self, p, body, admin):
++    """`POST /api/screen/preset`：新增或更新预设（带 `preset_id` 即更新）。
++
++    body：`{preset_id?, name, pool, rules, as_of?, note?}`。
++    规则走与执行同一套 `parse_rules`：未知字段直接拒绝，不自动替换含义相近字段。
++    """
++    import screen_store
++    preset, errors = screen_store.save_preset(
++        name=body.get("name"), pool=body.get("pool"), rules_raw=body.get("rules"),
++        as_of=str(body.get("as_of") or ""), note=str(body.get("note") or ""),
++        preset_id=str(body.get("preset_id") or ""))
++    if errors:
++        return self._json({"error": "；".join(errors), "errors": errors}, 400)
++    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
++              "screen.preset.save", target=str(preset.get("preset_id")), result="ok",
++              detail=f"pool={len(preset.get('pool') or [])} rules={len(preset.get('rules') or [])}")
++    return self._json({"status": "ok", "preset": preset})
++
++
++def _post_screen_preset_delete(self, p, body, admin):
++    """`POST /api/screen/preset/delete`：删预设（只删偏好，不碰已冻结结果）。"""
++    import screen_store
++    pid = str(body.get("preset_id") or "").strip()
++    if not pid:
++        return self._json({"error": "缺 preset_id"}, 400)
++    if not screen_store.delete_preset(pid):
++        return self._json({"error": "预设不存在或不可删除"}, 404)
++    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
++              "screen.preset.delete", target=pid, result="ok", detail="")
++    return self._json({"status": "ok", "deleted": pid})
++
++
+ # ============================================================
+ # 路由表（E 重构：do_GET/do_POST 业务分支表化，保持原 if 顺序）
+ # ============================================================
+ _GET_ROUTES = [
+     (lambda self, p: p == "/api/health", _get_health),
++    (lambda self, p: p == "/api/screen/fields", _get_screen_fields),
++    (lambda self, p: p == "/api/screen/pool", _get_screen_pool),
++    (lambda self, p: p == "/api/screen/runs", _get_screen_runs),
++    (lambda self, p: p == "/api/screen/run", _get_screen_run),
++    (lambda self, p: p == "/api/screen/evidence", _get_screen_evidence),
++    (lambda self, p: p == "/api/screen/presets", _get_screen_presets),
++    (lambda self, p: p == "/api/screen/preset", _get_screen_preset),
+     (lambda self, p: p == "/api/research-study/sample", _get_research_study_sample),
+     (lambda self, p: p == "/api/research-study/studies", _get_research_study_studies),
+     (lambda self, p: p == "/api/research-study/file", _get_research_study_file),
+@@ -10172,6 +10360,10 @@ _GET_ROUTES = [
+ 
+ _POST_ROUTES = [
+     (lambda self, p: self.path == "/api/share" or self.path.startswith("/api/share/"), _post_share),
++    (lambda self, p: self.path == "/api/screen/preview", _post_screen_preview),
++    (lambda self, p: self.path == "/api/screen/run", _post_screen_run),
++    (lambda self, p: self.path == "/api/screen/preset", _post_screen_preset),
++    (lambda self, p: self.path == "/api/screen/preset/delete", _post_screen_preset_delete),
+     (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
+     (lambda self, p: self.path == "/task", _post_task),
+     (lambda self, p: self.path == "/api/research-study/upload", _post_research_study_upload),

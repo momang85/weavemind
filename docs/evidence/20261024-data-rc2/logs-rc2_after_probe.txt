@@ -1,0 +1,79 @@
+{
+ "date": "2026-10-24",
+ "runtime": "3.14.3",
+ "method": "offline synthetic contracts + mocked transport; temporary dirs only",
+ "findings": [
+  {
+   "probe": "F1_coverage_cross_company_year",
+   "fixed": true,
+   "expected": "missing",
+   "observed": {
+    "status": "missing"
+   }
+  },
+  {
+   "probe": "F2_half_year_rejected",
+   "fixed": true,
+   "expected": "dataset=None + 明确年报口径错误",
+   "observed": {
+    "dataset": false,
+    "errors": [
+     "期间「2024-06-30」不是年报期末：当前只支持年报口径（年度如 2024，或期末 2024-12-31）；不会把半年度/季度当成年报"
+    ]
+   }
+  },
+  {
+   "probe": "F3_adapter_subject_mismatch_rejected",
+   "fixed": true,
+   "expected": "per-company failed/subject_mismatch，无数据集",
+   "observed": {
+    "status": "failed",
+    "category": "subject_mismatch",
+    "dataset": null
+   }
+  },
+  {
+   "probe": "F4_amount_full_precision",
+   "fixed": true,
+   "expected": "revenue == 123456789（source_exact）",
+   "observed": {
+    "stored_revenue_yuan": 123456789,
+    "difference_yuan": 0,
+    "precision": "source_exact"
+   }
+  },
+  {
+   "probe": "F5_corrupt_dataset_reuse_rejected",
+   "fixed": true,
+   "expected": "拒绝复用（HTTP 503 store_unavailable）+ 原坏字节不被重写 + 读取仍报损",
+   "observed": {
+    "collect_write_error": "同 ID 数据集实际内容与元信息不一致（rows.json 哈希不符，可能损坏）：损坏数据不当作成功复用，也不重写原文件；请显式修复或删除后重试",
+    "bytes_unchanged_after_refusal": true,
+    "load_rejects": true
+   }
+  },
+  {
+   "probe": "F6_pre_connection_not_counted_as_connected",
+   "fixed": true,
+   "expected": "adapter_calls=1, network_requests=None + 说明",
+   "observed": {
+    "adapter_calls": 1,
+    "network_requests": null,
+    "network_requests_note": "适配器传输层不暴露连接事件：真实 HTTP 请求数未知；adapter_calls 是适配器调用次数，不等同真实请求数"
+   }
+  },
+  {
+   "probe": "F7_unreadable_ledger_not_overwritten",
+   "fixed": true,
+   "expected": "recorded=False/ledger_unreadable，bytes 不变，runs_total=7",
+   "observed": {
+    "recorded": false,
+    "reason": "ledger_unreadable",
+    "bytes_preserved": true,
+    "runs_total": 7
+   }
+  }
+ ],
+ "all_fixed": true,
+ "failed_probes": []
+}

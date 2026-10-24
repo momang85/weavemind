@@ -1,0 +1,77 @@
+{
+  "date": "2026-10-24",
+  "runtime": "3.14.3",
+  "method": "offline synthetic contracts, mocked transport, temporary storage; no production mutation or real network",
+  "fingerprints": {
+    "screen_prepare.py": "1cf68327e41e998d47a93a202ca1c4a65e245839a8c818fd2ac3094ff2c97f4c",
+    "screen_store.py": "3a294208356dd6e35771d6d9b033a7e19cc2cb9e93aed7b204b855446a6fa1d4",
+    "adapters/eastmoney.py": "0ab6dc58d0c8790052ac92d7d11c3d5a4def02c86b5842a4531f5155c6a2c6bd",
+    "web_ui.py": "5d7a739e564a6973641b3d861327b41ce35b73d392fe2b6bd11187fd726f2c99"
+  },
+  "findings": [
+    {
+      "probe": "coverage_cross_company_year",
+      "expected": "missing",
+      "actual": "covered"
+    },
+    {
+      "probe": "half_year_silently_becomes_annual",
+      "requested": "2024-06-30",
+      "errors": [],
+      "returned_periods": [
+        "2024-12-31"
+      ]
+    },
+    {
+      "probe": "adapter_subject_mismatch_accepted",
+      "requested": "002304.SZ",
+      "response_subject": "600031.SH",
+      "stored_subject": "002304.SZ",
+      "errors": []
+    },
+    {
+      "probe": "adapter_amount_round_trip_precision",
+      "raw_revenue_yuan": 123456789,
+      "stored_revenue_yuan": 123000000,
+      "difference_yuan": -456789
+    },
+    {
+      "probe": "source_dataset_corrupt_reuse",
+      "collect_errors": [],
+      "reused": true,
+      "load_rejects_after_reuse": true
+    },
+    {
+      "probe": "pre_connection_failure_counted_as_connected",
+      "fixture": "adapter fails before any transport call",
+      "actual_network_requests": 1
+    },
+    {
+      "probe": "unreadable_ledger_overwrite",
+      "recorded": true,
+      "original_bytes_preserved": false,
+      "runs_total_after": 1
+    }
+  ],
+  "package_review": {
+    "sha256": "8d5a2fc82202feae2a6cdc3b824cef2a816380909fc4062aa98780b3c1f68819",
+    "file_count": 334,
+    "configured_cache_included": true,
+    "default_frontend_index_included": false,
+    "check_build_index_included": true
+  },
+  "exit_code": 0,
+  "assessment": "Employee C0-C3 reports reviewed; do not accept current RC package for distribution. These are scoped independent probes, not a complete test suite.",
+  "additional_source_review": [
+    "materials_projection enumerates screen datasets/cache/watchlist/runs, not the existing company research task material/working-paper admission flow; that requirement is incomplete.",
+    "Two reviewed employee reports contain account/password literals. Values intentionally omitted here; redact deliverables and use independent synthetic credentials. Do not change real account credentials automatically.",
+    "Report assertion about a manually stopped production process is not substantiated by listener absence alone; cause remains unknown."
+  ],
+  "existing_progress_retained": [
+    "Read-modify-write locks and writer claim implemented",
+    "UI data preparation panel added",
+    "Previous corrupt-JSON ledger guard added",
+    "Version/period comparison, watchlists and rule templates retained"
+  ],
+  "dispatch_preference": "User previously explicitly selected keeping browser control closed and forwarding manually; prepare new task and handoff text, do not attempt browser messaging."
+}

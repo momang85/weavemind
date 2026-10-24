@@ -41,6 +41,7 @@ export function roleLabel(role?: string | null): string {
   if (r === 'admin') return '管理员'
   if (r === 'viewer') return '只读用户'
   if (r === 'reviewer') return '复核人'
+  if (r === 'researcher') return '研究员（自助研究）'
   return r ? `未知角色（原文：${r}）` : '未标注角色'
 }
 

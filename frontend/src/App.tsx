@@ -19,6 +19,8 @@ const MemoryPage = lazy(() => import('./pages/Memory'))
 const EvalsPage = lazy(() => import('./pages/Evals'))
 const SkillsPage = lazy(() => import('./pages/Skills'))
 const ResearchStudyPage = lazy(() => import('./pages/ResearchStudy'))
+const StockScreenPage = lazy(() => import('./pages/StockScreen'))
+const CompanyPage = lazy(() => import('./pages/CompanyPage'))
 
 function PageFallback() {
   return (
@@ -125,6 +127,8 @@ export default function App() {
             <Route path="/evals" element={<EvalsPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/research-study" element={<ResearchStudyPage />} />
+            <Route path="/screen" element={<StockScreenPage />} />
+            <Route path="/screen/company" element={<CompanyPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/metrics" element={<MetricsPage />} />

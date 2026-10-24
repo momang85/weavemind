@@ -50,7 +50,8 @@ export default function Login() {
         }
         return
       }
-      const user: AuthUser = { username: d.user, role: d.role === 'viewer' ? 'viewer' : 'admin' }
+      // 角色原样保存：研究/复核等角色不归到 admin（B1 真机反例：researcher 被显示成「管理员」）
+      const user: AuthUser = { username: d.user, role: String(d.role || 'viewer') }
       setAuth(user) // 会话由后端 session Cookie 承载，前端仅保存展示用用户名/角色
     } catch {
       setError('网络异常，请确认服务已启动')

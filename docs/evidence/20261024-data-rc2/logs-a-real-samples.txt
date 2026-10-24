@@ -1,0 +1,133 @@
+{
+ "source": "eastmoney RPT_F10_FINANCE_MAINFINADATA（web_fetch 只读转录）",
+ "companies": [
+  "000333.SZ",
+  "000651.SZ",
+  "002304.SZ",
+  "600031.SH"
+ ],
+ "rows": 8,
+ "upload": {
+  "status_code": 200,
+  "ok": true,
+  "dataset_id": "974a404da0b81965ed66d1ec44f61d34",
+  "rows": 8,
+  "codes": [
+   "000333.SZ",
+   "000651.SZ",
+   "002304.SZ",
+   "600031.SH"
+  ],
+  "source": null,
+  "kind": null,
+  "official": false,
+  "errors": null
+ },
+ "run": {
+  "status_code": 200,
+  "status": "ok",
+  "counts": {
+   "pass": 2,
+   "fail": 2,
+   "insufficient": 0,
+   "total": 4
+  },
+  "report_period": "",
+  "result_hash": "c2a9e5210419822012e4283c3cd8b53cb36224aef7b1e43b5667f671f1f6e0db",
+  "source": {
+   "label": "用户数据集：真实样本 4 家 2023-2024（用户提供）",
+   "sha256": "974a404da0b81965ed66d1ec44f61d3446ba46dd46665e2b9c0a6eb0b8cd999f",
+   "row_count": 8,
+   "synthetic": false,
+   "user_provided": true,
+   "official": false,
+   "dataset_id": "974a404da0b81965ed66d1ec44f61d34",
+   "name": "真实样本 4 家 2023-2024（用户提供）",
+   "origin": "real4_2023_2024.csv",
+   "origin_file": "real4_2023_2024.csv",
+   "provenance": {
+    "kind": "user_provided",
+    "kind_label": "用户提供",
+    "file_sha256": "974a404da0b81965ed66d1ec44f61d3446ba46dd46665e2b9c0a6eb0b8cd999f",
+    "origin_ref": "real4_2023_2024.csv",
+    "source_urls": [
+     "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_FINANCE_MAINFINADATA&columns=SECURITY_CODE,SECURITY_NAME_ABBR,REPORT_DATE,REPORT_TYPE,NOTICE_DATE,TOTALOPERATEREVE,MLR,PARENTNETPROFIT,NETCASH_OPERATE_PK,TOTAL_ASSETS_PK,LIABILITY&filter=(SECURITY_CODE%3D%22000333%22)(REPORT_TYPE%3D%22%E5%B9%B4%E6%8A%A5%22)&pageSize=3&sortColumns=REPORT_DATE&sortTypes=-1",
+     "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_FINANCE_MAINFINADATA&columns=SECURITY_CODE,SECURITY_NAME_ABBR,REPORT_DATE,REPORT_TYPE,NOTICE_DATE,TOTALOPERATEREVE,MLR,PARENTNETPROFIT,NETCASH_OPERATE_PK,TOTAL_ASSETS_PK,LIABILITY&filter=(SECURITY_CODE%3D%22000651%22)(REPORT_TYPE%3D%22%E5%B9%B4%E6%8A%A5%22)&pageSize=3&sortColumns=REPORT_DATE&sortTypes=-1",
+     "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_FINANCE_MAINFINADATA&columns=SECURITY_CODE,SECURITY_NAME_ABBR,REPORT_DATE,REPORT_TYPE,NOTICE_DATE,TOTALOPERATEREVE,MLR,PARENTNETPROFIT,NETCASH_OPERATE_PK,TOTAL_ASSETS_PK,LIABILITY&filter=(SECURITY_CODE%3D%22002304%22)(REPORT_TYPE%3D%22%E5%B9%B4%E6%8A%A5%22)&pageSize=3&sortColumns=REPORT_DATE&sortTypes=-1",
+     "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_FINANCE_MAINFINADATA&columns=SECURITY_CODE,SECURITY_NAME_ABBR,REPORT_DATE,REPORT_TYPE,NOTICE_DATE,TOTALOPERATEREVE,MLR,PARENTNETPROFIT,NETCASH_OPERATE_PK,TOTAL_ASSETS_PK,LIABILITY&filter=(SECURITY_CODE%3D%22600031%22)(REPORT_TYPE%3D%22%E5%B9%B4%E6%8A%A5%22)&pageSize=3&sortColumns=REPORT_DATE&sortTypes=-1"
+    ],
+    "original_verified": false,
+    "human_review": {
+     "status": "not_reviewed",
+     "by": null,
+     "at": null
+    },
+    "note": "用户上传：内容指纹只证明这份文件没变；不构成原文核验或官方数据。"
+   }
+  }
+ },
+ "entities": [
+  {
+   "code": null,
+   "entity": "美的集团",
+   "verdict": null,
+   "readings": null,
+   "computations": null,
+   "evidence": null
+  },
+  {
+   "code": null,
+   "entity": "格力电器",
+   "verdict": null,
+   "readings": null,
+   "computations": null,
+   "evidence": null
+  },
+  {
+   "code": null,
+   "entity": "洋河股份",
+   "verdict": null,
+   "readings": null,
+   "computations": null,
+   "evidence": null
+  },
+  {
+   "code": null,
+   "entity": "三一重工",
+   "verdict": null,
+   "readings": null,
+   "computations": null,
+   "evidence": null
+  }
+ ],
+ "cross_check_with_official_cache": [
+  {
+   "code": "002304.SZ",
+   "period": "2023-12-31",
+   "cache_revenue": 33126277551.51,
+   "api_revenue": 33126277551.51,
+   "same": true
+  },
+  {
+   "code": "002304.SZ",
+   "period": "2024-12-31",
+   "cache_revenue": 28876296993.56,
+   "api_revenue": 28876296993.56,
+   "same": true
+  },
+  {
+   "code": "600031.SH",
+   "period": "2023-12-31",
+   "cache_revenue": 73221725000.0,
+   "api_revenue": 74018936000,
+   "same": false
+  },
+  {
+   "code": "600031.SH",
+   "period": "2024-12-31",
+   "cache_revenue": 77773391000.0,
+   "api_revenue": 78383379000,
+   "same": false
+  }
+ ]
+}

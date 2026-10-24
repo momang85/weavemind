@@ -1,7 +1,7 @@
 import { ReactNode, useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Settings, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X, Microscope, BookOpen, ChevronDown, ArrowUpRight } from 'lucide-react'
+import { Settings, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X, Microscope, BookOpen, ChevronDown, ArrowUpRight, Filter } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { useDemoRunner } from '../stores/useDemoRunner'
@@ -11,6 +11,7 @@ import { BrandMark } from './Brand'
 
 const researchNav = [
   { to: '/', icon: BookOpen, label: '研究工作台', subtitle: '从公开资料，到可复核的研究' },
+  { to: '/screen', icon: Filter, label: '可解释选股', subtitle: '自己的股票池 + 财务规则，候选带理由与缺口' },
   { to: '/history', icon: Clock, label: '研究档案', subtitle: '找回研究、继续对话与查看交付' },
   { to: '/research-study', icon: Microscope, label: '研究试验', subtitle: '在本地验证研究方法与结果' },
 ]
@@ -27,6 +28,13 @@ const settingsNav = { to: '/settings', icon: Settings, label: '设置', subtitle
 const MOBILE_PRIMARY = [...researchNav, settingsNav]
 const MOBILE_MORE = systemNav
 const navItems = [...researchNav, ...systemNav, settingsNav]
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: '管理员',
+  researcher: '研究员（自助研究）',
+  viewer: '只读',
+}
+const roleLabel = (role: string) => ROLE_LABELS[role] || role || '只读'
 
 export default function AppLayout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(window.innerWidth < 768)
@@ -146,7 +154,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
               <span className="sr-only sm:hidden">{connLabel}</span>
             </NavLink>
             {user && <div className="hidden items-center gap-3 border-l border-line pl-4 sm:flex">
-              <span className="text-ink-muted">{user.username}<span className="ml-2 text-ink-faint">{user.role === 'admin' ? '管理员' : '只读'}</span></span>
+              <span className="text-ink-muted">{user.username}<span className="ml-2 text-ink-faint">{roleLabel(user.role)}</span></span>
               <button onClick={logout} title="退出登录" aria-label="退出登录" className="rounded p-2 text-ink-faint hover:bg-surface-raised"><LogOut className="h-4 w-4" /></button>
             </div>}
           </div>
@@ -199,7 +207,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
               <button onClick={onToggleDemo} className="text-sm text-brand">演示模式 {demoMode ? 'ON · 退出' : 'OFF · 进入'}</button>
             </div>
             {user && <div className="mt-4 flex items-center justify-between border-t border-line pt-4 text-sm text-ink-muted">
-              <span>{user.username} · {user.role === 'admin' ? '管理员' : '只读'}</span><button onClick={logout} className="flex items-center gap-2"><LogOut className="h-4 w-4" />退出登录</button>
+              <span>{user.username} · {roleLabel(user.role)}</span><button onClick={logout} className="flex items-center gap-2"><LogOut className="h-4 w-4" />退出登录</button>
             </div>}
           </div>
         </div>, document.body,
