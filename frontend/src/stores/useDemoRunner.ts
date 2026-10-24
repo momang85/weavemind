@@ -31,6 +31,10 @@ export function useDemoRunner() {
     }
 
     timerRef.current = setInterval(() => {
+      if (useTaskStore.getState().currentTaskId !== 'demo-task-001') {
+        if (timerRef.current) clearInterval(timerRef.current)
+        return
+      }
       if (step >= totalSteps) {
         if (timerRef.current) clearInterval(timerRef.current)
         setReport(DEMO_REPORT)
@@ -47,17 +51,14 @@ export function useDemoRunner() {
         updateNodeStatus(plan, entry.step_id, 'success')
       } else if (entry.step_id && entry.type === 'error') {
         updateNodeStatus(plan, entry.step_id, 'failed')
-      } else if (entry.step_id && entry.type === 'info' && entry.message.includes('Dispatching')) {
+      } else if (entry.step_id && entry.type === 'dispatch') {
         updateNodeStatus(plan, entry.step_id, 'running')
       }
       updatePlan(structuredClone(plan))
 
-      // Animate agent status at step 20 (mid-execution)
-      if (step === 20) {
-        updateAgents(DEMO_AGENTS.map(a =>
-          a.agent_id === 'code_executor' ? { ...a, status: 'active:3/5' } : a
-        ))
-      }
+      updateAgents(DEMO_AGENTS.map(agent => ({ ...agent,
+        status: entry.type === 'dispatch' && agent.agent_id === entry.agent ? 'active' : 'idle',
+      })))
 
       step++
     }, 600) // 600ms per step = ~30s total demo

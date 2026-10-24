@@ -178,7 +178,31 @@ class TestInteractiveFlow(_Tmp):
         self.assertEqual(cfg["llm"]["base_url"], "https://api.siliconflow.cn/v1")
         self.assertTrue(cfg["llm"]["model"])
         self.assertEqual(cfg["embedding"]["api_key"], KEY_A)
-        pe.assert_called_once()
+        # 两处探测：对话模型 + embedding 模型（多数中转站只转对话，bge 会 404）
+        self.assertEqual(pe.call_count, 2)
+        probed = [c.args[2] for c in pe.call_args_list]
+        self.assertEqual(probed, [cfg["llm"]["model"], cfg["embedding"]["model"]])
+
+    def test_embedding_model_missing_offers_skip_and_defaults_to_skip(self):
+        """端点不提供 embedding 模型时默认跳过：否则记忆检索每次失败并降级。"""
+        code, pe = self._run(f"2\n\n{KEY_A}\n\n1\n\n\n",
+                             probe_side_effect=[(True, "连通正常"),
+                                                (False, "api.deepseek.com 返回 404：…")])
+        self.assertEqual(code, 0)
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["model"], "deepseek-chat")
+        self.assertEqual(cfg["embedding"]["api_key"], "YOUR_EMBEDDING_API_KEY",
+                         "探测失败且未明确要求保存时，不得写入坏 embedding")
+        self.assertEqual(pe.call_count, 2)
+
+    def test_embedding_probe_failure_can_still_be_saved_explicitly(self):
+        code, _ = self._run(f"2\n\n{KEY_B}\n\n1\n\n1\n",
+                            probe_side_effect=[(True, "连通正常"),
+                                               (False, "api.deepseek.com 返回 404：…")])
+        self.assertEqual(code, 0)
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["embedding"]["model"], "BAAI/bge-large-zh-v1.5",
+                         "显式选 1 时应按填写值保存（用户可能后续换端点）")
 
     def test_skip_embedding_keeps_it_unset(self):
         code, _ = self._run(f"1\n\n{KEY_B}\n\n2\n")
@@ -286,10 +310,37 @@ class TestInteractiveFlow(_Tmp):
                          KEY_B)
 
     def test_invalid_url_is_asked_again(self):
-        code, _ = self._run(f"4\nftp://bad/v1\nhttps://api.deepseek.com/v1\n{KEY_C}\n\n2\n")
+        code, _ = self._run(f"5\nftp://bad/v1\nhttps://api.deepseek.com/v1\n{KEY_C}\n\n2\n")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(self.cfg_path.read_text(encoding="utf-8"))["llm"]["base_url"],
                          "https://api.deepseek.com/v1")
+
+    def test_menu_requires_an_explicit_choice(self):
+        """回车不该选中任何服务商。
+
+        实测：新人直接回车 → 落到 SiliconFlow 预设，而他的 key 是别家的 → 401。
+        没有默认值就只能自己选，选错也至少是他自己选的（且引导现在会说清是哪家拒的）。
+        """
+        code, _ = self._run(f"\n5\nhttps://api.deepseek.com/v1\n{KEY_A}\n\n2\n")
+        self.assertEqual(code, 0)
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["base_url"], "https://api.deepseek.com/v1",
+                         "空回车必须重问，而不是落到第 1 项")
+
+    def test_out_of_range_choice_is_asked_again(self):
+        code, _ = self._run(f"9\n0\n2\n\n{KEY_A}\n\n2\n")
+        self.assertEqual(code, 0)
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["base_url"], "https://api.deepseek.com/v1")
+
+    def test_tierflow_preset_keeps_host_and_model_together(self):
+        """中转站预设：地址跟着预设走，模型名必须自己填（不预填别家模型名）。"""
+        code, pe = self._run(f"4\n\n{KEY_A}\nmymodel\n2\n")
+        self.assertEqual(code, 0)
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["base_url"], "https://tierflow.cn/v1")
+        self.assertEqual(cfg["llm"]["model"], "mymodel")
+        self.assertEqual(pe.call_args_list[0].args[0], "https://tierflow.cn/v1")
 
     def test_probe_failure_defaults_to_reenter(self):
         """探测失败时默认"重新填写"：回车不应把坏配置带进启动流程。
@@ -402,6 +453,96 @@ class TestProbeSkipWhenDepsMissing(_Tmp):
                 raise EOFError
             return line.rstrip("\n")
         return _next
+
+
+class TestProbeUsesHumanSentence(_Tmp):
+    """引导必须说清楚"到底哪里不对"，而不是只按枚举翻一句通用话。
+
+    实测（2026-10-22 新人截图）：他选了 2) DeepSeek 官方，却把别家的 key 粘进去，
+    DeepSeek 返回 401；引导只显示"鉴权失败（key 可能无效或已过期）"，于是他反复换
+    key（换到对的那家才发现原来的 key 从没坏）。现在 `llm_client` 会给出带端点域名
+    与状态码含义的整句，引导要原样展示，并补一句"下一步怎么做"。
+    """
+
+    _MSG = "api.deepseek.com 返回 401：该接入点不认这把密钥——密钥与接入点必须是同一家服务商"
+
+    def _probe(self, res):
+        import llm_client
+        with mock.patch.object(llm_client, "_probe_endpoint_status", return_value=res):
+            return w.probe_endpoint("https://api.deepseek.com/v1", KEY_A, "deepseek-chat")
+
+    def test_unauthorized_shows_host_and_points_at_custom_endpoint(self):
+        ok, reason = self._probe({"ok": False, "reason": "unauthorized",
+                                  "message": self._MSG})
+        self.assertFalse(ok)
+        self.assertIn("api.deepseek.com", reason, "必须写出是哪个地址拒的")
+        self.assertIn("同一家服务商", reason)
+        self.assertIn("自定义 base_url", reason,
+                      "401 必须给出「换地址」这条出路，否则用户只会去换 key")
+
+    def test_message_never_contains_the_key(self):
+        _, reason = self._probe({"ok": False, "reason": "unauthorized",
+                                 "message": self._MSG})
+        self.assertNotIn(KEY_A, reason)
+        self.assertNotIn(KEY_A[-8:], reason, "掩码尾巴也不该出现在这句里")
+
+    def test_unreachable_hint_mentions_v1_suffix(self):
+        ok, reason = self._probe({"ok": False, "reason": "unreachable",
+                                  "message": "连不上 api.x.com：timed out（网络/代理/DNS）"})
+        self.assertFalse(ok)
+        self.assertIn("连不上", reason)
+        self.assertIn("/v1", reason)
+
+    def test_balance_hint_says_top_up(self):
+        ok, reason = self._probe({"ok": False, "reason": "insufficient_balance",
+                                  "message": "api.deepseek.com 返回 402：该账号余额/额度不足"})
+        self.assertFalse(ok)
+        self.assertIn("充值", reason)
+
+    def test_legacy_result_without_message_still_readable(self):
+        """老缓存/被 mock 的探测结果没有 message：退回原文案，且不抛异常。"""
+        ok, reason = self._probe({"ok": False, "reason": "unauthorized"})
+        self.assertFalse(ok)
+        self.assertIn("鉴权失败", reason)
+
+    def test_success_stays_short(self):
+        ok, reason = self._probe({"ok": True, "reason": "ok", "message": ""})
+        self.assertTrue(ok)
+        self.assertEqual(reason, "连通正常", "成功时不要堆提示")
+
+
+class TestSaveAnywayWarns(_Tmp):
+    """选了「仍然保存」就必须说清后果：这份配置现在不能用。
+
+    实测：新人按 n 保存后，脚本接着启动成功、页面也能打开，于是以为好了——
+    直到第一次提问才失败，且失败信息在任务里而不是在配置上。
+    """
+
+    def test_save_anyway_prints_explicit_warning(self):
+        out = io.StringIO()
+        answers = f"2\n\n{KEY_A}\n\n2\nn\n"
+        buf = io.StringIO(answers)
+
+        def _next(prompt=""):
+            line = buf.readline()
+            if line == "":
+                raise EOFError
+            return line.rstrip("\n")
+
+        with mock.patch.object(w, "CONFIG_PATH", self.cfg_path), \
+                mock.patch.object(w, "_interactive", return_value=True), \
+                mock.patch.object(sys.stdin, "isatty", return_value=False, create=True), \
+                mock.patch.object(w, "probe_endpoint",
+                                  return_value=(False, "api.deepseek.com 返回 401：…")), \
+                _allow_probe(), \
+                mock.patch.object(w, "load_template", return_value=_template()), \
+                mock.patch("sys.stdout", out), \
+                mock.patch("builtins.input", side_effect=_next):
+            code = w.run_interactive(force=True, path=self.cfg_path)
+        self.assertEqual(code, 0, "显式 n 仍应保存")
+        text = out.getvalue()
+        self.assertIn("还不能用", text)
+        self.assertIn("设置", text, "必须指出改哪里")
 
 
 def _allow_probe():

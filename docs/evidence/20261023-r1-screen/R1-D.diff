@@ -1,0 +1,1891 @@
+diff --git a/stock_screen.py b/stock_screen.py
+new file mode 100644
+index 0000000..d0c6430
+--- /dev/null
++++ b/stock_screen.py
+@@ -0,0 +1,872 @@
++# -*- coding: utf-8 -*-
++"""可解释选股 MVP（R1-SCREEN-1023，R1-A）：纯筛选核心 + 输入快照。
++
++设计边界（`docs/员工任务_R1可解释选股MVP_20261023.md` §3-§4、
++`docs/选股与量化产品架构路线_20261023.md` §3-§4）：
++
++- **纯计算，零模型调用**：不 import `llm_client`/`web_ui`/`orchestrator_v2`，
++  不发请求、不写网络；筛选与排序在后端确定性执行，前端只展示。
++- **复用财务 Observation**：观察状态（缺失/未知/冲突/无效与真实零五分）、
++  口径不回退、期间身份（flow/stock、半年度不冒年报、同期区间相容）全部走
++  `financial_analysis`（`dataset.freeze` + `require`），不另建第二套事实台账。
++- **不穿越**：PIT 判据 `available_at <= as_of`（缺 available_at 用 disclosed_at，
++  都缺 → 待核验）；`period_end > as_of` 同样不纳入。缺可用时点不假装当时可得，
++  更正版本不倒灌到过去。
++- **不掩盖缺失**：通过/未通过/资料不足三态分开；缺数据不填零、不前值补齐、
++  不把缺财务当"低风险"；零入选也是合法结果。
++- **身份不混用**：`net_profit` = 归母净利润（归属于上市公司股东的净利润），
++  `net_profit_consolidated` = 合并净利润（含少数股东）；比率字段声明用哪个就是哪个，
++  不自动替换含义相近字段。
++- **确定性**：同一输入/规则/实现/截止日 → 同一结果（哈希可复算）；平局按代码稳定排序；
++  显示精度不改变比较的原始精度；代码输入顺序不改变读数与入选集合。
++"""
++from __future__ import annotations
++
++import datetime as _dt
++import hashlib
++import json
++import os
++import re
++from dataclasses import dataclass
++from decimal import Decimal, InvalidOperation
++
++from facts import make_fact_id, market_of_code, metric_label
++from financial_analysis.contracts import (
++    MissingInput, NotApplicable, NotComputable, State, period_role_of,
++)
++from financial_analysis.dataset import freeze, unit_scale_of
++from financial_analysis.operators import profit_bridge
++
++SCHEMA_VERSION = "weavemind.stock_screen/1"
++IMPL_VERSION = "stock_screen/1.0.0"
++# 字段映射版本：字段定义（口径/公式/身份）一变，旧快照/旧结果过期。
++FIELD_MAP_VERSION = "1"
++
++# ── 纳入快照的金额字段（wide 行的列 → 观察）；显示标签复用 facts.metric_label ──
++AMOUNT_METRICS: tuple[str, ...] = (
++    "revenue", "operating_cost", "gross_profit", "net_profit",
++    "net_profit_consolidated", "operating_cashflow", "rd_expense",
++    "total_assets", "total_liabilities", "accounts_receivable", "inventory",
++    "accounts_payable", "admin_expense", "selling_expense", "taxes_and_surcharges",
++)
++
++# ── 首版可筛选字段（5 个，全部有真实数据支持；不为凑数猜值）──────────────
++OPS: tuple[str, ...] = (">=", "<=", ">", "<")
++_AMOUNT_UNITS = ("元", "万", "亿")
++
++
++class FieldSpec:
++    """一个可筛选字段：口径、单位、公式、身份与分母规则全部显式。"""
++
++    def __init__(self, field_id: str, label: str, kind: str, unit: str, *,
++                 metric: str = "", numerator: str = "", denominator: str = "",
++                 needs_prev: bool = False, note: str = ""):
++        self.field_id = field_id
++        self.label = label
++        self.kind = kind                # amount | pct
++        self.unit = unit                # 元 | %
++        self.metric = metric            # 直读字段（amount）
++        self.numerator = numerator      # 比率/派生字段
++        self.denominator = denominator
++        self.needs_prev = needs_prev    # 增速类：需要上一期年度观察
++        self.note = note
++
++    def as_dict(self) -> dict:
++        return {"field_id": self.field_id, "label": self.label, "kind": self.kind,
++                "unit": self.unit, "metric": self.metric, "numerator": self.numerator,
++                "denominator": self.denominator, "needs_prev": self.needs_prev,
++                "note": self.note}
++
++
++# 身份声明：net_profit=归母净利润（与 RATIO_MODELS 的 cashflow_coverage 同一口径），
++# net_profit_consolidated=合并净利润；两者不得互替。
++FIELD_SPECS: dict[str, FieldSpec] = {
++    "revenue_growth": FieldSpec(
++        "revenue_growth", "营业收入同比增速", "pct", "%",
++        metric="revenue", needs_prev=True,
++        note="本期与上一期年度营业收入；上一期缺失或非正 → 不适用（不编造增速）"),
++    "gross_margin": FieldSpec(
++        "gross_margin", "毛利率", "pct", "%",
++        numerator="gross_profit", denominator="revenue",
++        note="毛利 / 营业收入 × 100；收入非正 → 不适用"),
++    "operating_cashflow": FieldSpec(
++        "operating_cashflow", "经营活动现金流净额", "amount", "元",
++        metric="operating_cashflow",
++        note="直读字段；负值是真实读数，不是缺失"),
++    "debt_ratio": FieldSpec(
++        "debt_ratio", "资产负债率", "pct", "%",
++        numerator="total_liabilities", denominator="total_assets",
++        note="负债合计 / 资产总计 × 100；资产非正 → 不适用"),
++    "cashflow_coverage": FieldSpec(
++        "cashflow_coverage", "经营现金流/归母净利润", "pct", "%",
++        numerator="operating_cashflow", denominator="net_profit",
++        note="分母是归母净利润（net_profit），不用合并净利润顶替；非正 → 不适用"),
++}
++
++_FIELD_IDS = tuple(FIELD_SPECS)
++
++
++# ============================================================
++# 小工具
++# ============================================================
++
++def _hash(payload) -> str:
++    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
++    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
++
++
++def _iso_date(value: str) -> str:
++    """ISO 日期（前 10 位）；无法解析返回空串（不猜）。"""
++    s = str(value or "").strip()
++    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
++        try:
++            _dt.date.fromisoformat(s[:10])
++            return s[:10]
++        except ValueError:
++            return ""
++    return ""
++
++
++def _decimal(value) -> Decimal | None:
++    if isinstance(value, bool) or value is None:
++        return None
++    try:
++        return Decimal(str(value))
++    except (InvalidOperation, ValueError):
++        return None
++
++
++def _year_label(period: str) -> str:
++    """`2024-12-31` → `2024年`（与既有年度期间标签同一写法）。"""
++    return f"{period[:4]}年" if re.match(r"^\d{4}-", period) else ""
++
++
++# ============================================================
++# 输入契约：缓存 / 用户上传（同一 wide 行形状）
++# ============================================================
++
++def validate_payload(payload) -> tuple[list[dict], list[str]]:
++    """校验输入载荷（缓存与上传同一契约）→ `(行, 错误)`。
++
++    每行必须有 entity/code/period；白名单金额字段至少一个；unit/currency/caliber
++    缺失不填默认（观察会按既有规则变 unknown）。值不是数 → 保留行，由 freeze 标 invalid。
++    """
++    errors: list[str] = []
++    if not isinstance(payload, dict):
++        return [], ["输入必须是 JSON 对象（{metadata, rows}）"]
++    rows = payload.get("rows")
++    if not isinstance(rows, list) or not rows:
++        return [], ["rows 必须是非空数组"]
++    out: list[dict] = []
++    for i, row in enumerate(rows):
++        if not isinstance(row, dict):
++            errors.append(f"rows[{i}] 不是对象")
++            continue
++        entity = str(row.get("entity") or "").strip()
++        code = str(row.get("code") or row.get("entity_id") or "").strip()
++        period = str(row.get("period") or "").strip()
++        if not entity:
++            errors.append(f"rows[{i}] 缺 entity（主体名）")
++        if not code:
++            errors.append(f"rows[{i}] 缺 code（股票代码，稳定身份）")
++        if not re.match(r"^\d{4}-\d{2}-\d{2}", period):
++            errors.append(f"rows[{i}] period 必须是 YYYY-MM-DD（期末日），得到「{period}」")
++        nums = {k: row[k] for k in AMOUNT_METRICS if k in row and row[k] is not None}
++        if not nums:
++            errors.append(f"rows[{i}] 没有任何可纳入的金额字段"
++                          f"（白名单 {len(AMOUNT_METRICS)} 个之外的不收）")
++        out.append(row)
++    return out, errors
++
++
++def load_payload_file(path: str) -> tuple[dict, list[str]]:
++    """读一个缓存/上传 JSON 文件 → `(载荷, 错误)`（显式关文件；坏内容照实报）。"""
++    name = os.path.basename(str(path or ""))
++    try:
++        with open(path, encoding="utf-8-sig") as fh:
++            payload = json.loads(fh.read())
++    except FileNotFoundError:
++        return {}, [f"文件不存在：{name}"]
++    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
++        return {}, [f"文件不是有效 UTF-8 JSON：{exc}"]
++    if not isinstance(payload, dict):
++        return {}, ["输入必须是 JSON 对象（{metadata, rows}）"]
++    rows, errors = validate_payload(payload)
++    if errors:
++        return {}, errors
++    return payload, []
++
++
++def payload_sha256(path: str) -> str:
++    """输入文件字节哈希（进快照身份；读不到返回空串，不代替）。"""
++    try:
++        with open(path, "rb") as fh:
++            return hashlib.sha256(fh.read()).hexdigest()
++    except OSError:
++        return ""
++
++
++# ============================================================
++# 输入快照：股票池 + 截止日 + 冻结观察（不可变，哈希可复算）
++# ============================================================
++
++@dataclass(frozen=True)
++class InputSnapshot:
++    """一次筛选的输入快照：股票池版本、PIT 过滤后的观察、来源与哈希。**不可变**。"""
++
++    snapshot_id: str
++    as_of: str
++    pool: tuple[str, ...]               # 请求的代码（规范化，排序后）
++    entities: tuple[dict, ...]          # 每主体：{entity, entity_id, dataset, excluded, pending_pit}
++    source_label: str
++    source_sha256: str
++    synthetic: bool
++    user_provided: bool
++    excluded: tuple[dict, ...]          # PIT 排除 / 界外的行（含原因）
++    field_map_version: str = FIELD_MAP_VERSION
++
++    @property
++    def entity_ids(self) -> tuple[str, ...]:
++        return tuple(e["entity_id"] for e in self.entities)
++
++    def entity(self, entity_id: str):
++        return next((e for e in self.entities if e["entity_id"] == entity_id), None)
++
++    @property
++    def pending_rows(self) -> tuple[dict, ...]:
++        return tuple(p for e in self.entities for p in e["pending_pit"])
++
++    def to_dict(self) -> dict:
++        return {
++            "schema": SCHEMA_VERSION, "impl_version": IMPL_VERSION,
++            "snapshot_id": self.snapshot_id, "as_of": self.as_of,
++            "pool": list(self.pool), "source_label": self.source_label,
++            "source_sha256": self.source_sha256, "synthetic": self.synthetic,
++            "user_provided": self.user_provided,
++            "field_map_version": self.field_map_version,
++            "excluded": [dict(x) for x in self.excluded],
++            "entities": [
++                {"entity": e["entity"], "entity_id": e["entity_id"],
++                 "dataset": e["dataset"].as_dict(),
++                 "excluded": [dict(x) for x in e["excluded"]],
++                 "pending_pit": [dict(x) for x in e["pending_pit"]]}
++                for e in self.entities
++            ],
++        }
++
++
++def _entity_market(code: str) -> tuple[str, str]:
++    """`(market, 界外原因)`：非 cn 市场或市场不明的裸代码 → 界外/不确认，不静默纳入。
++
++    既有约定（facts.market_of_code）：裸 6 位数字 = cn（无歧义）；1–5 位裸数字有歧义；
++    港股/美股后缀非 cn。本版选股只收 A 股（cn）。
++    """
++    market, ambiguous = market_of_code(code)
++    if ambiguous:
++        return "", "裸代码市场不明（请用带交易所后缀的代码，如 002304.SZ）"
++    if market != "cn":
++        return "", f"市场「{market or '未知'}」不是 A 股：本版只支持 A 股主体"
++    return "cn", ""
++
++
++# 期间类型归一：输入缓存用「年度」，数据集判定用「年报」（`dataset._ANNUAL_TYPES`）。
++# 只归一"年度报告"这一个语义，半年报/季报原样保留（会被年度身份判定挡下，不冒充年报）。
++_ANNUAL_WORDS = {"年度", "年报", "年度报告", "annual", "10-K", "年报（合并）"}
++_OTHER_PERIOD_WORDS = {"半年度", "半年报", "中报", "中期", "季度", "季报", "一季报",
++                       "三季报", "half_year", "q1", "q2", "q3", "q4", "h1"}
++
++
++def _period_type_of(row: dict) -> str:
++    raw = str(row.get("period_type") or "").strip()
++    if raw in _ANNUAL_WORDS:
++        return "年报"
++    if raw in _OTHER_PERIOD_WORDS:
++        return raw                      # 照实保留，让年度身份判定拒绝
++    return raw or "年报"
++
++
++def _wide_to_long(row: dict, *, entity_id: str) -> list[dict]:
++    """一行 wide 记录 → 多条长表观察行（每指标一条，fact_id 走既有稳定 ID 约定）。"""
++    period = str(row.get("period") or "")[:10]
++    year = period[:4]
++    period_start = f"{year}-01-01" if re.match(r"^\d{4}-\d{2}-\d{2}$", period) else ""
++    caliber = str(row.get("caliber") or "")
++    currency = str(row.get("currency") or "")
++    unit = str(row.get("unit") or "")
++    entity = str(row.get("entity") or "")
++    label = _year_label(period)
++    period_type = _period_type_of(row)
++    out: list[dict] = []
++    for metric in AMOUNT_METRICS:
++        if metric not in row or row[metric] is None:
++            continue
++        role = period_role_of(metric)          # flow / stock（未声明指标的期间角色未知 → 不收）
++        if not role:
++            continue
++        out.append({
++            "fact_id": make_fact_id(entity_id, entity, metric, label, caliber),
++            "metric": metric,
++            "metric_label": metric_label(metric),
++            "period": label,
++            "period_start": period_start,
++            "period_end": period,
++            "period_type": period_type,
++            "period_kind": role,
++            "period_label": period,
++            "value": row[metric],
++            "unit": unit,
++            "currency": currency,
++            "caliber": caliber,
++            "entity": entity,
++            "entity_id": entity_id,
++            "market": "cn",
++            "as_of": "",
++            "source_url": str(row.get("source_url") or ""),
++            "source_hash": str(row.get("source_hash") or ""),
++            "verify_state": str(row.get("verify_state") or ""),
++            "restatement": str(row.get("restatement") or ""),
++        })
++    return out
++
++
++def build_snapshot(payload, *, pool, as_of: str, source_label: str = "",
++                   source_sha256: str = "", synthetic: bool = False,
++                   user_provided: bool = False) -> tuple[InputSnapshot | None, list[str]]:
++    """构建输入快照：池过滤 → PIT 过滤 → 逐主体冻结（复用 `dataset.freeze`）。
++
++    返回 `(snapshot, errors)`；契约错误（池空/截止日缺/全部界外）→ `(None, errors)`。
++    每个主体一个冻结数据集（数据集身份 = 主体级 `dataset_hash`），池身份 = 各数据集
++    哈希 + 池 + 截止日 + 字段映射版本 + 输入字节哈希。
++    """
++    errors: list[str] = []
++    rows, verr = validate_payload(payload)
++    errors.extend(verr)
++    as_of_d = _iso_date(as_of)
++    if not as_of_d:
++        errors.append("as_of 必须是 YYYY-MM-DD（资料截止日）")
++    if errors:
++        return None, errors
++
++    wanted: list[str] = []
++    for raw_code in (pool or []):
++        code = str(raw_code or "").strip().upper()
++        if code and code not in wanted:
++            wanted.append(code)
++    if not wanted:
++        return None, ["股票池为空：请给出至少一个股票代码（如 002304.SZ）"]
++
++    by_code: dict[str, list[dict]] = {}
++    out_of_scope: list[dict] = []
++    for row in rows:
++        code = str(row.get("code") or row.get("entity_id") or "").strip().upper()
++        _market, why = _entity_market(code)
++        if why:
++            out_of_scope.append({"code": code, "entity": row.get("entity") or "",
++                                 "period": str(row.get("period") or "")[:10],
++                                 "reason": why})
++            continue
++        by_code.setdefault(code, []).append(row)
++
++    missing_codes: list[str] = []
++    entities: list[dict] = []
++    excluded_all: list[dict] = list(out_of_scope)
++    dataset_hashes: list[str] = []
++    for code in sorted(wanted):
++        if code not in by_code:
++            missing_codes.append(code)
++            continue
++        ent_rows = by_code[code]
++        kept_long: list[dict] = []
++        excluded_e: list[dict] = []
++        pending_e: list[dict] = []
++        for row in ent_rows:
++            period = str(row.get("period") or "")[:10]
++            avail = _iso_date(row.get("available_at") or row.get("disclosed_at") or "")
++            reason = ""
++            if not avail:
++                reason = ("缺 available_at/disclosed_at：无法证明资料在截止日时可得"
++                          "（待核验，不参与筛选）")
++                pending_e.append({"code": code, "period": period, "reason": reason})
++            elif avail > as_of_d:
++                reason = f"资料可用时点 {avail} 晚于截止日 {as_of_d}：不纳入（不倒灌）"
++                excluded_e.append({"code": code, "period": period,
++                                   "available_at": avail, "reason": reason})
++            elif period > as_of_d:
++                reason = f"报告期期末 {period} 晚于截止日 {as_of_d}：期间尚未披露"
++                excluded_e.append({"code": code, "period": period,
++                                   "available_at": avail, "reason": reason})
++            if reason:
++                continue
++            kept_long.extend(_wide_to_long(row, entity_id=code))
++        entity_name = str(ent_rows[0].get("entity") or code)
++        dataset = freeze(
++            kept_long, entity=entity_name, entity_id=code, market="cn",
++            as_of=as_of_d, source_label=source_label or "screen_input",
++        )
++        dataset_hashes.append(dataset.dataset_hash)
++        excluded_all.extend(excluded_e)
++        entities.append({
++            "entity": entity_name, "entity_id": code, "dataset": dataset,
++            "excluded": tuple(excluded_e), "pending_pit": tuple(pending_e),
++        })
++
++    if not entities:
++        for item in out_of_scope:
++            errors.append(f"{item['code']} {item['period']}：{item['reason']}")
++        if missing_codes:
++            errors.append(f"输入里没有这些主体的观察：{'、'.join(missing_codes)}")
++        if not errors:
++            errors.append("股票池内没有任何可纳入主体")
++        errors.append("股票池内没有任何可纳入主体（全部界外或输入里无观察）")
++        return None, errors
++
++    snapshot_id = _hash({
++        "schema": SCHEMA_VERSION, "impl": IMPL_VERSION,
++        "field_map_version": FIELD_MAP_VERSION,
++        "pool": sorted(wanted), "as_of": as_of_d,
++        "source_sha256": source_sha256, "datasets": sorted(dataset_hashes),
++    })
++    return InputSnapshot(
++        snapshot_id=snapshot_id, as_of=as_of_d, pool=tuple(sorted(wanted)),
++        entities=tuple(entities), source_label=source_label,
++        source_sha256=source_sha256, synthetic=synthetic,
++        user_provided=user_provided, excluded=tuple(excluded_all),
++    ), errors
++
++
++def describe_snapshot(snapshot: InputSnapshot) -> dict:
++    """输入预览（R1-A「对输入做预览」）：主体、期间、口径、单位、可用时点、缺口。"""
++    entities: list[dict] = []
++    for ent in snapshot.entities:
++        ds = ent["dataset"]
++        obs = [o for o in ds.observations if o.usable]
++        avails = sorted({o.as_of for o in obs if o.as_of})
++        metrics = sorted({o.metric for o in obs})
++        entities.append({
++            "entity": ent["entity"], "entity_id": ent["entity_id"],
++            "periods": list(ds.manifest.periods),
++            "caliber": ds.manifest.caliber or "",
++            "currency": sorted({o.currency for o in obs if o.currency}),
++            "units": sorted({o.unit for o in obs if o.unit}),
++            "available_at": avails,
++            "observations": len(obs),
++            "metrics": metrics,
++            "dataset_hash": ds.dataset_hash,
++            "gaps": list(ds.manifest.gaps)[:8],
++            "conflicts": list(ds.manifest.conflicts)[:8],
++            "excluded_rows": len(ent["excluded"]),
++            "pending_rows": len(ent["pending_pit"]),
++        })
++    return {
++        "schema": SCHEMA_VERSION, "impl_version": IMPL_VERSION,
++        "snapshot_id": snapshot.snapshot_id, "as_of": snapshot.as_of,
++        "pool": list(snapshot.pool), "source_label": snapshot.source_label,
++        "source_sha256": snapshot.source_sha256,
++        "synthetic": snapshot.synthetic, "user_provided": snapshot.user_provided,
++        "field_map_version": snapshot.field_map_version,
++        "entities": entities,
++        "excluded": [dict(x) for x in snapshot.excluded],
++        "pending": [dict(x) for x in snapshot.pending_rows],
++        "fields": {fid: FIELD_SPECS[fid].as_dict() for fid in _FIELD_IDS},
++    }
++
++
++# ============================================================
++# 规则与读数
++# ============================================================
++
++@dataclass(frozen=True)
++class Rule:
++    """一条筛选条件：字段 + 比较符 + 阈值（金额带单位）。"""
++
++    field: str
++    op: str
++    value: float
++    unit: str = ""                  # amount 字段可带单位（元/万/亿）；pct 字段必须空
++
++    def as_dict(self) -> dict:
++        return {"field": self.field, "op": self.op, "value": self.value,
++                "unit": self.unit}
++
++
++def parse_rules(raw_rules) -> tuple[tuple[Rule, ...], list[str]]:
++    """校验规则列表：未知字段/比较符不自动替换（含义相近也不行），错误逐条列出。"""
++    errors: list[str] = []
++    rules: list[Rule] = []
++    for i, raw in enumerate(raw_rules or []):
++        if not isinstance(raw, dict):
++            errors.append(f"rules[{i}] 不是对象")
++            continue
++        fid = str(raw.get("field") or "").strip()
++        if fid not in FIELD_SPECS:
++            errors.append(f"rules[{i}] 未知字段「{fid}」：可选 {', '.join(_FIELD_IDS)}"
++                          "（不自动替换含义相近字段）")
++            continue
++        op = str(raw.get("op") or "").strip()
++        if op not in OPS:
++            errors.append(f"rules[{i}] 不支持的比较符「{op}」：可选 {', '.join(OPS)}")
++            continue
++        dec = _decimal(raw.get("value"))
++        if dec is None:
++            errors.append(f"rules[{i}] 阈值不是数：{raw.get('value')!r}")
++            continue
++        spec = FIELD_SPECS[fid]
++        unit = str(raw.get("unit") or "").strip()
++        if spec.kind == "amount":
++            if unit and unit not in _AMOUNT_UNITS:
++                errors.append(f"rules[{i}] 金额单位「{unit}」不支持：可选 {'、'.join(_AMOUNT_UNITS)}")
++                continue
++            rules.append(Rule(fid, op, float(dec), unit or "元"))
++        else:
++            if unit:
++                errors.append(f"rules[{i}] 百分比字段的阈值不带单位（单位固定 %）")
++                continue
++            rules.append(Rule(fid, op, float(dec)))
++    if not rules and not errors:
++        errors.append("至少需要一条筛选条件")
++    return tuple(rules), errors
++
++
++def rules_hash(rules: tuple[Rule, ...]) -> str:
++    return _hash({"schema": SCHEMA_VERSION, "rules": [r.as_dict() for r in rules]})
++
++
++@dataclass(frozen=True)
++class Reading:
++    """一个字段在一次评估里的读数（可追溯：输入 fact_id + 公式 + 状态）。"""
++
++    field: str
++    label: str
++    status: str                     # ok | missing | conflicting | not_applicable | pending_pit
++    value: float | None = None      # 原始精度（比较用这个，不用显示值）
++    unit: str = ""
++    display: str = ""               # 显示值（量化后的字符串，仅展示）
++    formula: str = ""
++    reason: str = ""
++    inputs: tuple[str, ...] = ()    # 输入观察的 fact_id
++    source_url: str = ""
++
++    def as_dict(self) -> dict:
++        return {"field": self.field, "label": self.label, "status": self.status,
++                "value": self.value, "unit": self.unit, "display": self.display,
++                "formula": self.formula, "reason": self.reason,
++                "inputs": list(self.inputs), "source_url": self.source_url}
++
++
++@dataclass(frozen=True)
++class EntityRow:
++    """一个主体在一次筛选里的结果（主判据一态，原因可多条）。"""
++
++    entity: str
++    entity_id: str
++    verdict: str                    # pass | fail | insufficient
++    eval_period: str
++    readings: tuple[Reading, ...]
++    reasons: tuple[str, ...]
++    dataset_hash: str
++
++    def as_dict(self) -> dict:
++        return {"entity": self.entity, "entity_id": self.entity_id,
++                "verdict": self.verdict, "eval_period": self.eval_period,
++                "readings": [r.as_dict() for r in self.readings],
++                "reasons": list(self.reasons), "dataset_hash": self.dataset_hash}
++
++
++def _display_amount(amount_yuan: Decimal) -> str:
++    """金额显示：≥1 万用亿（两位小数），否则元。只影响显示。"""
++    if abs(amount_yuan) >= Decimal("10000"):
++        return f"{(amount_yuan / Decimal('1e8')).quantize(Decimal('0.01'))} 亿"
++    return f"{amount_yuan.quantize(Decimal('0.01'))} 元"
++
++
++def _amount_reading(spec: FieldSpec, dataset, period: str) -> Reading:
++    obs = dataset.get(spec.metric, period)
++    if obs is None:
++        cals = dataset.calibers_of(spec.metric, period)
++        why = f"缺 {spec.metric}（{metric_label(spec.metric)}）{period} 的观察"
++        if cals and cals != ["未标"]:
++            why += f"；该期间出现过的口径：{'、'.join(cals)}"
++        return Reading(spec.field_id, spec.label, State.MISSING, reason=why)
++    if not obs.usable:
++        return Reading(spec.field_id, spec.label, obs.state,
++                       reason=f"观察不可用（{obs.state}）：{obs.note or spec.metric}")
++    amount_yuan = Decimal(str(obs.value)) * Decimal(str(obs.money_scale or 1))
++    return Reading(spec.field_id, spec.label, State.OK, value=float(amount_yuan),
++                   unit="元", display=_display_amount(amount_yuan),
++                   formula=(f"{metric_label(spec.metric)}（{period}，原始 "
++                            f"{obs.value} {obs.unit or '单位未知'}）"),
++                   reason=(obs.note if obs.state == State.ZERO else ""),
++                   inputs=(obs.fact_id,), source_url=obs.source_url)
++
++
++def _ratio_reading(spec: FieldSpec, dataset, period: str) -> Reading:
++    try:
++        got = profit_bridge.compute_ratio(dataset, spec.numerator, spec.denominator,
++                                          period, label=spec.label)
++    except MissingInput as exc:
++        return Reading(spec.field_id, spec.label, State.MISSING, reason=str(exc))
++    except NotApplicable as exc:
++        return Reading(spec.field_id, spec.label, State.CONFLICTING, reason=str(exc))
++    except NotComputable as exc:
++        return Reading(spec.field_id, spec.label, "not_applicable", reason=str(exc))
++    except Exception as exc:        # noqa: BLE001 - 未知异常也要如实进缺口，不静默
++        return Reading(spec.field_id, spec.label, State.MISSING,
++                       reason=f"比率计算失败：{exc}")
++    # 非正分母：比率无业务含义（现金覆盖负利润不是"高覆盖"），明确不适用，不编造方向
++    den = dataset.require(spec.denominator, period)
++    if Decimal(str(den.value)) * Decimal(str(den.money_scale)) <= 0:
++        return Reading(spec.field_id, spec.label, "not_applicable",
++                       reason=f"{spec.denominator}（{metric_label(spec.denominator)}）"
++                              f"{period} 非正：比率不适用，不编造比值")
++    num = dataset.require(spec.numerator, period)
++    # 比较用**未量化**原始精度；display 才量化（compute_ratio 的 0.01 量化仅用于其自有输出）
++    raw = (Decimal(str(num.value)) * Decimal(str(num.money_scale))
++           / (Decimal(str(den.value)) * Decimal(str(den.money_scale))) * 100)
++    return Reading(spec.field_id, spec.label, State.OK, value=float(raw), unit="%",
++                   display=f"{raw.quantize(Decimal('0.01'))}%",
++                   formula=str(got["formula"]), inputs=tuple(got["inputs"]),
++                   source_url=num.source_url or den.source_url)
++
++
++def _growth_reading(spec: FieldSpec, dataset, period: str) -> Reading:
++    periods = [p for p in (dataset.manifest.periods or ()) if p]
++    if period not in periods:
++        return Reading(spec.field_id, spec.label, State.MISSING,
++                       reason=f"{period} 不在本期数据集的年度期间里（{periods or '无'}）")
++    idx = periods.index(period)
++    if idx < 1:
++        return Reading(spec.field_id, spec.label, "not_applicable",
++                       reason=(f"{period} 是最早的年度期间：没有上一期，增速不适用"
++                               "（不用别的期顶替）"))
++    prev = periods[idx - 1]
++    cur = dataset.get("revenue", period)
++    prv = dataset.get("revenue", prev)
++    if cur is None or not cur.usable:
++        return Reading(spec.field_id, spec.label, State.MISSING,
++                       reason=f"缺本期营业收入（{period}）的可用观察")
++    if prv is None or not prv.usable:
++        return Reading(spec.field_id, spec.label, State.MISSING,
++                       reason=f"缺上一期营业收入（{prev}）的可用观察：增速不可算，不前值补齐")
++    cur_d = Decimal(str(cur.value)) * Decimal(str(cur.money_scale))
++    prv_d = Decimal(str(prv.value)) * Decimal(str(prv.money_scale))
++    if prv_d <= 0:
++        return Reading(spec.field_id, spec.label, "not_applicable",
++                       reason=f"上一期营业收入非正（{prev}）：增速不适用（不编造比值）")
++    raw = (cur_d - prv_d) / prv_d * 100
++    return Reading(spec.field_id, spec.label, State.OK, value=float(raw), unit="%",
++                   display=f"{raw.quantize(Decimal('0.01'))}%",
++                   formula=(f"({cur.value}{cur.unit} − {prv.value}{prv.unit}) "
++                            f"/ {prv.value}{prv.unit} × 100"),
++                   inputs=(cur.fact_id, prv.fact_id),
++                   source_url=cur.source_url or prv.source_url)
++
++
++def _reading(spec: FieldSpec, dataset, period: str) -> Reading:
++    if spec.kind == "amount":
++        return _amount_reading(spec, dataset, period)
++    if spec.needs_prev:
++        return _growth_reading(spec, dataset, period)
++    return _ratio_reading(spec, dataset, period)
++
++
++_CMP = {
++    ">=": lambda a, b: a >= b,
++    "<=": lambda a, b: a <= b,
++    ">": lambda a, b: a > b,
++    "<": lambda a, b: a < b,
++}
++_OP_TEXT = {">=": "≥", "<=": "≤", ">": ">", "<": "<"}
++
++
++def _compare(reading: Reading, rule: Rule, spec: FieldSpec) -> tuple[bool | None, str]:
++    """读数 × 规则 → `(通过?, 说明)`；读数不可用 → `(None, 原因)`（不参与判定）。"""
++    if reading.status != State.OK:
++        return None, reading.reason or f"{spec.label} 不可用（{reading.status}）"
++    val = Decimal(str(reading.value))
++    threshold = Decimal(str(rule.value))
++    if spec.kind == "amount" and rule.unit and rule.unit != "元":
++        threshold = threshold * Decimal(str(unit_scale_of(rule.unit)))
++    ok = _CMP[rule.op](val, threshold)
++    shown = rule.value if spec.kind == "amount" else f"{Decimal(str(rule.value))}"
++    unit_shown = (rule.unit or "元") if spec.kind == "amount" else "%"
++    return ok, (f"{spec.label} {reading.display} {_OP_TEXT[rule.op]} {shown}{unit_shown}"
++                f"：{'满足' if ok else '不满足'}")
++
++
++# ============================================================
++# 评估：确定性筛选（AND 条件，平局稳定排序）
++# ============================================================
++
++@dataclass(frozen=True)
++class ScreenResult:
++    """一次筛选的结果：三态分行、读数、原因、身份哈希。**不可变**。"""
++
++    schema: str
++    impl_version: str
++    as_of: str
++    pool: tuple[str, ...]
++    rules: tuple[Rule, ...]
++    rules_hash: str
++    snapshot_id: str
++    result_hash: str
++    pass_rows: tuple[EntityRow, ...]
++    fail_rows: tuple[EntityRow, ...]
++    insufficient_rows: tuple[EntityRow, ...]
++    notes: tuple[str, ...]
++    period_pin: str = ""
++
++    @property
++    def counts(self) -> dict:
++        return {"pass": len(self.pass_rows), "fail": len(self.fail_rows),
++                "insufficient": len(self.insufficient_rows),
++                "total": len(self.pass_rows) + len(self.fail_rows)
++                + len(self.insufficient_rows)}
++
++    def to_dict(self) -> dict:
++        return {
++            "schema": self.schema, "impl_version": self.impl_version,
++            "as_of": self.as_of, "pool": list(self.pool),
++            "rules": [r.as_dict() for r in self.rules],
++            "rules_hash": self.rules_hash, "snapshot_id": self.snapshot_id,
++            "result_hash": self.result_hash, "period_pin": self.period_pin,
++            "counts": self.counts, "notes": list(self.notes),
++            "pass_rows": [r.as_dict() for r in self.pass_rows],
++            "fail_rows": [r.as_dict() for r in self.fail_rows],
++            "insufficient_rows": [r.as_dict() for r in self.insufficient_rows],
++        }
++
++
++def _eval_period(dataset, pin: str) -> tuple[str, str]:
++    """评估期间：pin 精确匹配（YYYY 或 YYYY年），否则该主体最新年度期间。"""
++    periods = [p for p in (dataset.manifest.periods or ()) if p]
++    if pin:
++        want = pin if pin.endswith("年") else f"{pin}年"
++        return (want, "") if want in periods else ("", f"无 {want} 年度观察")
++    return (periods[-1], "") if periods else ("", "没有任何年度期间观察")
++
++
++def evaluate(snapshot: InputSnapshot, rules: tuple[Rule, ...], *,
++             period: str = "", sort: dict | None = None) -> ScreenResult:
++    """确定性筛选：逐主体逐字段读数 → AND 判定 → 三态 + 稳定排序。
++
++    - 缺数据/冲突/不适用/待核验 → 资料不足（不填零、不编造）；
++    - 全部读数可用且有规则不满足 → 未通过；
++    - 全部满足 → 通过。
++    """
++    rows: list[EntityRow] = []
++    fallbacks: list[str] = []
++    for ent in snapshot.entities:
++        dataset = ent["dataset"]
++        eval_p, why = _eval_period(dataset, period)
++        readings: list[Reading] = []
++        reasons: list[str] = []
++        unavailable = False
++        failed = False
++        if why:
++            reasons.append(why)
++            unavailable = True
++            # 评估期间取不到时，把数据集里已记录的冲突一并给出（否则读者只看到"没数据"，
++            # 看不到"为什么没数据"——比如元/亿两行冲突把整个期间压没了）
++            for c in (dataset.manifest.conflicts or ())[:2]:
++                reasons.append(f"输入冲突：{c}")
++        else:
++            for rule in rules:
++                spec = FIELD_SPECS[rule.field]
++                reading = _reading(spec, dataset, eval_p)
++                readings.append(reading)
++                ok, detail = _compare(reading, rule, spec)
++                if ok is None:
++                    unavailable = True
++                    reasons.append(detail)
++                elif not ok:
++                    failed = True
++                    reasons.append(detail)
++            # 最新期间因冲突被整体排除时会自动回退到更早期间：必须说出来，
++            # 否则读者只看到「2023年 满足」，却不知道 2024年 因冲突没参与比较
++            # （冲突不是「没有数据」，默默换期间等于换了比较基准）。
++            all_periods = sorted({str(o.period) for o in getattr(dataset, "observations", ()) or ()
++                                  if getattr(o, "period", "")})
++            if all_periods and eval_p and all_periods[-1] != eval_p and dataset.manifest.conflicts:
++                fallbacks.append(
++                    f"{ent['entity_id']} 最新期间 {all_periods[-1]} 存在冲突读数"
++                    f"（{len(dataset.manifest.conflicts)} 条）：已回退到 {eval_p} 评估，"
++                    f"该期间不参与比较")
++        for p in ent["pending_pit"]:
++            if eval_p and str(p.get("period") or "")[:4] == eval_p[:4]:
++                reasons.append(f"{p['period']} 行：{p['reason']}")
++                unavailable = True
++        if unavailable or not readings:
++            verdict = "insufficient"
++        elif failed:
++            verdict = "fail"
++        else:
++            verdict = "pass"
++        if not reasons:
++            reasons.append("；".join(f"{r.label} {r.display}" for r in readings)
++                           + "：满足全部条件")
++        rows.append(EntityRow(
++            entity=ent["entity"], entity_id=ent["entity_id"], verdict=verdict,
++            eval_period=eval_p, readings=tuple(readings), reasons=tuple(reasons),
++            dataset_hash=dataset.dataset_hash))
++    # 池里声明了但输入里没有观察的代码 → 资料不足（不静默丢弃）
++    present = {r.entity_id for r in rows}
++    for code in snapshot.pool:
++        if code not in present:
++            rows.append(EntityRow(entity=code, entity_id=code, verdict="insufficient",
++                                  eval_period="", readings=(),
++                                  reasons=("输入里没有该主体的观察：不编造读数",),
++                                  dataset_hash=""))
++    notes: list[str] = []
++    usable = [r for r in rows if r.eval_period]
++    usable_periods = sorted({r.eval_period for r in usable})
++    if len(usable_periods) > 1:
++        detail = "、".join(f"{r.entity_id} {r.eval_period}" for r in usable)
++        notes.append(f"池内评估期间不一致（{detail}）：读数不可直接横比，已逐行标注期间")
++    if snapshot.pending_rows:
++        notes.append(f"{len(snapshot.pending_rows)} 行输入缺可用时点，待核验（不参与筛选）")
++    for msg in fallbacks:
++        notes.append(msg)
++    if snapshot.excluded:
++        notes.append(f"{len(snapshot.excluded)} 行输入被 PIT/界外规则排除（详见 excluded）")
++    if snapshot.synthetic:
++        notes.append("合成演示数据：仅验证算法与页面，不作为真实候选")
++    if snapshot.user_provided:
++        notes.append("用户提供输入：未独立核验，不自动升级为官方证据")
++    ordered = _sorted_rows(rows, sort)
++    rh = rules_hash(rules)
++    result_hash = _hash({
++        "schema": SCHEMA_VERSION, "impl": IMPL_VERSION,
++        "snapshot": snapshot.snapshot_id, "rules": rh, "as_of": snapshot.as_of,
++        "period": period, "rows": [r.as_dict() for r in ordered],
++    })
++    return ScreenResult(
++        schema=SCHEMA_VERSION, impl_version=IMPL_VERSION, as_of=snapshot.as_of,
++        pool=snapshot.pool, rules=rules, rules_hash=rh,
++        snapshot_id=snapshot.snapshot_id, result_hash=result_hash,
++        pass_rows=tuple(r for r in ordered if r.verdict == "pass"),
++        fail_rows=tuple(r for r in ordered if r.verdict == "fail"),
++        insufficient_rows=tuple(r for r in ordered if r.verdict == "insufficient"),
++        notes=tuple(notes), period_pin=period)
++
++
++def _sorted_rows(rows: list[EntityRow], sort: dict | None) -> list[EntityRow]:
++    """确定性排序：按指定字段读数（缺读数**永远排最后**），平局按代码；默认按代码。"""
++    if not sort:
++        return sorted(rows, key=lambda r: r.entity_id)
++    fid = str(sort.get("field") or "")
++    direction = str(sort.get("direction") or "desc")
++    if fid not in FIELD_SPECS or direction not in ("asc", "desc"):
++        return sorted(rows, key=lambda r: r.entity_id)
++
++    def value_of(r: EntityRow):
++        reading = next((x for x in r.readings if x.field == fid), None)
++        if reading is None or reading.status != State.OK or reading.value is None:
++            return None
++        return reading.value
++
++    with_value = [r for r in rows if value_of(r) is not None]
++    without = [r for r in rows if value_of(r) is None]
++    # 两遍稳定排序：先按代码（平局规则），再按读数（持平则保留代码序，方向不影响平局）
++    with_value.sort(key=lambda r: r.entity_id)
++    with_value.sort(key=lambda r: value_of(r), reverse=(direction == "desc"))
++    return with_value + sorted(without, key=lambda r: r.entity_id)
+diff --git a/test_stock_screen.py b/test_stock_screen.py
+new file mode 100644
+index 0000000..4c7df50
+--- /dev/null
++++ b/test_stock_screen.py
+@@ -0,0 +1,597 @@
++# -*- coding: utf-8 -*-
++"""R1-SCREEN-1023（R1-A）：可解释选股纯筛选核心测试。
++
++覆盖验收标准（docs/员工任务_R1可解释选股MVP_20261023.md §6）：
++
++1. 算得对：正/反/未知/冲突样例逐项手算对照；零分母、负利润、单位差异、
++   净利润身份（归母 vs 合并）、等值边界、原始精度、稳定排序。
++2. 不穿越：截止日后的披露不纳入；截断未来输入不改变过去已冻结结果；缺时点不假装可得。
++3. 不掩盖缺失：未通过与资料不足分开；零候选诚实；全部数据不足仍可解释。
++4. 能追溯：每个读数带输入 fact_id 与来源 URL；官方缓存与用户上传身份分开。
++
++测试全程不联网、不调用模型；样本分两类：合成边界样例（验证算法）与
++真实缓存样例（tmp/q1-real-inputs/financials.json，验证来源链）。
++"""
++from __future__ import annotations
++
++import json
++import os
++import sys
++import unittest
++from decimal import Decimal
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import stock_screen as ss
++
++
++def _row(entity, code, period, *, avail, unit="元", currency="CNY", caliber="合并",
++         **metrics):
++    base = {"entity": entity, "code": code, "period": period, "unit": unit,
++            "currency": currency, "caliber": caliber, "period_type": "年度"}
++    if avail is not None:
++        base["available_at"] = avail
++        base["disclosed_at"] = avail
++    base.update(metrics)
++    return base
++
++
++# 手算基准：收入 200→220（增速 +10%），毛利 50/200（毛利率 25%），
++# 负债 80 / 资产 200（资产负债率 40%），经营现金流 30 / 归母净利 25（覆盖 120%），
++# 合并净利 27（不得顶替归母 25）。
++_A = _row("甲公司", "000001.SZ", "2023-12-31", avail="2024-04-20",
++          revenue=200_000_000, gross_profit=50_000_000, net_profit=25_000_000,
++          net_profit_consolidated=27_000_000, operating_cashflow=30_000_000,
++          total_assets=200_000_000, total_liabilities=80_000_000)
++_B = _row("甲公司", "000001.SZ", "2024-12-31", avail="2025-04-18",
++          revenue=220_000_000, gross_profit=55_000_000, net_profit=30_000_000,
++          net_profit_consolidated=33_000_000, operating_cashflow=36_000_000,
++          total_assets=210_000_000, total_liabilities=84_000_000)
++
++
++def _snap(rows, pool=None, as_of="2026-01-31", **kw):
++    payload = {"metadata": {"source": "test", "synthetic": True}, "rows": rows}
++    if pool is None:
++        pool = sorted({str(r["code"]) for r in rows})
++    snap, errors = ss.build_snapshot(
++        payload, pool=list(pool), as_of=as_of,
++        source_label=kw.pop("source_label", "test"),
++        source_sha256=kw.pop("source_sha256", "0" * 64),
++        synthetic=kw.pop("synthetic", True),
++        user_provided=kw.pop("user_provided", False))
++    assert not errors, errors
++    return snap
++
++
++def _reading(row: ss.EntityRow, field: str) -> ss.Reading:
++    return next(r for r in row.readings if r.field == field)
++
++
++class TestHandComputed(unittest.TestCase):
++    """算得对：合成样例逐项手算对照。"""
++
++    def setUp(self):
++        self.snap = _snap([_A, _B])
++        self.rules, errs = ss.parse_rules([
++            {"field": "revenue_growth", "op": ">=", "value": 5},
++            {"field": "gross_margin", "op": ">=", "value": 20},
++            {"field": "debt_ratio", "op": "<=", "value": 50},
++            {"field": "cashflow_coverage", "op": ">=", "value": 100},
++        ])
++        assert not errs, errs
++        self.result = ss.evaluate(self.snap, self.rules)
++
++    def test_growth_is_ten_percent(self):
++        row = self.result.pass_rows[0]
++        r = _reading(row, "revenue_growth")
++        self.assertEqual(r.status, "ok")
++        # (220 - 200) / 200 × 100 = 10
++        self.assertAlmostEqual(r.value, 10.0, places=9)
++        self.assertEqual(r.display, "10.00%")
++
++    def test_gross_margin_is_25_percent(self):
++        r = _reading(self.result.pass_rows[0], "gross_margin")
++        # 50 / 200 × 100 = 25
++        self.assertAlmostEqual(r.value, 25.0, places=9)
++        self.assertEqual(r.display, "25.00%")
++
++    def test_debt_ratio_is_40_percent(self):
++        r = _reading(self.result.pass_rows[0], "debt_ratio")
++        # 80 / 200 × 100 = 40
++        self.assertAlmostEqual(r.value, 40.0, places=9)
++        self.assertEqual(r.display, "40.00%")
++
++    def test_coverage_uses_guimu_not_consolidated(self):
++        r = _reading(self.result.pass_rows[0], "cashflow_coverage")
++        # 36 / 30 × 100 = 120（归母 30，不是合并 33 → 109.09 是错的）
++        self.assertAlmostEqual(r.value, 120.0, places=9)
++        self.assertNotAlmostEqual(r.value, 36 / 33 * 100, places=6)
++
++    def test_pass_and_amount_reading(self):
++        rules, _ = ss.parse_rules([
++            {"field": "gross_margin", "op": ">=", "value": 20},
++            {"field": "operating_cashflow", "op": ">=", "value": 0},
++        ])
++        result = ss.evaluate(self.snap, rules)
++        row = result.pass_rows[0]
++        self.assertEqual(row.verdict, "pass")
++        cfo = _reading(row, "operating_cashflow")
++        # 36,000,000 元 = 0.36 亿
++        self.assertAlmostEqual(cfo.value, 36_000_000.0, places=6)
++        self.assertEqual(cfo.display, "0.36 亿")
++
++    def test_counts_no_double_counting(self):
++        c = self.result.counts
++        self.assertEqual(c["total"], 1)
++        self.assertEqual(c["pass"] + c["fail"] + c["insufficient"], 1)
++
++
++class TestRuleSemantics(unittest.TestCase):
++    """规则语义：等值边界、单位换算、未知字段不替换。"""
++
++    def setUp(self):
++        self.snap = _snap([_A, _B])
++
++    def test_equality_boundary_passes_for_ge_and_le(self):
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 25}])
++        self.assertEqual(ss.evaluate(self.snap, rules).counts["pass"], 1)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": "<=", "value": 25}])
++        self.assertEqual(ss.evaluate(self.snap, rules).counts["pass"], 1)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">", "value": 25}])
++        res = ss.evaluate(self.snap, rules)
++        self.assertEqual(res.counts["pass"], 0)
++        self.assertEqual(res.counts["fail"], 1)
++
++    def test_amount_unit_conversion_is_explicit(self):
++        # 0.36 亿 == 36,000,000 元 == 3,600 万：同一读数，三种单位写法都该过
++        for unit, value in (("元", 36_000_000), ("亿", 0.36), ("万", 3600)):
++            rules, errs = ss.parse_rules(
++                [{"field": "operating_cashflow", "op": ">=", "value": value, "unit": unit}])
++            self.assertEqual(errs, [], (unit, errs))
++            self.assertEqual(ss.evaluate(self.snap, rules).counts["pass"], 1, unit)
++
++    def test_amount_display_precision_does_not_change_comparison(self):
++        # 阈值 0.3600001 亿 vs 读数 0.36 亿：显示都是 0.36 亿，但比较按原始精度 → 未通过
++        rules, _ = ss.parse_rules(
++            [{"field": "operating_cashflow", "op": ">=", "value": 0.3600001, "unit": "亿"}])
++        res = ss.evaluate(self.snap, rules)
++        self.assertEqual(res.counts["pass"], 0)
++
++    def test_unknown_field_is_rejected_not_substituted(self):
++        rules, errs = ss.parse_rules([{"field": "net_margin", "op": ">=", "value": 10}])
++        self.assertEqual(rules, ())
++        self.assertTrue(any("未知字段" in e for e in errs))
++
++    def test_bad_op_and_non_numeric_threshold_rejected(self):
++        _, errs = ss.parse_rules([{"field": "gross_margin", "op": "==", "value": 10}])
++        self.assertTrue(any("比较符" in e for e in errs))
++        _, errs = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": "abc"}])
++        self.assertTrue(any("阈值不是数" in e for e in errs))
++
++    def test_pct_threshold_with_unit_is_rejected(self):
++        _, errs = ss.parse_rules(
++            [{"field": "gross_margin", "op": ">=", "value": 20, "unit": "亿"}])
++        self.assertTrue(any("不带单位" in e for e in errs))
++
++
++class TestMissingVsFail(unittest.TestCase):
++    """不掩盖缺失：未通过与资料不足分开；零候选诚实。"""
++
++    def test_missing_field_is_insufficient_not_fail(self):
++        rows = [_row("乙公司", "000002.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000)]  # 没有 gross_profit / 负债 / 资产
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap, rules)
++        self.assertEqual(res.counts["insufficient"], 1)
++        self.assertEqual(res.counts["fail"], 0)
++        row = res.insufficient_rows[0]
++        self.assertIn("gross_profit", "；".join(row.reasons))
++
++    def test_fail_and_missing_coexist_but_entity_counted_once(self):
++        rows = [_row("乙公司", "000002.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000, gross_profit=10_000_000)]  # 毛利率 10% < 20%
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([
++            {"field": "gross_margin", "op": ">=", "value": 20},
++            {"field": "debt_ratio", "op": "<=", "value": 50},   # 缺 total_assets
++        ])
++        res = ss.evaluate(snap, rules)
++        # 无法完整评估 → 资料不足（原因里仍写明毛利率不满足）
++        self.assertEqual(res.counts["insufficient"], 1)
++        self.assertEqual(res.counts["total"], 1)
++        row = res.insufficient_rows[0]
++        self.assertIn("不满足", "；".join(row.reasons))
++        self.assertIn("total_liabilities", "；".join(row.reasons))
++
++    def test_zero_candidates_is_honest(self):
++        rows = [_row("乙公司", "000002.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000, gross_profit=50_000_000)]
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": "<", "value": 10}])
++        res = ss.evaluate(snap, rules)
++        self.assertEqual(res.counts["pass"], 0)
++        self.assertEqual(res.counts["fail"], 1)   # 诚实：未通过，不给热门公司
++
++    def test_zero_is_a_value_not_missing(self):
++        rows = [_row("丙公司", "000003.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000, gross_profit=0)]
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": "<=", "value": 0}])
++        res = ss.evaluate(snap, rules)
++        self.assertEqual(res.counts["pass"], 1)   # 真实零：0 ≤ 0 满足
++        r = _reading(res.pass_rows[0], "gross_margin")
++        self.assertEqual(r.status, "ok")
++        self.assertEqual(r.display, "0.00%")
++
++
++class TestDenominatorRules(unittest.TestCase):
++    """零/负分母 → 不适用（不编造比值冲榜）。"""
++
++    def _eval(self, rows, field="cashflow_coverage"):
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{ "field": field, "op": ">=", "value": 1}])
++        return ss.evaluate(snap, rules)
++
++    def test_zero_guimu_profit_not_applicable(self):
++        rows = [_row("丁公司", "000004.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000, net_profit=0, operating_cashflow=10_000_000)]
++        res = self._eval(rows)
++        self.assertEqual(res.counts["insufficient"], 1)
++        r = _reading(res.insufficient_rows[0], "cashflow_coverage")
++        self.assertEqual(r.status, "not_applicable")
++        self.assertIn("分母为 0", r.reason)
++
++    def test_negative_guimu_profit_not_applicable(self):
++        rows = [_row("丁公司", "000004.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000, net_profit=-5_000_000,
++                     operating_cashflow=10_000_000)]
++        res = self._eval(rows)
++        r = _reading(res.insufficient_rows[0], "cashflow_coverage")
++        self.assertEqual(r.status, "not_applicable")
++
++    def test_growth_with_negative_prev_revenue_not_applicable(self):
++        rows = [
++            _row("戊公司", "000005.SZ", "2023-12-31", avail="2024-04-10",
++                 revenue=-10_000_000),
++            _row("戊公司", "000005.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000),
++        ]
++        res = self._eval(rows, field="revenue_growth")
++        r = _reading(res.insufficient_rows[0], "revenue_growth")
++        self.assertEqual(r.status, "not_applicable")
++        self.assertIn("非正", r.reason)
++
++    def test_growth_with_single_period_not_applicable(self):
++        rows = [_row("己公司", "000006.SZ", "2024-12-31", avail="2025-04-10",
++                     revenue=100_000_000)]
++        res = self._eval(rows, field="revenue_growth")
++        r = _reading(res.insufficient_rows[0], "revenue_growth")
++        self.assertEqual(r.status, "not_applicable")
++        self.assertIn("没有上一期", r.reason)
++
++
++class TestUnitIdentity(unittest.TestCase):
++    """单位与净利润身份：不同 unit 行不顶替；归母/合并不互替。"""
++
++    def test_unit_difference_becomes_conflict(self):
++        # 同一 (指标, 期间, 口径) 两行：一行元、一行亿元 → 值身份不同 → 冲突，不任选
++        rows = [
++            _row("庚公司", "000007.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000),
++            _row("庚公司", "000007.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=1, unit="亿"),
++        ]
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 1}])
++        res = ss.evaluate(snap, rules)
++        # revenue 冲突（元 vs 亿未声明换算）→ 该期间无可用年度观察 → 资料不足，
++        # 且原因里点名冲突（不择一、不任选一行）
++        self.assertEqual(res.counts["insufficient"], 1)
++        self.assertIn("冲突", "；".join(res.insufficient_rows[0].reasons))
++
++    def test_same_value_twice_is_not_conflict(self):
++        rows = [
++            _row("辛公司", "000008.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000, gross_profit=20_000_000),
++            _row("辛公司", "000008.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000, gross_profit=20_000_000),
++        ]
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap, rules)
++        self.assertEqual(res.counts["pass"], 1)   # 完全相同的两条不是冲突
++
++    def test_conflict_in_latest_period_discloses_fallback(self):
++        # 2023 干净、2024 冲突：会回退到 2023 评估，但必须在 notes 里点名
++        # 「2024 因冲突没参与比较」——回退不是偷偷换基准。
++        rows = [
++            _row("壬公司", "000009.SZ", "2023-12-31", avail="2024-04-10",
++                 revenue=100_000_000, gross_profit=20_000_000),
++            _row("壬公司", "000009.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=120_000_000, gross_profit=24_000_000),
++            _row("壬公司", "000009.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=1.2, gross_profit=0.24, unit="亿"),
++        ]
++        snap = _snap(rows)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap, rules)
++        row = res.pass_rows[0] if res.pass_rows else res.insufficient_rows[0]
++        self.assertEqual(row.eval_period, "2023年")
++        joined = "；".join(res.notes)
++        self.assertIn("2024年", joined)
++        self.assertIn("冲突", joined)
++        self.assertIn("已回退到 2023年", joined)
++
++
++class TestPitBoundary(unittest.TestCase):
++    """不穿越：截止日后的披露不纳入；缺时点待核验；截断不改过去。"""
++
++    def test_future_disclosure_excluded(self):
++        rows = [_A, _B, _row("甲公司", "000001.SZ", "2025-12-31",
++                             avail="2026-04-30", revenue=500_000_000)]
++        snap = _snap(rows, as_of="2026-01-31")
++        # 2025 年报 2026-04-30 披露，晚于截止日 2026-01-31 → 不纳入
++        ent = snap.entity("000001.SZ")
++        self.assertEqual(ent["dataset"].manifest.periods, ("2023年", "2024年"))
++        self.assertTrue(any("晚于截止日" in x["reason"] for x in ent["excluded"]))
++
++    def test_period_end_after_asof_excluded(self):
++        rows = [_A, _B,
++                _row("甲公司", "000001.SZ", "2026-12-31", avail="2026-01-01",
++                     revenue=10)]
++        snap = _snap(rows, as_of="2026-01-31")
++        ent = snap.entity("000001.SZ")
++        self.assertTrue(any("期间尚未披露" in x["reason"] for x in ent["excluded"]))
++        self.assertEqual(ent["dataset"].manifest.periods, ("2023年", "2024年"))
++
++    def test_missing_availability_is_pending_not_usable(self):
++        row = dict(_B)
++        row.pop("available_at")
++        row.pop("disclosed_at")
++        rows = [_A, _B, row]
++        snap = _snap(rows, as_of="2026-01-31")
++        self.assertEqual(len(snap.pending_rows), 1)
++        self.assertIn("待核验", snap.pending_rows[0]["reason"])
++        # 该行不参与数据集（不假装当时可得）：2024 年只剩 _B 一条可用观察
++        ent = snap.entity("000001.SZ")
++        self.assertEqual(ent["dataset"].manifest.periods, ("2023年", "2024年"))
++
++    def test_future_row_does_not_change_past_snapshot_hash(self):
++        past = _snap([_A, _B], as_of="2026-01-31")
++        with_future = _snap([_A, _B, _row("甲公司", "000001.SZ", "2025-12-31",
++                                          avail="2026-04-30", revenue=9)],
++                            as_of="2026-01-31")
++        # 截止日前的快照身份不因后来新增的未来行而改变
++        self.assertEqual(past.snapshot_id, with_future.snapshot_id)
++
++    def test_disclosed_at_fallback_when_available_at_missing(self):
++        row = dict(_A)
++        row["disclosed_at"] = "2024-04-20"
++        row.pop("available_at")
++        snap = _snap([row], as_of="2025-01-01")
++        self.assertEqual(snap.pending_rows, ())   # disclosed_at 可用 → 不缺时点
++
++
++class TestPoolAndScope(unittest.TestCase):
++    """股票池：精确代码匹配、界外不静默纳入、缺观察诚实。"""
++
++    def test_pool_code_exact_match(self):
++        snap = _snap([_A, _B], pool=("000001.SZ",))
++        self.assertEqual(snap.entity_ids, ("000001.SZ",))
++
++    def test_hk_code_is_out_of_scope(self):
++        payload = {"metadata": {}, "rows": [_row("腾讯控股", "00700.HK", "2024-12-31",
++                                                 avail="2025-04-01", revenue=1)]}
++        snap, errors = ss.build_snapshot(payload, pool=["00700.HK"], as_of="2026-01-31")
++        self.assertIsNone(snap)
++        self.assertTrue(any("不是 A 股" in e for e in errors), errors)
++
++    def test_bare_short_code_is_ambiguous(self):
++        # 既有约定：1–5 位裸数字市场不明；6 位裸数字 = cn（可纳入）
++        payload = {"metadata": {}, "rows": [_row("某公司", "700", "2024-12-31",
++                                                 avail="2025-04-01", revenue=1)]}
++        snap, errors = ss.build_snapshot(payload, pool=["700"], as_of="2026-01-31")
++        self.assertIsNone(snap)
++        self.assertTrue(any("裸代码" in e or "市场不明" in e for e in errors), errors)
++
++    def test_bare_six_digit_code_is_cn(self):
++        # 既有约定（facts.market_of_code）：裸 6 位数字 = cn，无歧义 → 可纳入
++        payload = {"metadata": {}, "rows": [_row("某公司", "000001", "2024-12-31",
++                                                 avail="2025-04-01", revenue=1)]}
++        snap, errors = ss.build_snapshot(payload, pool=["000001"], as_of="2026-01-31")
++        self.assertEqual(errors, [], errors)
++        self.assertEqual(snap.entity_ids, ("000001",))
++
++    def test_pool_code_without_observations_is_honest(self):
++        snap = _snap([_A, _B], pool=("000001.SZ", "999999.SZ"))
++        res = ss.evaluate(snap, ())
++        ghost = next(r for r in res.insufficient_rows if r.entity_id == "999999.SZ")
++        self.assertIn("不编造", "；".join(ghost.reasons))
++
++    def test_no_usable_data_at_asof_is_insufficient(self):
++        # 三一真实缓存的情形：两年报都 2025-04-18 披露 → 截止日 2024-12-31 时无数据
++        rows = [_row("壬公司", "000009.SZ", "2023-12-31", avail="2025-04-18",
++                     revenue=100_000_000),
++                _row("壬公司", "000009.SZ", "2024-12-31", avail="2025-04-18",
++                     revenue=110_000_000)]
++        snap = _snap(rows, as_of="2024-12-31")
++        res = ss.evaluate(snap, ())
++        self.assertEqual(res.counts["insufficient"], 1)
++        self.assertEqual(res.pass_rows, ())
++
++
++class TestDeterminism(unittest.TestCase):
++    """确定性：同输入同结果；平局稳定；代码顺序不影响读数。"""
++
++    def setUp(self):
++        self.rows = [_A, _B]
++        self.rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++
++    def test_same_input_same_result_hash(self):
++        snap1 = _snap(self.rows)
++        snap2 = _snap(list(reversed(self.rows)))     # 输入行顺序不影响
++        r1 = ss.evaluate(snap1, self.rules)
++        r2 = ss.evaluate(snap2, self.rules)
++        self.assertEqual(r1.result_hash, r2.result_hash)
++        self.assertEqual(r1.snapshot_id, r2.snapshot_id)
++
++    def test_rules_change_changes_hash_not_overwrites(self):
++        snap = _snap(self.rows)
++        r1 = ss.evaluate(snap, self.rules)
++        rules2, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 30}])
++        r2 = ss.evaluate(snap, rules2)
++        self.assertNotEqual(r1.rules_hash, r2.rules_hash)
++        self.assertNotEqual(r1.result_hash, r2.result_hash)
++
++    def test_tie_breaks_by_code_stably(self):
++        rows = [
++            _row("乙公司", "000002.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000, gross_profit=30_000_000),
++            _row("甲公司", "000001.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000, gross_profit=30_000_000),
++        ]
++        snap = _snap(rows, pool=("000001.SZ", "000002.SZ"))
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 1}])
++        for sort in ({"field": "gross_margin", "direction": "desc"},
++                     {"field": "gross_margin", "direction": "asc"}):
++            res = ss.evaluate(snap, rules, sort=sort)
++            ids = [r.entity_id for r in res.pass_rows]
++            self.assertEqual(ids, ["000001.SZ", "000002.SZ"], sort)
++
++    def test_missing_sort_reading_goes_last_in_both_directions(self):
++        rows = [
++            _A, _B,
++            _row("乙公司", "000002.SZ", "2024-12-31", avail="2025-04-10",
++                 revenue=100_000_000),          # 缺毛利 → 增速可算但毛利率缺
++        ]
++        snap = _snap(rows, pool=("000001.SZ", "000002.SZ"))
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        for sort in ({"field": "gross_margin", "direction": "desc"},
++                     {"field": "gross_margin", "direction": "asc"}):
++            res = ss.evaluate(snap, rules, sort=sort)
++            ordered = list(res.pass_rows) + list(res.fail_rows) + list(res.insufficient_rows)
++            self.assertEqual(ordered[-1].entity_id, "000002.SZ", sort)
++
++
++class TestTraceability(unittest.TestCase):
++    """能追溯：读数带 fact_id 与来源；官方缓存与用户上传分开标注。"""
++
++    def test_readings_carry_fact_ids_and_source(self):
++        snap = _snap([_A, _B])
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap, rules)
++        r = _reading(res.pass_rows[0], "gross_margin")
++        self.assertTrue(all(fid.startswith("fact-") for fid in r.inputs))
++        self.assertEqual(len(r.inputs), 2)
++
++    def test_official_cache_and_user_upload_flagged_separately(self):
++        snap_official = _snap([_A, _B], synthetic=False, user_provided=False)
++        snap_user = _snap([_A, _B], synthetic=False, user_provided=True)
++        self.assertFalse(snap_official.user_provided)
++        self.assertTrue(snap_user.user_provided)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap_user, rules)
++        self.assertTrue(any("未独立核验" in n for n in res.notes))
++
++    def test_synthetic_demo_flagged(self):
++        snap = _snap([_A, _B], synthetic=True)
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap, rules)
++        self.assertTrue(any("合成演示" in n for n in res.notes))
++
++
++class TestRealCacheSample(unittest.TestCase):
++    """真实缓存样例（tmp/q1-real-inputs，官方披露缓存投影）：来源链可用。"""
++
++    @classmethod
++    def setUpClass(cls):
++        path = os.path.join("tmp", "q1-real-inputs", "financials.json")
++        if not os.path.isfile(path):
++            raise unittest.SkipTest("真实缓存样例不在本机")
++        payload, errors = ss.load_payload_file(path)
++        assert not errors, errors
++        cls.payload = payload
++
++    def test_two_companies_loaded(self):
++        snap, errors = ss.build_snapshot(
++            self.payload, pool=["002304.SZ", "600031.SH"], as_of="2026-10-23",
++            source_label="official_disclosure_cache",
++            source_sha256=ss.payload_sha256(
++                os.path.join("tmp", "q1-real-inputs", "financials.json")))
++        self.assertEqual(errors, [])
++        self.assertEqual(len(snap.entities), 2)
++        self.assertFalse(snap.synthetic)
++        yanghe = snap.entity("002304.SZ")
++        self.assertEqual(yanghe["entity"], "洋河股份")
++        self.assertEqual(yanghe["dataset"].manifest.periods,
++                         ("2022年", "2023年", "2024年", "2025年"))
++
++    def test_hand_check_yanghe_2024_margin(self):
++        snap, _ = ss.build_snapshot(self.payload, pool=["002304.SZ"],
++                                    as_of="2026-10-23", source_label="cache")
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 70}])
++        res = ss.evaluate(snap, rules, period="2024")
++        row = res.pass_rows[0]
++        r = _reading(row, "gross_margin")
++        # 手算：211.2508 / 288.763 × 100 ≈ 73.16
++        self.assertAlmostEqual(r.value, 211.2508 / 288.763 * 100, places=2)
++        self.assertEqual(row.eval_period, "2024年")
++        # 溯源：cninfo 原文 URL
++        self.assertIn("cninfo.com.cn", r.source_url)
++
++    def test_sany_has_no_data_before_2025_04_18(self):
++        snap, _ = ss.build_snapshot(self.payload, pool=["600031.SH"],
++                                    as_of="2024-12-31", source_label="cache")
++        res = ss.evaluate(snap, ())
++        self.assertEqual(res.counts["insufficient"], 1)
++        self.assertIn("没有任何年度期间观察", "；".join(
++            res.insufficient_rows[0].reasons))
++
++    def test_period_pin_mismatch_is_insufficient(self):
++        snap, _ = ss.build_snapshot(self.payload, pool=["002304.SZ"],
++                                    as_of="2026-10-23", source_label="cache")
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 1}])
++        res = ss.evaluate(snap, rules, period="2021")
++        self.assertEqual(res.counts["insufficient"], 1)
++        self.assertIn("无 2021年", "；".join(res.insufficient_rows[0].reasons))
++
++    def test_negative_operating_cashflow_is_real_reading(self):
++        # 洋河 2025 经营现金流为负（-7.63 亿）：真实读数，不是缺失
++        snap, _ = ss.build_snapshot(self.payload, pool=["002304.SZ"],
++                                    as_of="2026-10-23", source_label="cache")
++        rules, _ = ss.parse_rules([{"field": "operating_cashflow", "op": "<", "value": 0}])
++        res = ss.evaluate(snap, rules, period="2025")
++        self.assertEqual(res.counts["pass"], 1)
++        r = _reading(res.pass_rows[0], "operating_cashflow")
++        self.assertAlmostEqual(r.value, -763_040_000.0, delta=1_000_000.0)
++
++
++class TestSnapshotSerialization(unittest.TestCase):
++    """复现：快照/结果可序列化；改规则/输入是新执行（哈希不同），历史不被覆盖。"""
++
++    def test_snapshot_roundtrip_keeps_identity(self):
++        snap = _snap([_A, _B])
++        d = snap.to_dict()
++        self.assertEqual(d["snapshot_id"], snap.snapshot_id)
++        self.assertEqual(d["schema"], ss.SCHEMA_VERSION)
++        self.assertEqual(d["entities"][0]["dataset"]["manifest"]["dataset_hash"],
++                         snap.entity("000001.SZ")["dataset"].dataset_hash)
++
++    def test_result_roundtrip_keeps_rows(self):
++        snap = _snap([_A, _B])
++        rules, _ = ss.parse_rules([{"field": "gross_margin", "op": ">=", "value": 20}])
++        res = ss.evaluate(snap, rules)
++        d = res.to_dict()
++        self.assertEqual(d["result_hash"], res.result_hash)
++        self.assertEqual(len(d["pass_rows"]), 1)
++        self.assertEqual(d["counts"]["total"], 1)
++
++    def test_asof_change_is_new_snapshot(self):
++        s1 = _snap([_A, _B], as_of="2026-01-31")
++        s2 = _snap([_A, _B], as_of="2026-06-30")
++        self.assertNotEqual(s1.snapshot_id, s2.snapshot_id)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=1)
+diff --git a/tmp/r1c_http_walk.py b/tmp/r1c_http_walk.py
+new file mode 100644
+index 0000000..eea3377
+--- /dev/null
++++ b/tmp/r1c_http_walk.py
+@@ -0,0 +1,241 @@
++# -*- coding: utf-8 -*-
++"""R1-SCREEN-1023（R1-C/D）：隔离实例上的真实 HTTP 走查（8081，不碰生产 8080）。
++
++覆盖：池目录 → 字段目录 → 预览 → 执行 → 查看原版 → 证据 → 权限矩阵 →
++时间边界（截止日前一天）→ 未知代码 → 历史列表 → 重开原版哈希一致。
++输出为可贴进证据目录的文本记录；任何断言失败即打印 FAIL 并以非零码退出。
++"""
++from __future__ import annotations
++
++import http.cookiejar
++import json
++import sys
++import urllib.error
++import urllib.request
++
++BASE = "http://127.0.0.1:8081"
++FAILS: list[str] = []
++
++
++def _opener(with_cookie: bool = True):
++    jar = http.cookiejar.CookieJar()
++    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar)), jar
++
++
++def call(opener, path: str, body: dict | None = None):
++    url = BASE + path
++    data = None
++    headers = {"Content-Type": "application/json"}
++    if body is not None:
++        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
++    req = urllib.request.Request(url, data=data, headers=headers,
++                                 method="POST" if body is not None else "GET")
++    try:
++        with opener.open(req, timeout=30) as resp:
++            raw = resp.read().decode("utf-8")
++            return resp.status, (json.loads(raw) if raw.strip().startswith(("{", "[")) else raw)
++    except urllib.error.HTTPError as exc:
++        raw = exc.read().decode("utf-8")
++        try:
++            return exc.code, json.loads(raw)
++        except Exception:
++            return exc.code, raw
++
++
++def check(label: str, cond: bool, detail: str = ""):
++    print(f"{'PASS' if cond else 'FAIL'}  {label}" + (f"  |  {detail}" if detail else ""))
++    if not cond:
++        FAILS.append(label)
++
++
++def main() -> int:
++    admin, _ = _opener()
++    status, d = call(admin, "/api/login", {"username": "admin",
++                                          "password": "screen-r1c-admin-2026"})
++    check("admin 登录", status == 200, str(d))
++
++    status, d = call(admin, "/api/screen/pool")
++    codes = [p["code"] for p in d.get("available_pool", [])]
++    check("池目录只含输入里真实可用主体", status == 200 and codes == ["002304.SZ", "600031.SH"],
++          f"codes={codes} source={d.get('source', {}).get('label')} "
++          f"sha={str(d.get('source', {}).get('sha256'))[:12]} synthetic={d.get('source', {}).get('synthetic')}")
++
++    status, d = call(admin, "/api/screen/fields")
++    check("字段目录 5 项 + 版本", status == 200 and len(d.get("fields", [])) == 5,
++          f"impl={d.get('impl_version')} field_map={d.get('field_map_version')}")
++
++    pool = ["002304.SZ", "600031.SH"]
++    status, prev = call(admin, "/api/screen/preview", {"pool": pool, "as_of": "2025-04-30"})
++    check("预览：截止 2025-04-30", status == 200 and prev.get("entities_ready") == 2,
++          f"snapshot={str(prev.get('snapshot_id'))[:12]} excluded={prev.get('excluded')} "
++          f"pending={prev.get('pending_pit')}")
++    per = {e["entity_id"]: e for e in prev.get("entities", [])}
++    check("洋河 2024 年报可用（披露 2025-04-29 ≤ 截止）",
++          "2024年" in (per.get("002304.SZ", {}).get("periods") or []),
++          str(per.get("002304.SZ", {}).get("periods")))
++    check("三一 2024 年报可用（披露 2025-04-18 ≤ 截止）",
++          "2024年" in (per.get("600031.SH", {}).get("periods") or []),
++          str(per.get("600031.SH", {}).get("periods")))
++
++    status, too_early = call(admin, "/api/screen/preview", {"pool": pool, "as_of": "2025-04-17"})
++    e31 = {e["entity_id"]: e for e in too_early.get("entities", [])}.get("600031.SH", {})
++    check("时间边界：截止 2025-04-17 时三一 2024 未披露（不可用）",
++          status == 200 and "2024年" not in (e31.get("periods") or []),
++          f"periods={e31.get('periods')} last_available={e31.get('last_available')}")
++
++    rules = [{"field": "gross_margin", "op": ">=", "value": 70},
++             {"field": "debt_ratio", "op": "<=", "value": 60}]
++    status, d = call(admin, "/api/screen/run", {"pool": pool, "as_of": "2025-04-30",
++                                               "rules": rules})
++    run = d.get("run") or {}
++    check("执行：通过 1 / 未通过 1", status == 200 and run.get("counts", {}).get("pass") == 1
++          and run.get("counts", {}).get("fail") == 1, json.dumps(run.get("counts"), ensure_ascii=False))
++    passed = (run.get("rows", {}).get("pass") or [{}])[0]
++    check("通过者是洋河股份、评估期间 2024年",
++          passed.get("entity_id") == "002304.SZ" and passed.get("eval_period") == "2024年",
++          f"{passed.get('entity')} {passed.get('eval_period')}")
++    failed = (run.get("rows", {}).get("fail") or [{}])[0]
++    check("未通过者是三一重工（毛利率或负债率不满足）",
++          failed.get("entity_id") == "600031.SH",
++          f"{failed.get('entity')} reasons={failed.get('reasons')}")
++    run_id = run.get("run_id")
++    print(f"      run_id={run_id} result_hash={run.get('result_hash')[:16]}… "
++          f"snapshot={run.get('snapshot_id')[:12]}…")
++
++    status, again = call(admin, "/api/screen/run", {"pool": pool, "as_of": "2025-04-30",
++                                                   "rules": rules})
++    check("同参数重复执行 → 复用同一 run_id（不重算）",
++          status == 200 and (again.get("run") or {}).get("run_id") == run_id,
++          f"reused={(again.get('run') or {}).get('reused')}")
++
++    status, orig = call(admin, f"/api/screen/run?id={run_id}")
++    check("查看原版：result_hash 与执行时一致",
++          status == 200 and (orig.get("run") or {}).get("result_hash") == run.get("result_hash"),
++          f"integrity={(orig.get('run') or {}).get('integrity')}")
++
++    status, ev = call(admin, f"/api/screen/evidence?run={run_id}&entity=002304.SZ")
++    evd = ev.get("evidence") or {}
++    gm = next((r for r in evd.get("readings", []) if r.get("field") == "gross_margin"), {})
++    check("证据：绑 run_id + entity，读数可追到输入观察",
++          status == 200 and evd.get("run_id") == run_id and len(gm.get("inputs", [])) == 2,
++          f"verdict={evd.get('verdict')} inputs={[i.get('metric') for i in gm.get('inputs', [])]}")
++    check("证据：输入观察带来源 URL（官方披露页）",
++          all(i.get("source_url", "").startswith("http") for i in gm.get("inputs", [])),
++          str([i.get("source_url", "")[:38] for i in gm.get("inputs", [])]))
++    check("证据：可用时点齐备（source_hash 缓存未携带时留空，以 URL 为核对路径）",
++          all(i.get("as_of") for i in gm.get("inputs", [])),
++          str([(i.get("fact_id", "")[:14], i.get("as_of"),
++                (i.get("source_hash") or "—")[:8]) for i in gm.get("inputs", [])]))
++
++    status, wrong = call(admin, f"/api/screen/evidence?run={run_id}&entity=999999.SZ")
++    check("证据：错误主体 → 404 且明确不猜", status == 404 and "不猜" in json.dumps(wrong, ensure_ascii=False),
++          str(wrong)[:80])
++
++    status, unknown = call(admin, "/api/screen/run",
++                           {"pool": ["002304.SZ", "600031.SH", "999999.SZ"],
++                            "as_of": "2025-04-30", "rules": rules})
++    urun = unknown.get("run") or {}
++    ins = (urun.get("rows", {}).get("insufficient") or [{}])[0]
++    check("未知代码混在真实池里：计入资料不足并给出原因（不编造读数）",
++          status == 200 and urun.get("counts", {}).get("insufficient") == 1
++          and ins.get("entity_id") == "999999.SZ" and bool(ins.get("reasons")),
++          f"counts={urun.get('counts')} reasons={ins.get('reasons')}")
++
++    status, only_unknown = call(admin, "/api/screen/run",
++                                {"pool": ["999999.SZ"], "as_of": "2025-04-30", "rules": rules})
++    check("整池都不在输入里：400 明确拒绝（不返回空结果冒充筛选结果）",
++          status == 400 and "没有任何可纳入主体" in json.dumps(only_unknown, ensure_ascii=False),
++          str((only_unknown or {}).get("error", ""))[:70])
++
++    status, bad = call(admin, "/api/screen/run", {"pool": pool, "as_of": "2025-04-30",
++                                                 "rules": [{"field": "net_margin", "op": ">=", "value": 1}]})
++    check("未知字段：400 拒绝（不替换成相近字段）", status == 400 and "未知字段" in json.dumps(bad, ensure_ascii=False),
++          str(bad.get("error", ""))[:60] if isinstance(bad, dict) else str(bad)[:60])
++
++    status, trav = call(admin, "/api/screen/run?id=..%2F..%2Fetc%2Fpasswd")
++    check("路径穿越式 run_id → 404", status == 404, str(trav)[:60])
++
++    viewer, _ = _opener()
++    call(viewer, "/api/login", {"username": "viewer", "password": "screen-r1c-viewer-2026"})
++    status, vw = call(viewer, "/api/screen/run", {"pool": pool, "as_of": "2025-04-30", "rules": rules})
++    check("viewer 执行 → 403（写操作仅管理员）", status == 403, str(vw)[:60])
++    status, vr = call(viewer, f"/api/screen/run?id={run_id}")
++    check("viewer 查看原版 → 200（只读可用）", status == 200, str(status))
++
++    anon, _ = _opener()
++    status, an = call(anon, "/api/screen/runs")
++    check("未登录 → 401", status == 401, str(an)[:60])
++
++    status, hist = call(admin, "/api/screen/runs?limit=20")
++    runs = hist.get("runs") or []
++    check("历史列表含刚执行的结果且完整性 ok",
++          status == 200 and any(r.get("run_id") == run_id for r in runs),
++          f"n={len(runs)} first={runs[0].get('run_id', '')[:12] if runs else '—'} "
++          f"integrity={runs[0].get('integrity') if runs else '—'}")
++
++    # ---------- 预设：股票池 + 规则（可保存、可编辑、可删除） ----------
++    status, anp = call(anon, "/api/screen/presets")
++    check("未登录读预设 → 401", status == 401, str(anp)[:50])
++
++    status, vp = call(viewer, "/api/screen/preset",
++                      {"name": "x", "pool": pool, "rules": rules})
++    check("viewer 保存预设 → 403（写仅管理员）", status == 403, str(vp)[:60])
++
++    runs_before = len((call(admin, "/api/screen/runs?limit=200")[1] or {}).get("runs") or [])
++    status, saved = call(admin, "/api/screen/preset",
++                         {"name": "高毛利验证池", "pool": pool, "rules": rules,
++                          "as_of": "2025-04-30", "note": "R1-D 验证用"})
++    pid = ((saved or {}).get("preset") or {}).get("preset_id", "")
++    check("保存预设 → 200 且有 preset_id", status == 200 and bool(pid),
++          f"preset_id={pid}")
++
++    status, got = call(admin, f"/api/screen/preset?id={pid}")
++    check("读回预设：名称/池/规则一致",
++          status == 200 and got["preset"]["name"] == "高毛利验证池"
++          and got["preset"]["pool"] == pool and len(got["preset"]["rules"]) == len(rules),
++          f"name={got.get('preset', {}).get('name')} rules={len(got.get('preset', {}).get('rules') or [])}")
++
++    status, upd = call(admin, "/api/screen/preset",
++                       {"preset_id": pid, "name": "高毛利验证池(改)", "pool": pool,
++                        "rules": rules, "as_of": "2025-04-30"})
++    status2, listed = call(admin, "/api/screen/presets?limit=100")
++    names = [x["name"] for x in (listed.get("presets") or [])]
++    check("更新预设：同 id 覆盖、不新增",
++          status == 200 and upd["preset"]["preset_id"] == pid
++          and names.count("高毛利验证池(改)") == 1 and "高毛利验证池" not in names,
++          f"names={names}")
++
++    status, badp = call(admin, "/api/screen/preset",
++                        {"name": "坏字段", "pool": pool,
++                         "rules": [{"field": "net_margin", "op": ">=", "value": 1}]})
++    check("预设里未知字段 → 400（不替换含义相近字段）",
++          status == 400 and "未知字段" in json.dumps(badp, ensure_ascii=False),
++          str(badp.get("error", ""))[:60])
++
++    status, travp = call(admin, "/api/screen/preset",
++                         {"preset_id": "../../etc/passwd", "name": "越界",
++                          "pool": pool, "rules": rules})
++    check("预设 id 越界 → 400", status == 400, str(travp.get("error", ""))[:50])
++
++    status, dele = call(admin, "/api/screen/preset/delete", {"preset_id": pid})
++    status2, after = call(admin, "/api/screen/presets?limit=100")
++    left = [x["preset_id"] for x in (after.get("presets") or [])]
++    runs_after = len((call(admin, "/api/screen/runs?limit=200")[1] or {}).get("runs") or [])
++    check("删除预设 → 200 且只删这一份（其他预设与已冻结结果不受影响）",
++          status == 200 and pid not in left and runs_after == runs_before,
++          f"deleted={pid[:8]} left={[x[:8] for x in left]} runs {runs_before}→{runs_after}")
++
++    status, gone = call(admin, f"/api/screen/preset?id={pid}")
++    check("已删除的预设再读 → 404（不返回别人的预设顶替）", status == 404, str(gone)[:50])
++
++
++    print()
++    if FAILS:
++        print(f"FAILED: {len(FAILS)} / {FAILS}")
++        return 1
++    print("ALL CHECKS PASSED")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tmp/r1c_isolated_instance.py b/tmp/r1c_isolated_instance.py
+new file mode 100644
+index 0000000..3a7e7c3
+--- /dev/null
++++ b/tmp/r1c_isolated_instance.py
+@@ -0,0 +1,50 @@
++# -*- coding: utf-8 -*-
++"""R1-SCREEN-1023（R1-C/D）隔离验证实例：web_ui 单服务 + 独立 DB/config/dist。
++
++- 端口 8081（生产 8080 不动）；BIND_HOST 默认回环。
++- DB / config / share / 日志 / 筛选结果全部落在 R1C_TMP 临时目录，不碰真实工件。
++- dist 指向 frontend/dist-screen-check（本阶段构建产物），不覆盖生产 dist。
++- 用户：admin / screen-r1c-admin-2026（隔离实例专用，非真实凭据）。
++"""
++from __future__ import annotations
++
++import json
++import os
++import sys
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++TMP = os.environ.get("R1C_TMP") or os.path.join(REPO, "tmp", "r1c-isolated")
++os.makedirs(TMP, exist_ok=True)
++os.environ.setdefault("WEB_PORT", "8081")
++os.environ.setdefault("WEAVEMIND_DB", os.path.join(TMP, "agents.db"))
++os.environ.setdefault("WEAVEMIND_LOG_DIR", os.path.join(TMP, "logs"))
++os.environ.setdefault("WEAVEMIND_SCREEN_DIR", os.path.join(TMP, "screen-results"))
++os.environ.setdefault("WEAVEMIND_SCREEN_PRESETS", os.path.join(TMP, "screen-presets"))
++os.environ.setdefault("WEAVEMIND_SCREEN_CACHE",
++                      os.path.join(REPO, "data", "screen_cache",
++                                   "official_disclosure_cache.json"))
++os.environ.setdefault("SHARE_FILE", os.path.join(TMP, "share_links.json"))
++# 记忆库也必须隔离：默认 './chroma_memory' 指向仓库真实记忆存储，
++# 启动维护（purge_expired + enforce_conversation_cap）会写它——隔离实例不得触碰。
++os.environ.setdefault("MEMORY_DIR", os.path.join(TMP, "chroma_memory"))
++
++sys.path.insert(0, REPO)
++import web_ui  # noqa: E402
++
++web_ui.CONFIG_PATH = os.path.join(TMP, "config.json")
++web_ui.DIST_DIR = os.path.join(REPO, "frontend", "dist-screen-check")
++
++if not os.path.exists(web_ui.CONFIG_PATH):
++    with open(web_ui.CONFIG_PATH, "w", encoding="utf-8") as fh:
++        json.dump({
++            "llm": {"model": "stub", "base_url": "http://127.0.0.1:1", "api_key": "unused"},
++            "users": {
++                "admin": {"password_hash": web_ui._hash_password("screen-r1c-admin-2026"),
++                          "role": "admin"},
++                "viewer": {"password_hash": web_ui._hash_password("screen-r1c-viewer-2026"),
++                           "role": "viewer"},
++            },
++        }, fh, ensure_ascii=False, indent=2)
++
++if __name__ == "__main__":
++    web_ui.main()
+diff --git a/tmp/r1c_timing.py b/tmp/r1c_timing.py
+new file mode 100644
+index 0000000..1f415a0
+--- /dev/null
++++ b/tmp/r1c_timing.py
+@@ -0,0 +1,101 @@
++# -*- coding: utf-8 -*-
++"""R1-D：复算与耗时分账（在隔离实例 8081 上跑，不碰生产 8080）。
++
++要证三件事：
++1. 预览/执行/查看原版各自的耗时量级（预览不落盘、查看原版不重算）；
++2. 同一输入重复执行 → 同一 run_id（复用，不是重算）；
++3. 连续多次读同一份已冻结结果，哈希稳定（不随时间漂移）。
++"""
++from __future__ import annotations
++
++import http.cookiejar
++import json
++import statistics
++import time
++import urllib.error
++import urllib.request
++
++BASE = "http://127.0.0.1:8081"
++OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
++
++
++def call(path: str, body: dict | None = None):
++    req = urllib.request.Request(
++        BASE + path,
++        data=json.dumps(body).encode() if body is not None else None,
++        headers={"Content-Type": "application/json"},
++        method="POST" if body is not None else "GET")
++    t0 = time.perf_counter()
++    try:
++        with OPENER.open(req) as resp:
++            payload = json.loads(resp.read().decode())
++            return payload, resp.status, (time.perf_counter() - t0) * 1000
++    except urllib.error.HTTPError as exc:
++        return json.loads(exc.read().decode()), exc.code, (time.perf_counter() - t0) * 1000
++
++
++def ms(values: list[float]) -> str:
++    return f"min {min(values):.1f} / 中位 {statistics.median(values):.1f} / max {max(values):.1f} ms"
++
++
++def main() -> int:
++    print("== R1-D 复算与耗时分账 ==")
++    print("目标实例:", BASE, "(隔离实例；生产 8080 未参与)")
++    _, status, _ = call("/api/login", {"username": "admin", "password": "screen-r1c-admin-2026"})
++    print("login:", status)
++    pool = ["002304.SZ", "600031.SH"]
++    rules = [{"field": "gross_margin", "op": ">=", "value": 70}]
++
++    # 1) 预览：不落盘（执行前后历史条数不变）
++    before, _, _ = call("/api/screen/runs?limit=200")
++    n_before = len(before.get("runs", []))
++    prev_times, prev_errors = [], 0
++    for _ in range(10):
++        d, s, t = call("/api/screen/preview", {"pool": pool, "as_of": "2025-04-30", "rules": rules})
++        prev_times.append(t)
++        if s != 200 or d.get("error"):
++            prev_errors += 1
++    after, _, _ = call("/api/screen/runs?limit=200")
++    n_after = len(after.get("runs", []))
++    print(f"preview x10: {ms(prev_times)} | 非 200/带错 {prev_errors} 次")
++    print(f"  历史条数 预览前={n_before} 预览后={n_after} → 预览{'未落盘' if n_before == n_after else '落盘了(异常)'}")
++
++    # 2) 执行：首次 vs 同参数再来一次（复用，不重算）
++    d1, s1, t1 = call("/api/screen/run", {"pool": pool, "as_of": "2025-04-30", "rules": rules})
++    d2, s2, t2 = call("/api/screen/run", {"pool": pool, "as_of": "2025-04-30", "rules": rules})
++    run1, run2 = d1["run"], d2["run"]
++    print(f"run 首次: {t1:.1f} ms run_id={run1['run_id']} reused={run1.get('reused')}")
++    print(f"run 重放: {t2:.1f} ms run_id={run2['run_id']} reused={run2.get('reused')}")
++    print(f"  同一身份复用: {run1['run_id'] == run2['run_id']} | 结果哈希一致: {run1['result_hash'] == run2['result_hash']}")
++
++    # 3) 换规则 → 必须新 run_id（不同身份不覆盖）
++    d3, _, t3 = call("/api/screen/run", {"pool": pool, "as_of": "2025-04-30",
++                                         "rules": [{"field": "gross_margin", "op": ">=", "value": 65}]})
++    run3 = d3["run"]
++    print(f"run 换阈值(65): {t3:.1f} ms run_id={run3['run_id']} 与原结果不同: {run3['run_id'] != run1['run_id']}")
++    runs, _, _ = call("/api/screen/runs?limit=200")
++    print(f"  历史条数={len(runs['runs'])}（旧结果原样保留，未覆盖）")
++
++    # 4) 查看原版：GET 读取已冻结结果，绝不重算
++    get_times, hashes = [], set()
++    for _ in range(10):
++        d, s, t = call(f"/api/screen/run?id={run1['run_id']}")
++        get_times.append(t)
++        if s != 200:
++            print("  GET 失败:", s, d)
++        hashes.add((d["run"]["result_hash"], d["run"].get("integrity")))
++    print(f"查看原版 x10: {ms(get_times)} | 哈希/完整性稳定: {len(hashes) == 1} {next(iter(hashes))}")
++
++    # 5) 证据跳转：绑定 (run_id, entity)
++    ev_times = []
++    for _ in range(5):
++        d, s, t = call(f"/api/screen/evidence?run={run1['run_id']}&entity=002304.SZ")
++        ev_times.append(t)
++    print(f"证据 GET x5: {ms(ev_times)} | 绑定 run={run1['run_id'][:8]}… verdict={d['evidence']['verdict']}")
++    bad, bad_status, _ = call(f"/api/screen/evidence?run={run1['run_id']}&entity=600519.SH")
++    print(f"  不在该结果里的主体 → {bad_status} {bad.get('error')}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

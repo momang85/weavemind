@@ -7,11 +7,16 @@ import SubmitPanel from '../components/console/SubmitPanel'
 import PlanPanel from '../components/console/PlanPanel'
 import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
 import FirstRunGuide from '../components/FirstRunGuide'
+import { WeaveLines } from '../components/Brand'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import { resolveSubmissionKey } from '../lib/submissionKey'
+import { requestResume } from '../lib/resume'
 import { actionIntent, actionableTone, shouldShowActionable } from '../lib/actionable'
+import { stepDisplayStatus } from '../lib/stepSkip'
+import { shouldCollapseResearchForm } from '../lib/consoleLayout'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
+import { intentNotice } from '../lib/researchGoal'
 
 type Tab = 'live' | 'context' | 'results' | 'materials'
 
@@ -49,6 +54,7 @@ export default function TaskConsole() {
   const setLogs = useTaskStore(s => s.setLogs)
 
   const [goal, setGoal] = useState('')
+  const [composerVersion, setComposerVersion] = useState(0)
   const [project, setProject] = useState('default')
   const [lastGoal, setLastGoal] = useState('')
   // 运行中任务切页恢复：taskId 迁入 store（重挂载自动恢复跟踪，不再孤儿化）
@@ -63,6 +69,10 @@ export default function TaskConsole() {
   const [importMsg, setImportMsg] = useState<{ name: string; note: string }[]>([])
   // P0-1：SUCCESS_WITH_ISSUES 的验收缺口明细（按任务缓存，点击展开）
   const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
+  // P2-4：URL 深链 ?task=<id>（首帧就决定研究表单是否折叠，避免"先展开再收起"的闪动）
+  const [deepTaskId, setDeepTaskId] = useState<string>(() => {
+    try { return (new URLSearchParams(window.location.search).get('task') || '').trim() } catch { return '' }
+  })
   // C3/H3b：同一次提交的幂等键（重复点击/失败重试复用；成功后清空）
   const pendingSubmission = useRef<{ sig: string; key: string } | null>(null)
   // C3：后端给的可行动状态（未接收/待消费/执行中/待材料/明确失败/已完成）
@@ -83,6 +93,7 @@ export default function TaskConsole() {
     // 因此一直无法进行）。深链比会话更具体，优先于 `conv`。
     const deepTask = (params.get('task') || '').trim()
     if (deepTask) {
+      setDeepTaskId(deepTask)
       useTaskStore.setState({ currentTaskId: deepTask })
       return
     }
@@ -163,7 +174,8 @@ export default function TaskConsole() {
                 id: s.step_id || '', step_id: s.step_id || '',
                 iteration: s.iteration || 0, capability: s.capability || '',
                 name: s.instruction || s.name || 'Step',
-                status: (s.result?.status || 'pending').toLowerCase(),
+                // 与实时通道同一套显示状态（S1 门禁跳过 → skipped）
+                status: stepDisplayStatus(s),
                 children: [], agent_id: s.result?.agent_id || '',
                 result: s.result || null,
               })),
@@ -280,6 +292,13 @@ export default function TaskConsole() {
         addLog({ timestamp: new Date().toISOString(), type: 'info', agent: 'orchestrator',
                  message: '重复提交已合并到任务 ' + tid + '（未新建、未重复执行）' })
       }
+      // P0-C 契约链：后端在提交时做研究意图判定并随响应返回。自由文本的公司研究
+      // 缺契约字段时**当场**告诉用户缺什么、怎么补（不拦截任务；一般任务静默）。
+      const notice = intentNotice(data.research_intent)
+      if (notice) {
+        addLog({ timestamp: new Date().toISOString(), type: 'info', agent: 'orchestrator',
+                 message: notice })
+      }
       startTask(tid)
       // D17：新任务重置过期 UI（步骤检查器/验收缺口缓存）
       setSelectedStep(null)
@@ -312,6 +331,31 @@ export default function TaskConsole() {
     else if (intent.kind === 'retry') submit(lastGoal || goal)
   }, [actionable, submit, lastGoal, goal])
 
+  // U90-B：失败任务的「继续执行」——翻回 RUNNING 并让编排器按持久化步骤状态续跑
+  // （跳过已成功步骤，不重复整单）。请求本身带去重闸；页面拿到回执后开始跟踪该任务，
+  // 这样"继续"之后实时动态/执行计划直接落到这条任务上，而不是停在旧的历史视图。
+  // U90-R3：把三态回执**返回给调用方**（ConsoleSideTabs 据此渲染"可重试/已请求"），
+  // 并区分超时回执（有界超时后已查真实状态）与失败回执。
+  const onResumeTask = useCallback(async (tid: string) => {
+    const r = await requestResume(tid)
+    addLog({
+      timestamp: new Date().toISOString(), type: r.ok ? 'info' : 'error',
+      agent: 'orchestrator',
+      message: r.ok ? `任务 ${tid} ${r.message}`
+        : (r.phase === 'timeout'
+            ? `任务 ${tid} 恢复超时未确认（${r.taskStatus || '状态未知'}）：${r.message}`
+            : `任务 ${tid} 未恢复：${r.message}`),
+    })
+    if (r.ok) {
+      useTaskStore.setState({ currentTaskId: tid, status: 'running', startedAt: Date.now() })
+      saveLastTask(tid)          // 与提交路径一致：刷新后仍能恢复跟踪
+      setTab('live')
+    }
+    loadRecentTasks()
+    if (activeConversationId) loadConversation(activeConversationId)
+    return r
+  }, [addLog, loadRecentTasks, loadConversation, activeConversationId])
+
   // 「改为修改目标」：把目标填回提交框并滚回提交区，不自动提交
   const prefillGoal = useCallback((g: string) => {
     setGoal(g)
@@ -324,6 +368,10 @@ export default function TaskConsole() {
       const res = await fetch('/task/' + tid)
       const d = await res.json()
       const steps = d.steps ?? []
+      // P1-8：耗时取**后端记的** elapsed_sec；前端自算的 (now - startedAt) 只在
+      // 后端没给时兜底（重开已完成任务时它是 0s，实测把 23 分钟的任务写成"耗时 0s"）。
+      const elapsed = typeof d.elapsed_sec === 'number' ? d.elapsed_sec : null
+      const fallback = Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000))
       const reportObj: TaskReport = {
         summary: d.status || 'SUCCESS',
         taskId: tid,
@@ -331,11 +379,16 @@ export default function TaskConsole() {
           totalSteps: steps.length,
           successSteps: steps.filter((s: any) => s.result?.status === 'SUCCESS').length,
           failedSteps: steps.filter((s: any) => s.result?.status === 'FAILED').length,
-          duration: Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000)),
+          duration: elapsed ?? fallback,
         },
+        elapsedSec: elapsed,
+        // P1-8：Steps 口径要写"含 N 跳过、M 降级"，降级数取后端 search_coverage
+        searchCoverage: d.search_coverage ?? null,
         steps: steps.map((s: any) => ({
           step_id: s.step_id || '', capability: s.capability || '',
-          name: s.instruction || 'Step', status: (s.result?.status || 'pending').toLowerCase(),
+          name: s.instruction || 'Step',
+          // 与实时通道/计划树同一套显示状态（S1 门禁跳过 → skipped，真失败仍 failed）
+          status: stepDisplayStatus(s),
         })),
         final_report: d.report || d.final_report || '',
         // F3-B：研究简报的结构化对象与导出版本绑定——结果页据此呈现
@@ -399,6 +452,12 @@ export default function TaskConsole() {
 
   const newConversation = useCallback(() => {
     reset()
+    setGoal('')
+    setLastGoal('')
+    setDeepTaskId('')
+    setUserContext('')
+    setImportMsg([])
+    setComposerVersion(version => version + 1)
     clearLastTask()   // "新对话"= 主动放弃当前任务：连刷新恢复点一起清
     setConvMessages([])
     useTaskStore.setState({ currentTaskId: null })
@@ -452,7 +511,16 @@ export default function TaskConsole() {
     : recentTasks.filter(t => t.status !== 'PENDING')
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto space-y-5">
+      {!taskId && !deepTaskId && (
+        <section className="research-hero relative isolate overflow-hidden rounded-xl px-5 py-4 md:px-8 md:py-6">
+          <WeaveLines className="pointer-events-none absolute -right-16 -top-5 -z-10 hidden h-64 w-[540px] text-brand lg:block" />
+          <p className="eyebrow text-brand">WEAVEMIND / 独立研究，有据可循</p>
+          <h2 className="editorial-title mt-3 text-2xl leading-snug tracking-wide text-ink md:text-[34px]">看清一家公司，<br className="sm:hidden" />从每一份证据开始。</h2>
+          <p className="mt-3 hidden max-w-xl text-sm text-ink-muted sm:block">为个人投资者与小团队，把公开披露整理成可复核的研究。<br className="hidden sm:block" />少一些信息翻找，多一些有依据的判断。</p>
+          <div className="mt-5 hidden flex-wrap gap-x-5 gap-y-2 text-xs text-ink-muted md:flex"><span>01 明确研究问题</span><span>02 整理资料与底稿</span><span>03 复核并导出</span></div>
+        </section>
+      )}
       {/* N3：首次使用引导——模型未配置时默认展开，配好后可随时折叠查看 */}
       <FirstRunGuide
         configComplete={firstRun.configComplete}
@@ -462,7 +530,7 @@ export default function TaskConsole() {
         onGoSettings={() => { window.location.href = '/settings' }} />
 
       <SubmitPanel
-        key={taskId || 'idle'}
+        key={taskId || `idle-${composerVersion}`}
         goal={goal} setGoal={setGoal}
         project={project} setProject={setProject}
         confirmMode={confirmMode} setConfirmMode={setConfirmMode}
@@ -473,6 +541,11 @@ export default function TaskConsole() {
         activeConversationId={activeConversationId}
         lastGoal={lastGoal} reportSummary={report?.summary} status={status}
         taskId={taskId} etaText={etaText} elapsedText={elapsedText}
+        // P2-4：已打开任务（?task=<id> 或本会话已提交/恢复跟踪）时研究表单默认收起，
+        // 第一屏先给任务本身；无任务时保持展开（不改变首次使用的路径）。
+        formCollapsedByDefault={shouldCollapseResearchForm({
+          deepTaskId, currentTaskId: taskId,
+        })}
         onSubmit={submit} onNewConversation={newConversation} />
 
       {/* C3：一句话说清"现在是什么状态、你该做什么"。未知/等材料这类中性状态
@@ -481,12 +554,12 @@ export default function TaskConsole() {
         <div className={
           'rounded-lg border px-4 py-3 text-sm flex flex-wrap items-center gap-3 '
           + (actionableTone(actionable?.state) === 'bad'
-            ? 'border-red-800 bg-red-950/40 text-red-200'
+            ? 'border-red-200 bg-red-50/40 text-red-700'
             : actionableTone(actionable?.state) === 'warn'
-              ? 'border-amber-800 bg-amber-950/30 text-amber-100'
+              ? 'border-amber-200 bg-amber-50/30 text-amber-700'
               : actionableTone(actionable?.state) === 'ok'
-                ? 'border-emerald-800 bg-emerald-950/30 text-emerald-100'
-                : 'border-slate-700 bg-slate-900/60 text-slate-200')
+                ? 'border-emerald-200 bg-emerald-50/30 text-emerald-700'
+                : 'border-line-strong bg-surface/60 text-ink')
         }>
           <span className="font-medium">[{String(actionable?.label || '')}]</span>
           <span className="flex-1 min-w-[16rem]">{String(actionable?.message || '')}</span>
@@ -501,7 +574,9 @@ export default function TaskConsole() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">
+      <ReportViewer />
+
+      {(taskId || planTree || isRunning || resultItems.length > 0) && <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <PlanPanel
           planTree={planTree} awaitingConfirm={awaitingConfirm} revision={revision}
           isRunning={isRunning} taskId={taskId}
@@ -512,10 +587,9 @@ export default function TaskConsole() {
           convMessages={convMessages}
           resultItems={resultItems} activeConversationId={activeConversationId}
           gapsFor={gapsFor} onToggleGaps={toggleGaps}
-          onViewReport={viewFullReport} onSubmit={submit} onPrefillGoal={prefillGoal} />
-      </div>
-
-      <ReportViewer />
+          onViewReport={viewFullReport} onSubmit={submit} onPrefillGoal={prefillGoal}
+          onResume={onResumeTask} />
+      </div>}
 
       {selectedStep && <StepInspector node={selectedStep} onClose={() => setSelectedStep(null)} />}
     </div>

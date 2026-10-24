@@ -1,0 +1,223 @@
+{
+ "probe": "offline read-only：真实 agents.db + 真实任务工作区 + 真 _load_resumable_steps",
+ "real_tasks": [
+  {
+   "task_id": "ui-cc853cf86b",
+   "row_status": "SUCCESS_WITH_ISSUES",
+   "plan_source": "stored",
+   "workspace_exists": true,
+   "plan_step_ids": [
+    "1",
+    "2",
+    "2b",
+    "3",
+    "3a",
+    "4"
+   ],
+   "reused": [],
+   "steps": [
+    {
+     "step_id": "1",
+     "capability": "web_search",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": false,
+      "why": "上次执行由重规划代做（执行指令与当前计划不同）"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（project/fetch_snapshot.json）"
+     },
+     "replanned": true
+    },
+    {
+     "step_id": "2",
+     "capability": "web_fetch",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": false,
+      "why": "执行契约指纹不一致（或落库步骤没有契约身份）"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（project/fetch_snapshot.json）"
+     },
+     "replanned": true
+    },
+    {
+     "step_id": "3",
+     "capability": "content_summary",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": true,
+      "why": "身份一致"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（narrative_evidence.json）"
+     },
+     "replanned": false,
+     "reject_reason": "自身有效，但上游被拒 → 连带重做（后继失效）"
+    },
+    {
+     "step_id": "3a",
+     "capability": "data_analyzer",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": false,
+      "why": "上次执行由重规划代做（执行指令与当前计划不同）"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（project/working_paper.json）"
+     },
+     "replanned": true
+    },
+    {
+     "step_id": "4",
+     "capability": "report_generator",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": true,
+      "why": "身份一致"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（reports/report.md）"
+     },
+     "replanned": false,
+     "reject_reason": "自身有效，但上游被拒 → 连带重做（后继失效）"
+    },
+    {
+     "step_id": "package-7",
+     "capability": "package",
+     "in_current_plan": false,
+     "reused": false,
+     "self_identity": null,
+     "self_artifact": null
+    }
+   ]
+  },
+  {
+   "task_id": "ui-91677c7767",
+   "row_status": "SUCCESS_WITH_ISSUES",
+   "plan_source": "stored",
+   "workspace_exists": true,
+   "plan_step_ids": [
+    "1",
+    "2",
+    "2b",
+    "3",
+    "3a",
+    "4"
+   ],
+   "reused": [],
+   "steps": [
+    {
+     "step_id": "1",
+     "capability": "web_search",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": false,
+      "why": "执行契约指纹不一致（或落库步骤没有契约身份）"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（project/fetch_snapshot.json）"
+     },
+     "replanned": true
+    },
+    {
+     "step_id": "2",
+     "capability": "file_io",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": false,
+      "why": "执行契约指纹不一致（或落库步骤没有契约身份）"
+     },
+     "self_artifact": {
+      "ok": false,
+      "why": "该能力没有固定产物、结果也未记录产物路径：无法证明有效"
+     },
+     "replanned": false
+    },
+    {
+     "step_id": "4",
+     "capability": "content_summary",
+     "in_current_plan": true,
+     "reused": false,
+     "self_identity": {
+      "ok": false,
+      "why": "执行契约指纹不一致（或落库步骤没有契约身份）"
+     },
+     "self_artifact": {
+      "ok": true,
+      "why": "必需产物存在（narrative_evidence.json）"
+     },
+     "replanned": false
+    },
+    {
+     "step_id": "5",
+     "capability": "report_generator",
+     "in_current_plan": false,
+     "reused": false,
+     "self_identity": null,
+     "self_artifact": null
+    },
+    {
+     "step_id": "package-6",
+     "capability": "package",
+     "in_current_plan": false,
+     "reused": false,
+     "self_identity": null,
+     "self_artifact": null
+    }
+   ]
+  }
+ ],
+ "counterexamples": [
+  {
+   "case": "正例：身份一致 + 产物在 → 复用（不重复派发）",
+   "reused": [
+    "1"
+   ]
+  },
+  {
+   "case": "反例①：空目录（目录在、产物不在）→ 不得复用",
+   "reused": []
+  },
+  {
+   "case": "反例②：单个必需产物缺失 → 不得复用",
+   "reused": []
+  },
+  {
+   "case": "反例③a：同 ID 换能力 → 不得复用",
+   "reused": []
+  },
+  {
+   "case": "反例③b：同 ID 换指令 → 不得复用",
+   "reused": []
+  },
+  {
+   "case": "反例③c：同 ID 换依赖（输入面变）→ 不得复用",
+   "reused": []
+  },
+  {
+   "case": "反例④：执行契约指纹变化 → 不得复用",
+   "reused": []
+  },
+  {
+   "case": "正例（含追加上下文）：核心被落库指令包含 → 复用",
+   "reused": [
+    "1"
+   ]
+  }
+ ]
+}

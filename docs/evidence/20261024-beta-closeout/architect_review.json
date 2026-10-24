@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-24",
+  "baseline": "ed8fd90; existing R1/BETA working-tree changes retained",
+  "probe_exit_code": 0,
+  "probe_result": {
+    "date": "2026-10-24",
+    "runtime": "3.14.3",
+    "scope": "synthetic offline probes; temporary storage; not full acceptance",
+    "fingerprints": {
+      "screen_store.py": "7601efe1f2b9006830e59ef98c8ddcca946c3a11a9a84524f532c29b0a987f77",
+      "web_ui.py": "ac6241ce54505890c8afee2aee14912b447531b7fb0e470d8ed4135c4f675126",
+      "stock_screen.py": "4fbc9ef22af631e262b146c7ef27d2678bda316cbf83d9d029e63413a6d4c14b"
+    },
+    "findings": [
+      {
+        "probe": "watchlist_concurrent_read_modify_write",
+        "expected": 2,
+        "actual": 1,
+        "lost_update": true,
+        "method": "both requests read before either writes; byte reads and writes serialized",
+        "operation_errors": [
+          [],
+          []
+        ]
+      },
+      {
+        "probe": "cost_concurrent_read_modify_write",
+        "expected": 2,
+        "actual": 1,
+        "lost_update": true,
+        "method": "both requests read before either writes; byte reads and writes serialized",
+        "operation_errors": []
+      },
+      {
+        "probe": "corrupt_ledger_overwrite",
+        "original_bytes_preserved": false,
+        "runs_total_after": 1,
+        "warnings_after": [],
+        "errors_after": []
+      }
+    ]
+  },
+  "earlier_probe_attempts": [
+    "Initial controlled scheduling encountered Windows PermissionError during overlapping file read/replace; not counted as confirmed deterministic finding.",
+    "Second harness attempt used an incorrect counter name; corrected to actual runs_total before the successful run."
+  ],
+  "assessment": "B0-B4 employee implementation reports exist; Beta release/user acceptance remains incomplete.",
+  "limitations": [
+    "Controlled interleaving probes, not throughput/load tests.",
+    "No network or production mutations; synthetic temporary data.",
+    "Current process/listener observation is a snapshot, not a proven cause of outage."
+  ],
+  "observations": [
+    "DSH existing conversation has final BETA-1023 B0-B4 report and idle send control.",
+    "Local listener inspection: 3080 present; no listeners on 8080/8083/8084.",
+    "B1 source report: 35 attempted, zero acquired due to SSRF/fake-IP; sample remains two companies.",
+    "Current screen API/source selection supports configured cache and user datasets; product-side adapter preparation path not demonstrated.",
+    "B4 fresh data directory retained current repository source and untracked sample; does not establish independent clean-package completeness."
+  ]
+}

@@ -35,6 +35,9 @@ _NAME_SANDBOX = "code_sandbox"
 _NAME_PLANNER = "planner"
 _NAME_MCP = "mcp"
 _NAME_LORA = "lora"
+_NAME_REDIS = "redis"  # 任务20
+_NAME_DATA_SOURCES = "data_sources"  # 用户自加数据源（设置页配置）
+_NAME_EGRESS = "network_egress"  # 公网出口 DNS 分类（RUNTIME-1022 P0-B）
 
 # 状态语义（专项 §6）：缺快照与过期都不能是绿色可用
 STATE_AVAILABLE = "available"
@@ -246,6 +249,26 @@ def probe_search() -> dict:
     return _entry(_NAME_SEARCH, state == STATE_DEGRADED,
                   "引擎不健康：" + ", ".join(unhealthy), detail=detail,
                   checked_at=checked, state=state)
+
+
+def probe_redis() -> dict:
+    """Redis 自身（任务20）：**直接探测**，不看任何 Redis 快照——它是别人的证据通道，
+    它挂了的时候"读它的快照"这条路本来就不通。
+
+    不可用 = `unavailable`（队列/结果通道中断，任务无法派发与回传）；可用 = `available`
+    （延迟进 detail）。探测结果按 TTL 缓存，避免每一次健康轮询都真连一次。
+    """
+    import redis_health
+    snap = redis_health.status_snapshot()
+    if not snap.get("available"):
+        return _entry(_NAME_REDIS, False,
+                      f"Redis 不可用：{snap.get('error') or '连接失败'}"
+                      + ("（降级模式）" if snap.get("degraded_mode") else ""),
+                      detail=f"degraded={bool(snap.get('degraded_mode'))}",
+                      state=STATE_UNAVAILABLE)
+    return _entry(_NAME_REDIS, True, "",
+                  detail=f"latency={snap.get('latency_ms')}ms",
+                  state=STATE_AVAILABLE)
 
 
 def probe_market_source() -> dict:
@@ -462,7 +485,13 @@ def _live_probe_llm(target: str) -> dict:
     result = _probe_endpoint_status(base, key, model)
     ok = bool(result.get("ok"))
     reason = "" if ok else str(result.get("reason") or "unreachable")
-    return _wrap(ok, reason, f"base={base[:60]}, model={model or '-'}")
+    # detail 优先放"端点自己说的话"（带域名与状态码含义）：此前只回显 base/model 配置，
+    # 而 reason 枚举会被前端翻成"密钥无效或无权限"/"不可达"——端点错、模型名错、
+    # 真连不上这三类不同成因因此在界面上分不开（实测代价见 _probe_failure_message）。
+    msg = str(result.get("message") or "").strip()
+    detail = (f"{msg}（base={base[:60]}, model={model or '-'}）" if msg
+              else f"base={base[:60]}, model={model or '-'}")
+    return _wrap(ok, reason, detail)
 
 
 def _live_probe_embedding() -> dict:
@@ -478,7 +507,7 @@ def _live_probe_embedding() -> dict:
     import os as _os
     import urllib.error
     import urllib.request
-    from llm_client import _classify_probe_error
+    from llm_client import _classify_probe_error, _probe_failure_message
 
     section = _config_section("embedding")
     base = (_os.environ.get("EMBEDDING_BASE_URL") or str(section.get("base_url") or "")
@@ -503,12 +532,16 @@ def _live_probe_embedding() -> dict:
         ok = bool(raw)
         return _wrap(ok, "" if ok else "空响应", f"base={base[:60]}, model={model}")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:200]
-        reason = _classify_probe_error(
-            RuntimeError(f"HTTP {exc.code}: {detail}"))
-        return _wrap(False, reason, detail)
+        body = exc.read().decode("utf-8", errors="replace")[:200]
+        err = RuntimeError(f"HTTP {exc.code}: {body}")
+        # 嵌入失败最常见的原因不是"端点挂了"，而是"这个接入点没有嵌入能力/不认这个
+        # 嵌入模型名"（例如把 BAAI/bge-* 发给只提供对话模型的中转网关）。因此这里
+        # 也走同一句话生成器，让 detail 直接说清是模型名的问题还是端点的问题。
+        return _wrap(False, _classify_probe_error(err),
+                     _probe_failure_message(err, base, model))
     except Exception as exc:
-        return _wrap(False, _classify_probe_error(exc), str(exc)[:200])
+        return _wrap(False, _classify_probe_error(exc),
+                     _probe_failure_message(exc, base, model))
 
 
 def _live_probe_mcp() -> dict:
@@ -552,9 +585,68 @@ def _live_probe_lora() -> dict:
                 "detail": "", "latency_ms": int((time.time() - started) * 1000)}
 
 
+def probe_data_sources() -> dict:
+    """用户自加数据源（设置页配置）的登记状态：只回数量/名称与密钥是否已配置，
+    **绝不回密钥值**。启用的源缺密钥（且非 none 鉴权）按降级报。"""
+    try:
+        from data_sources import enabled_sources, source_secret
+        sources = enabled_sources()
+    except Exception as exc:
+        return _unknown_entry("data_sources", f"数据源配置不可读：{str(exc)[:80]}")
+    if not sources:
+        return _entry(_NAME_DATA_SOURCES, True, "未配置用户数据源（设置页可添加）",
+                      detail="no sources", state=STATE_AVAILABLE)
+    missing_key: list[str] = []
+    for src in sources:
+        auth = str(src.get("auth") or "bearer")
+        if auth != "none" and not source_secret(src):
+            missing_key.append(str(src.get("id") or "?"))
+    if missing_key:
+        return _entry(_NAME_DATA_SOURCES, False,
+                      "启用的数据源缺 API 密钥：" + ", ".join(missing_key[:5]),
+                      detail=f"{len(sources)} 个已启用，{len(missing_key)} 个缺密钥",
+                      state=STATE_DEGRADED)
+    return _entry(_NAME_DATA_SOURCES, True, "",
+                  detail="已启用：" + ", ".join(str(s.get("id")) for s in sources[:8]),
+                  state=STATE_AVAILABLE)
+
+
+def probe_network_egress() -> dict:
+    """公网出口的可诊断性（RUNTIME-1022 P0-B，20261022）：DNS 分类，只解析不发请求。
+
+    诊断快照里资料域名被本机 DNS 映射到 198.18.0.x / 2001:2::x（fake-IP 特征），应用
+    按 SSRF 防线拒绝——此前用户只看到"没搜到/没有数据"，被误当成密钥或站点问题。这里
+    把"哪个目标、落在哪个保留段、下一步看哪里"讲清楚：解析已登记公网端点与已知内容
+    主机，按保留段归类；**绿的条件是真解析出了公网地址**。全部被挡 = unavailable，
+    部分被挡 = degraded（其它目标仍可用，不夸大成"所有网络均不可用"）。
+    """
+    try:
+        import net_diag
+        rep = net_diag.egress_report()
+    except Exception as exc:
+        return _unknown_entry(_NAME_EGRESS, f"出口诊断不可读：{str(exc)[:80]}")
+    state = str(rep.get("state") or "unknown")
+    summary = str(rep.get("summary") or "")
+    if state == "unknown":
+        return _unknown_entry(_NAME_EGRESS, summary or "无可诊断目标",
+                              detail="no targets")
+    counts = rep.get("counts") or {}
+    detail = (f"{rep.get('probed', 0)} 个目标；"
+              + " ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if state == "unavailable":
+        return _entry(_NAME_EGRESS, False, summary, detail=detail,
+                      checked_at=rep.get("checked_at"), state=STATE_UNAVAILABLE)
+    if state == "degraded":
+        return _entry(_NAME_EGRESS, True, summary, detail=detail,
+                      checked_at=rep.get("checked_at"), state=STATE_DEGRADED)
+    return _entry(_NAME_EGRESS, True, "", detail=detail,
+                  checked_at=rep.get("checked_at"), state=STATE_AVAILABLE)
+
+
 _PROBES = (
     probe_llm, probe_search, probe_market_source, probe_embedding, probe_sandbox,
-    probe_planner, probe_mcp, probe_lora,
+    probe_planner, probe_mcp, probe_lora, probe_redis, probe_data_sources,
+    probe_network_egress,
 )
 
 

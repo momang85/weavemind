@@ -1,0 +1,22 @@
+# 变更前基线 (RUNTIME-1022 P0-A)
+captured: 2026-10-22 21:15:08
+HEAD: c2e1065fa35f75ed33fc9fd69383d069e2bcdcfa (c5-market-comparison)
+
+## 本任务相关 dirty paths（不纳入本任务）
+ M docs/evidence/20261012-c5-review/README.md
+ M evals/cases/auto_grown.json
+?? docs/evidence/20261012-c5-review/c5_gui_20261013_entities.png
+?? docs/evidence/20261012-c5-review/c5_gui_20261013_reopened.png
+?? docs/evidence/20261012-c5-review/c5_gui_closure_20261013.json
+
+## 当前默认工作区根（各 shell 的 TEMP 不同则不同）
+TEMP=/tmp TMP=/tmp
+tempfile.gettempdir() = C:\Users\ding0\AppData\Local\Temp\dsh-win-bash-18344-7905fb0c
+
+## 在线实例
+  TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       24572
+
+## 已知历史根存在性
+EXISTS /c/Users/ding0/AppData/Local/Temp/agent_workspace/tasks (46 dirs)
+EXISTS /c/Users/ding0/AppData/Local/Temp/dsh-win-bash-37684-7b69ad23/agent_workspace/tasks (56 dirs)
+EXISTS /c/Users/ding0/AppData/Local/Temp/dsh-win-bash-37684-38250d7e/agent_workspace/tasks (21 dirs)

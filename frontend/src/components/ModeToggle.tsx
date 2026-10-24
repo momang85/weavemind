@@ -59,15 +59,15 @@ export default function ModeToggle({ compact = false }: { compact?: boolean }) {
             : '本地 LoRA 混合模式：小模型参与部分 Worker。点击切换为 全商业 API 模式'}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${
             isCloud
-              ? 'bg-sky-500/10 text-sky-400 border-sky-500/30 hover:bg-sky-500/20'
-              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
+              ? 'bg-sky-500/10 text-sky-700 border-sky-500/30 hover:bg-sky-500/20'
+              : 'bg-emerald-500/10 text-emerald-700 border-emerald-500/30 hover:bg-emerald-500/20'
           }`}>
           {loading
             ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
             : isCloud ? <Cloud className="w-3.5 h-3.5" /> : <Cpu className="w-3.5 h-3.5" />}
           <span>{isCloud ? '云端 API' : '本地 LoRA'}</span>
         </button>
-        {error && <span className="ml-2 text-red-400 text-xs">{error}</span>}
+        {error && <span className="ml-2 text-red-700 text-xs">{error}</span>}
       </div>
     )
   }
@@ -75,10 +75,10 @@ export default function ModeToggle({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-3">
       <div className="text-right">
-        <div className={`text-xs font-medium ${isCloud ? 'text-sky-400' : 'text-emerald-400'}`}>
+        <div className={`text-xs font-medium ${isCloud ? 'text-sky-700' : 'text-emerald-700'}`}>
           {isCloud ? '全商业 API' : '本地 LoRA 混合'}
         </div>
-        <div className="text-xs text-slate-500 max-w-[180px] truncate" title={
+        <div className="text-xs text-ink-faint max-w-[180px] truncate" title={
           isCloud
             ? '所有 Worker 调用云端大模型（DeepSeek/SiliconFlow），稳定优先'
             : '小模型（Qwen2.5-7B + LoRA）参与 content_summary 等部分 Worker，云端兜底'
@@ -93,7 +93,7 @@ export default function ModeToggle({ compact = false }: { compact?: boolean }) {
         title={demoMode ? '演示模式下已停用（切换会真实改写 LLM 路由）' : '点击切换 LLM 运行模式'}>
         <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${isCloud ? 'left-6' : 'left-0.5'}`} />
       </button>
-      {error && <span className="text-red-400 text-xs">{error}</span>}
+      {error && <span className="text-red-700 text-xs">{error}</span>}
     </div>
   )
 }

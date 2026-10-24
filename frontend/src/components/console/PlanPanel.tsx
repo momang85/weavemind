@@ -92,13 +92,13 @@ export default memo(function PlanPanel({
   }, [awaitingConfirm, editableSteps, planTree])
 
   return (
-    <div className="col-span-1 lg:col-span-2 self-start bg-slate-900 border border-slate-800 rounded-xl p-5">
-      <h2 className="flex items-center gap-2 text-slate-200 font-semibold text-sm mb-4">
-        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-        {awaitingConfirm ? '计划待确认（可编辑）' : 'Execution Plan'}
+    <div className="col-span-1 lg:col-span-2 self-start bg-surface border border-line rounded-xl p-5">
+      <h2 className="flex items-center gap-2 text-ink font-semibold text-sm mb-4">
+        <span className="w-1.5 h-1.5 rounded-full bg-brand" />
+        {awaitingConfirm ? '计划待确认（可编辑）' : '研究执行计划'}
       </h2>
       {awaitingConfirm && (
-        <div className="mb-3 text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+        <div className="mb-3 text-xs text-amber-700/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
           可上下移动、删除步骤或添加新步骤；确认后按你的计划执行。
         </div>
       )}
@@ -106,43 +106,43 @@ export default memo(function PlanPanel({
         <TaskTreeView root={editTree ?? planTree} onSelect={onSelectStep}
           editable={awaitingConfirm} onMove={moveStep} onDelete={removeStep} />
       ) : (
-        <div className="flex flex-col items-center justify-center h-64 text-slate-600">
+        <div className="flex flex-col items-center justify-center h-64 text-ink-faint">
           <Sparkles className="w-8 h-8 mb-3 opacity-20" />
-          <p className="text-sm">{isRunning ? 'Generating plan...' : 'Execution plan will appear here'}</p>
-          <p className="text-xs mt-1 opacity-60">{isRunning ? 'Orchestrator working' : 'Submit a task to begin'}</p>
+          <p className="text-sm">{isRunning ? '正在整理研究计划…' : '尚未生成执行计划'}</p>
+          <p className="text-xs mt-1">{isRunning ? '计划生成后会在此显示进度' : '开始研究后，可在这里查看每一步的来源与结果'}</p>
         </div>
       )}
       {awaitingConfirm && (
         <div className="mt-4 space-y-3">
           {revision && (
-            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+            <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
               <RefreshCw className="w-3.5 h-3.5 shrink-0" />
               搜索未获得可用结果，已建议改为直接生成。确认后按修订计划执行。
             </div>
           )}
           <div className="flex gap-2">
             <select value={newCap} onChange={e => setNewCap(e.target.value)}
-              className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-300 shrink-0">
+              className="bg-surface-raised border border-line-strong rounded-lg px-2 py-1.5 text-xs text-ink shrink-0">
               {CAPABILITIES.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
             <input value={newInstr} onChange={e => setNewInstr(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') addStep() }}
               placeholder="新步骤指令（回车添加）..."
-              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none" />
+              className="flex-1 bg-surface-raised border border-line-strong rounded-lg px-3 py-1.5 text-xs text-ink placeholder-ink-faint focus:outline-none" />
             <button onClick={addStep}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs shrink-0">
+              className="px-3 py-1.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-xs shrink-0">
               <Plus className="w-3.5 h-3.5 inline" /> 添加
             </button>
           </div>
           <div className="flex gap-2">
             <button onClick={() => confirmPlan('confirm')} disabled={demoMode}
               title={demoMode ? '演示模式下已停用（确认后会真实继续执行并产生费用）' : '确认计划并开始执行'}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 rounded-lg text-sm border border-emerald-500/30 transition-colors disabled:opacity-40">
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 rounded-lg text-sm border border-emerald-500/30 transition-colors disabled:opacity-40">
               <Play className="w-4 h-4" /> 确认并执行（{editableSteps.length} 步）
             </button>
             <button onClick={() => confirmPlan('cancel')} disabled={demoMode}
               title={demoMode ? '演示模式下已停用' : '放弃本次任务'}
-              className="px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm border border-red-500/20 transition-colors disabled:opacity-40">
+              className="px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-700 rounded-lg text-sm border border-red-500/20 transition-colors disabled:opacity-40">
               放弃
             </button>
           </div>

@@ -1,0 +1,46 @@
+{
+  "task": "drill-u90-recovery",
+  "goal": "研究三一重工 2023 与 2024 年度经营情况（演练）",
+  "findings": {
+    "cas_resume": true,
+    "dispatched": [
+      "1",
+      "2",
+      "3",
+      "3a",
+      "4"
+    ],
+    "only_unfinished_dispatched": true,
+    "no_duplicate_dispatch": true,
+    "resumed_flags": {
+      "1": true,
+      "2": true
+    },
+    "no_failure": true,
+    "missing_workspace_full_rerun": true,
+    "missing_workspace_resumed_none": true,
+    "PASS": true,
+    "detail_flags": {
+      "fresh_step3_result": true,
+      "covers_all_steps": true,
+      "step_resumed_audit": true
+    }
+  },
+  "log": [
+    "[隔离] 临时数据根 C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_u90_drill_lgadz57n（agents.db + workspace，均临时）",
+    "[隔离] 任务 drill-u90-recovery 已落库：步骤 1/2 = SUCCESS，3 = FAILED，3a/4 未落（模拟中断）",
+    "[恢复前] task_state 状态 = FAILED（FAILED 可恢复）",
+    "[恢复] mark_resumed（CAS 单赢）→ True；状态 = RUNNING",
+    "    [派发] 步骤 3（data_analyzer）→ 新执行（模拟计费一次）",
+    "    [派发] 步骤 3a（content_summary）→ 新执行（模拟计费一次）",
+    "    [派发] 步骤 4（report_generator）→ 新执行（模拟计费一次）",
+    "[恢复后] 派发序列 = ['3', '3a', '4']（期望只有 3、3a、4）",
+    "[审计] {'task_id': 'drill-u90-recovery', 'type': 'log', 'payload': {'type': 'info', 'agent': 'orchestrator', 'message': '断点续跑（step_resumed）：跳过 2/5 个已完成步骤（1, 2）', 'timestamp': '2026-10-20T10:19:21.337494+00:0",
+    "    [派发] 步骤 1（web_search）→ 新执行（模拟计费一次）",
+    "    [派发] 步骤 2（content_analysis）→ 新执行（模拟计费一次）",
+    "    [派发] 步骤 3（data_analyzer）→ 新执行（模拟计费一次）",
+    "    [派发] 步骤 3a（content_summary）→ 新执行（模拟计费一次）",
+    "    [派发] 步骤 4（report_generator）→ 新执行（模拟计费一次）",
+    "[负例] 工作区被删后恢复 → 派发序列 = ['1', '2', '3', '3a', '4']（期望全部 5 步重跑）"
+  ]
+}

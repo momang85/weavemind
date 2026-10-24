@@ -1,0 +1,84 @@
+{
+ "_meta": {
+  "captured": "2026-10-21T12:56+0800",
+  "after": "python launcher.py restart（16/16 服务已加载补修代码）",
+  "method": "只读 in-process：delivery_pipeline.package_statuses + delivery_state（页面/导出/清单共用读取口径），未写任务工作区、未调模型",
+  "note": "与 web_ui._export_payload 同一数据源；R2 裁决样本（旧包 selection 身份 d290ab01… ≠ 采纳 23b61bee…）现在被页面口径如实判 historical。"
+ },
+ "ui-cc853cf86b": {
+  "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-cc853cf86b",
+  "package_statuses": {
+   "current": "",
+   "has_current": false,
+   "note": "没有任何包与当前采纳稿同版（需重新导出）",
+   "adopted_identity": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+   "packages": [
+    {
+     "name": "deliverables_20261020_184232.zip",
+     "status": "historical",
+     "reason": "包内身份 b77dbdc24145 != 当前采纳 23b61beeb37a：历史/过期包，不得当当前稿下载"
+    },
+    {
+     "name": "deliverables_20261020_201859_478d5a.zip",
+     "status": "historical",
+     "reason": "包内选择记录 d290ab012e54 != 当前采纳 23b61beeb37a：这一版导出与选择记录不同源，旧包保留但不得当当前稿下载（重新导出即生成同版包）",
+     "selection_identity": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9"
+    },
+    {
+     "name": "deliverables_20261020_204948_375af7.zip",
+     "status": "historical",
+     "reason": "包内选择记录 d290ab012e54 != 当前采纳 23b61beeb37a：这一版导出与选择记录不同源，旧包保留但不得当当前稿下载（重新导出即生成同版包）",
+     "selection_identity": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9"
+    }
+   ]
+  },
+  "report_bytes": 26207,
+  "delivery_state": {
+   "status": "verified",
+   "draft": false,
+   "verified": true,
+   "draft_reason": "",
+   "version_id": "0699a73bb88f4ae590c29968b346a614a34b21d606b05538e226af0a9999815a",
+   "identity_id": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+   "acceptance_overall": "pass",
+   "accepted_body_matches": true,
+   "aligned": true,
+   "hard_fail": "",
+   "review_valid": true,
+   "delivered_sha256": "c3c2aa933f38f06313caf69ed99dc182c01d27266f965098539962a4e56f8858",
+   "delivered_at": 1792499630.5184553
+  }
+ },
+ "ui-91677c7767": {
+  "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-91677c7767",
+  "package_statuses": {
+   "current": "",
+   "has_current": false,
+   "note": "没有任何包与当前采纳稿同版（需重新导出）",
+   "adopted_identity": "6d5e46552523d134f350e56e9c5c64f14b593d11986e804e08976facff26a084",
+   "packages": [
+    {
+     "name": "deliverables_20261020_212027.zip",
+     "status": "historical",
+     "reason": "包内身份 3cb1f60d0c59 != 当前采纳 6d5e46552523：历史/过期包，不得当当前稿下载"
+    }
+   ]
+  },
+  "report_bytes": 6972,
+  "delivery_state": {
+   "status": "verified",
+   "draft": false,
+   "verified": true,
+   "draft_reason": "",
+   "version_id": "619159be16258bcc23a91d558cbecad276588a4c1635e36a5b0b3f5003e625ad",
+   "identity_id": "6d5e46552523d134f350e56e9c5c64f14b593d11986e804e08976facff26a084",
+   "acceptance_overall": "pass",
+   "accepted_body_matches": true,
+   "aligned": true,
+   "hard_fail": "",
+   "review_valid": true,
+   "delivered_sha256": "3a0a31636f009e38f5bdf0c52933727dcbf0abc4e8b0f338e912fcc45f982328",
+   "delivered_at": 1792502488.4369314
+  }
+ }
+}

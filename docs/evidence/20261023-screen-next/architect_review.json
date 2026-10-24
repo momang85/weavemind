@@ -1,0 +1,63 @@
+{
+  "reviewed_on": "2026-10-23",
+  "head": "ed8fd90",
+  "scope": "R1-SCREEN-1023 uncommitted implementation; independent local synthetic probes and source/report inspection, not a complete acceptance or production check",
+  "isolated_probes_exit_code": 0,
+  "file_hashes": [
+    {
+      "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\stock_screen.py",
+      "Hash": "13911355139E61C8A47228F647CF0D8D658648EE6B2F95B1461B026B5B66B901"
+    },
+    {
+      "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\screen_store.py",
+      "Hash": "ABADCFF03C45D6538073960633DD9DC813B02D5E71BA1BAF31CD634C800ED15E"
+    },
+    {
+      "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\web_ui.py",
+      "Hash": "286AF6BA64373FDC3FF73F489E3B3D05F6FD9C8A369DF0DF3943D53A5366015D"
+    },
+    {
+      "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\frontend\\src\\pages\\StockScreen.tsx",
+      "Hash": "2A34340F6254E57D001213BF0F7AB5C0CE420D6098FE738E147AE0996C2E8EC9"
+    }
+  ],
+  "observed_probes": [
+    {
+      "name": "sort_identity",
+      "same_run_id": true,
+      "different_result_hash": true,
+      "ascending": [
+        "002001.SZ",
+        "002002.SZ"
+      ],
+      "descending_expected": [
+        "002002.SZ",
+        "002001.SZ"
+      ],
+      "descending_actual": [
+        "002001.SZ",
+        "002002.SZ"
+      ],
+      "reused": true
+    },
+    {
+      "name": "integrity_reuse",
+      "errors": [],
+      "returned_integrity": "hash_mismatch",
+      "reused": true
+    },
+    {
+      "name": "exact_id_lookup",
+      "nonexistent_full_id_resolved": true,
+      "resolved_id": "aaaaaaaaaaaaaaaa1111111111111111",
+      "requested_id": "aaaaaaaaaaaaaaaa2222222222222222"
+    }
+  ],
+  "source_confirmed_gaps": [
+    "screen roots, lists, presets and API read/write calls do not bind server user/project scope; DSH also explicitly reports shared instance-level storage",
+    "public UI/API read a single server-configured cache; no user-upload dataset selection loop is present",
+    "latest conflicting period can fall back to an earlier period and still pass rules; explanatory notes do not make periods comparable"
+  ],
+  "safeguards": "All probe files generated inside a new TemporaryDirectory; WEAVEMIND_TEST_MODE enabled and SCREEN_DIR pointed to that test root. No production service/config/credentials/data mutation, network request, LLM call or git state change.",
+  "dispositions": "R1 prototype has useful progress but is not fully accepted or production-ready. Next employee work must correct identity, integrity and scope first; do not deploy, commit or push without new explicit authorization."
+}

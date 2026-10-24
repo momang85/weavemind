@@ -1,0 +1,290 @@
+{
+ "batch": "U90-R4",
+ "date": "2026-10-21",
+ "cost": "0（本批零新增付费模型调用：成稿/装配/导出全为确定性代码路径，新候选来自仓库夹具与真机冻结副本；未启动编排器与任何 worker 任务）",
+ "root_cause": "成稿器的来源声明按 `any(c.type == 'third_party')` 判『是否有外部来源』，发行人年报/公告类引用（issuer_annual_report）与已准入的用户材料都不计入，于是『只引用发行人披露』被写成『未引用外部数据源，结论仅为模型知识』；检索降级/零命中也完全不进声明。",
+ "defect_live": {
+  "task": "ui-cc853cf86b",
+  "frozen_citation_types": [
+   "issuer_annual_report"
+  ],
+  "frozen_citation_sample": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.",
+  "old_statement": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；本报告未引用外部数据源，结论仅为模型知识，未经检索验证；据此操作风险自担。",
+  "new_statement_same_sources": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自发行人公开披露（年报/公告原文），可能存在延迟或误差；本次外部检索降级运行（检索步由非检索执行者代做），报告来源以实际采用的来源清单为准，公开信息可能不完整；据此操作风险自担。",
+  "degraded_reason": "检索步由非检索执行者代做"
+ },
+ "code_changes": {
+  "report_quality.py": {
+   "sha256": "8c34c6c98c9fe9b7272945038bcdf4388f4fa23c8c60376e4d8492051afb0bf6"
+  },
+  "report_brief.py": {
+   "sha256": "2a39bba2d0357203bc450d912d112f890ae52fcbb66926d8c46e22b540ec2428"
+  },
+  "acceptance_checker.py": {
+   "sha256": "b07ddd46171741274166183f441d4dd6f621c934127d5c9dfe7ed61fae60bb5d"
+  },
+  "orchestrator_v2.py": {
+   "sha256": "dfd307e79349e40de84af8414a6d4beee3cff880e0b51f20c675f7737ae243db"
+  },
+  "workers/report_generator_worker.py": {
+   "sha256": "d5d01d75c68e810015b2172bbfc4140b136958120c4a5f55a73009dcd2245bff"
+  },
+  "test_report_quality.py": {
+   "sha256": "dbfb075eec1f79a04dc2971c9e2ddf9eaea49e07eb33d865b86f78666f6a0cde"
+  },
+  "test_task25_disclaimer_enforcement.py": {
+   "sha256": "e3a1b4d1aa8e0f97135e2ddedb5dfdf1ebff954c448538d9a8e74c2b42d30a57"
+  }
+ },
+ "unit_evidence": {
+  "test_report_quality": "49 OK（新增 TestU90R4SourceStatement 4 例：全来源/零来源/材料直供+检索降级/材料状态取准入而非目标关键词）",
+  "test_task25_disclaimer_enforcement": "20 OK（基准句与编排器提示、worker 兜底逐字一致）",
+  "test_task22_report_compaction": "28 OK",
+  "test_r0_boundaries": "48 OK",
+  "test_task26_checkpointer": "55 OK",
+  "test_frontend_guards": "69 OK",
+  "test_offline_delivery": "41 OK",
+  "test_delivery_chain": "422 OK（含 R2 的 TestSelectionIdentitySameSnapshot）",
+  "test_orchestrator_v2（与 test_task26_checkpointer 联跑）": "156 OK"
+ },
+ "statement_layer": {
+  "script": ".tmp/r4_statement_drill.py",
+  "verdict": null,
+  "results": [
+   {
+    "check": "A.frozen_structure_citations",
+    "ok": true,
+    "detail": "[{\"type\": \"issuer_annual_report\", \"admission\": \"admitted\"}]"
+   },
+   {
+    "check": "A.recollect_keeps_external_source",
+    "ok": true,
+    "detail": "[{\"type\": \"issuer_annual_report\", \"url\": \"http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.\"}]"
+   },
+   {
+    "check": "A.before_statement_was_zero_source",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；本报告未引用外部数据源，结论仅为模型知识，未经检索验证；据此操作风险自担。"
+   },
+   {
+    "check": "A.after_names_issuer_disclosure",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自发行人公开披露（年报/公告原文），可能存在延迟或误差；本次外部检索降级运行（检索步由非检索执行者代做），报告来源以实际采用的来源清单为准，公开信息可能不完整；据此操作风险自担。"
+   },
+   {
+    "check": "A.acceptance_disclaimer_pass",
+    "ok": true,
+    "detail": "免责声明/AI 标识：包含，'不构成投资建议'：包含，AI 生成标识：包含，通过"
+   },
+   {
+    "check": "B.store_and_admit_material",
+    "ok": true,
+    "detail": ""
+   },
+   {
+    "check": "B.material_registered_from_intake_state",
+    "ok": true,
+    "detail": "[{\"n\": 1, \"url\": \"material://16b7b3310edd2423\", \"title\": \"洋河股份 2024 年年度报告\", \"type\": \"user_material\", \"publisher\": \"16b7b3310edd2423\", \"admission\": \"admitted\", \"used_by\": [\"用户材料\"], \"provenance\": \"official_discovery\"}]"
+   },
+   {
+    "check": "B.degraded_reason_zero_results",
+    "ok": true,
+    "detail": "检索零命中"
+   },
+   {
+    "check": "B.statement_is_material_clause_with_degraded_note",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自用户提供的材料及据此进行的计算（材料真实性未经独立核实，计算过程可复核）；本次外部检索降级运行（检索零命中），报告来源以实际采用的来源清单为准，公开信息可能不完整；据此操作风险自担。"
+   },
+   {
+    "check": "B.acceptance_disclaimer_pass",
+    "ok": true,
+    "detail": "免责声明/AI 标识：包含，'不构成投资建议'：包含，AI 生成标识：包含，通过"
+   },
+   {
+    "check": "C.zero_source_states_model_knowledge",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；本报告未引用外部数据源，结论仅为模型知识，未经检索验证；据此操作风险自担。"
+   },
+   {
+    "check": "D.old_packages_listed",
+    "ok": true,
+    "detail": "{\"deliverables_20261020_180828_e1871e.zip\": \"323ef1de68d82a53\", \"deliverables_20261020_201859_478d5a.zip\": \"5d7f7bb4035840c8\", \"pack-2069a73b.zip\": \"c8005aaaa7ca1eaf\", \"ui-91677c7767-resumed.zip\": \"cedec8fb0af0263a\"}"
+   }
+  ],
+  "material_direct_clause": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自用户提供的材料及据此进行的计算（材料真实性未经独立核实，计算过程可复核）；本次外部检索降级运行（检索零命中），报告来源以实际采用的来源清单为准，公开信息可能不完整；据此操作风险自担。",
+  "zero_source_clause": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；本报告未引用外部数据源，结论仅为模型知识，未经检索验证；据此操作风险自担。"
+ },
+ "flow_layer": {
+  "script": ".tmp/r4_flow_package.py",
+  "path_followed": "生产『人工复核修订重装』同一顺序（web_ui._post_task_revise）：store.record → store.adopt → accept_for_body(trigger='人工修订重验') → assemble_and_verify → export_snapshot → repack_adopted",
+  "verdict": null,
+  "case_a_verified": {
+   "status": "verified",
+   "package": "deliverables_20261021_123221_c92525.zip",
+   "statement": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自第三方平台/媒体公开信息，可能存在延迟或误差；据此操作风险自担。",
+   "identity": "c48958a74a56f2fc49ea58474149d597b778ae24e413de02b64febf03afd88e6"
+  },
+  "case_b_draft": {
+   "status": "draft",
+   "package": "",
+   "statement": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；本报告未引用外部数据源，结论仅为模型知识，未经检索验证；据此操作风险自担。"
+  },
+  "results": [
+   {
+    "check": "u90r4-flow-src.candidate_built",
+    "ok": true,
+    "detail": "4572B"
+   },
+   {
+    "check": "u90r4-flow-src.candidate_stmt_from_sources",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自第三方平台/媒体公开信息，可能存在延迟或误差；据此操作风险自担。"
+   },
+   {
+    "check": "u90r4-flow-src.assembled_verified",
+    "ok": true,
+    "detail": "status=verified hard_fail= acc=pass"
+   },
+   {
+    "check": "u90r4-flow-src.adopted_is_candidate",
+    "ok": true,
+    "detail": "identity=c48958a74a56 acc=pass"
+   },
+   {
+    "check": "u90r4-flow-src.new_package_created",
+    "ok": true,
+    "detail": "deliverables_20261021_123221_c92525.zip"
+   },
+   {
+    "check": "u90r4-flow-src.package_statement_matches_sources",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自第三方平台/媒体公开信息，可能存在延迟或误差；据此操作风险自担。"
+   },
+   {
+    "check": "u90r4-flow-src.package_identity_same_snapshot",
+    "ok": true,
+    "detail": "manifest=c48958a74a56 adopted=c48958a74a56 evidence=same_as_adopted_body"
+   },
+   {
+    "check": "u90r4-flow-src.members_all_hash_ok",
+    "ok": true,
+    "detail": "异常=[]"
+   },
+   {
+    "check": "u90r4-flow-zero.candidate_built",
+    "ok": true,
+    "detail": "4439B"
+   },
+   {
+    "check": "u90r4-flow-zero.candidate_stmt_from_sources",
+    "ok": true,
+    "detail": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；本报告未引用外部数据源，结论仅为模型知识，未经检索验证；据此操作风险自担。"
+   },
+   {
+    "check": "u90r4-flow-zero.stays_draft_without_facts",
+    "ok": true,
+    "detail": "status=draft hard_fail=底稿未达标（6 项问题 / 0 项必需事实缺口）：营业收入 2023年 没有来源位置：不得算已核验；归母净利润 2023年 没有来源位置：不得算已核验；经营活动现金流净额 2023年 没有来源位置：不得算已核验"
+   },
+   {
+    "check": "u90r4-flow-zero.adopted_is_candidate",
+    "ok": true,
+    "detail": "identity=f664f7b7ecd9 acc=pass"
+   }
+  ]
+ },
+ "new_package": {
+  "name": "deliverables_20261021_123221_c92525.zip",
+  "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\dsh-win-bash-37684-38250d7e\\wm_r4_flow_4fsxp9en\\tasks\\projects\\default\\u90r4-flow-src\\deliverables_20261021_123221_c92525.zip",
+  "sha256": "b03b9f46772dedce0a3ead0026175c3b45723ffe673ad8da66cd6c30910ae81a",
+  "bytes": 15691,
+  "manifest_member": "PACKAGE_MANIFEST.json",
+  "manifest_schema": "weavemind.package/2",
+  "manifest_report_version_id": "c48958a74a56f2fc49ea58474149d597b778ae24e413de02b64febf03afd88e6",
+  "manifest_delivered_sha256": "41cd2b7ed53720500f0f1354d696075f68b2801eada1ea5bd645565dca843c0a",
+  "manifest_research_body_sha256": "41cd2b7ed53720500f0f1354d696075f68b2801eada1ea5bd645565dca843c0a",
+  "manifest_binding_verified": true,
+  "manifest_drift": {},
+  "manifest_selection_identity": "",
+  "manifest_files_all_match": true,
+  "members": {
+   "reports/report.md": {
+    "sha256": "41cd2b7ed53720500f0f1354d696075f68b2801eada1ea5bd645565dca843c0a",
+    "bytes": 10806,
+    "in_manifest": true,
+    "manifest_match": true
+   },
+   "reports/report_body.md": {
+    "sha256": "00a75f7a80d1d023ba92868bcdede0825bc92469303320c2c2e1538eadc513e2",
+    "bytes": 9273,
+    "in_manifest": true,
+    "manifest_match": true
+   },
+   "working_paper.json": {
+    "sha256": "b25fa9bfa28ba027bc8d846f0f13b5475b2414c13baec1956436d0ec60cc1ae5",
+    "bytes": 19212,
+    "in_manifest": true,
+    "manifest_match": true
+   },
+   "working_paper.csv": {
+    "sha256": "2bc9bb4e22adff868cc2e312a16f64c1cf0a15ca37add75cd6b12dc148ce9e91",
+    "bytes": 4174,
+    "in_manifest": true,
+    "manifest_match": true
+   },
+   "audit/model_report_full_9b2932b0653b1d28.md": {
+    "sha256": "6bc176653897b30503dd9a2b6d6488b35b136756bab4fe4ec78478f9c59337af",
+    "bytes": 1677,
+    "in_manifest": true,
+    "manifest_match": true
+   },
+   "analysis/analysis_detail.md": {
+    "sha256": "7ac7b70006841464a53bcc0de5f5cd23c012f20aaf8957a040f146762d803f3b",
+    "bytes": 4970,
+    "in_manifest": true,
+    "manifest_match": true
+   }
+  },
+  "inner_statement": "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来自第三方平台/媒体公开信息，可能存在延迟或误差；据此操作风险自担。",
+  "adopted_identity": "c48958a74a56f2fc49ea58474149d597b778ae24e413de02b64febf03afd88e6"
+ },
+ "identity_chain": {
+  "same_version_in_one_export": true,
+  "adopted_identity": "c48958a74a56f2fc49ea58474149d597b778ae24e413de02b64febf03afd88e6",
+  "manifest_report_version_id": "c48958a74a56f2fc49ea58474149d597b778ae24e413de02b64febf03afd88e6",
+  "manifest_selection_identity": "",
+  "export_binding_evidence": "same_as_adopted_body",
+  "members_all_hash_ok": true,
+  "note": "采纳版本 → 交付正文 hash → 清单 report_version_id → 包内 reports/report.md 字节 → selection 身份，全部出自同一次导出；旧包不改写。"
+ },
+ "old_packages_readonly": {
+  "ui-cc853cf86b": {
+   "deliverables_20261020_184232.zip": {
+    "sha256": "1b8ef9893d4cf8d61cc950661e0160567a2f7f3f8d7cb6900356f3c30cb4b957",
+    "bytes": 140297
+   },
+   "deliverables_20261020_201859_478d5a.zip": {
+    "sha256": "5d7f7bb4035840c8b224639abd4c91ceee49c77a6726ae9b9b3f38f38138206e",
+    "bytes": 5545517,
+    "matches_drill_prefix": true
+   },
+   "deliverables_20261020_204948_375af7.zip": {
+    "sha256": "c8005aaaa7ca1eaf657c37679ba9bab31b3e02e0edbc818a273f0ad485dfb8e9",
+    "bytes": 5717706
+   }
+  },
+  "ui-91677c7767": {
+   "deliverables_20261020_212027.zip": {
+    "sha256": "cedec8fb0af0263a6a2745c27b293ee0dad778b6545afaadeca8506be70acc2c",
+    "bytes": 483290
+   }
+  }
+ },
+ "boundary": [
+  "R4 只改『新装配/新采纳』的声明生成；历史已采纳交付与旧包一律不改字节（见 old_packages）。",
+  "声明层四腿（真机冻结结构 / 零来源 / 材料直供+检索降级 / 旧包指纹）与流程腿（12/12）都跑在隔离临时工作区，未触碰任何真实任务工作区。",
+  "零来源例的草稿结论来自硬门槛（正文缺来源位置：营业收入 2023年 没有来源位置…），与声明无关——不是『零来源必然草稿』。",
+  "现网 565 个任务在库，全部 0 条已准入材料，且无任务留有可用底稿文件 → 真机上无法重跑成稿器产出新交付；流程腿用仓库夹具的契约/财务/正文复现同一条代码路径。",
+  "页面侧本批未见新声明（新声明只出现在新装配的交付物里）：页面渲染的是已采纳正文，旧交付按纪律保持原样，属于预期而非缺陷。"
+ ]
+}

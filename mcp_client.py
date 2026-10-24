@@ -21,15 +21,24 @@ _MCP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.jso
 
 
 class MCPClient:
-    """单条 MCP 连接（stdio 或 HTTP）。"""
+    """单条 MCP 连接（stdio 或 HTTP）。HTTP 型支持鉴权头（付费数据源/带 token 的网关）。"""
 
-    def __init__(self, name: str, command=None, args=None, url=None, timeout: float = 30.0):
+    def __init__(self, name: str, command=None, args=None, url=None, timeout: float = 30.0,
+                 headers=None, token: str = "", token_header: str = "Authorization",
+                 token_prefix: str = "Bearer "):
         self.name = name
         self.url = url
         self.timeout = timeout
         self._proc = None
         self._next_id = 1
         self._tools: list[dict] = []
+        # HTTP 型鉴权：headers 是配置里的非密钥头；token 来自密钥仓
+        # （mcp_servers.<name>.api_key），默认按 Authorization: Bearer 发送；
+        # `auth=header` 的服务可用 token_header/token_prefix 改成 X-API-Key 之类。
+        self.headers: dict = dict(headers or {})
+        if token:
+            hdr = str(token_header or "Authorization")
+            self.headers.setdefault(hdr, f"{token_prefix}{token}")
         if url:
             return
         if not command:
@@ -68,7 +77,9 @@ class MCPClient:
         }, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             self.url, data=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            headers={"Content-Type": "application/json",
+                     "Accept": "application/json, text/event-stream",
+                     **self.headers},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -112,6 +123,29 @@ class MCPClient:
                 pass
 
 
+def _server_auth(server: dict, name: str) -> tuple[str, str, str]:
+    """MCP HTTP 服务的鉴权：返回 (token, header 名, 前缀)。
+
+    密钥来源：环境变量 `WEAVEMIND_MCP_<NAME>_KEY` 优先，其次本机密钥仓
+    `mcp_servers.<name>.api_key`（设置页写入，**不进 config.json**）。
+    `auth=header` 的服务把 token 放进自定义头（无 Bearer 前缀），例如
+    Wind/iFinD 中转常见的 `X-API-Key`。
+    """
+    import re as _re
+    env_name = "WEAVEMIND_MCP_" + _re.sub(r"[^A-Z0-9]", "_", name.upper()) + "_KEY"
+    token = (os.environ.get(env_name) or "").strip()
+    if not token:
+        try:
+            import credentials
+            token = credentials.get_secret(f"mcp_servers.{name}.api_key")
+        except Exception:
+            token = ""
+    header = str(server.get("auth_header") or "Authorization")
+    mode = str(server.get("auth") or "bearer").lower()
+    prefix = "" if mode == "header" else "Bearer "
+    return token, header, prefix
+
+
 def load_mcp_servers(config: dict | None = None) -> list[MCPClient]:
     """从 config.json 的 mcp_servers 段创建 MCP 连接。"""
     if config is None:
@@ -124,12 +158,16 @@ def load_mcp_servers(config: dict | None = None) -> list[MCPClient]:
     clients = []
     for s in servers:
         try:
+            name = str(s.get("name") or "mcp")
+            token, token_header, token_prefix = _server_auth(s, name)
             clients.append(MCPClient(
-                name=str(s.get("name") or "mcp"),
+                name=name,
                 command=s.get("command"),
                 args=list(s.get("args") or []),
                 url=s.get("url"),
                 timeout=float(s.get("timeout") or 30),
+                headers=dict(s.get("headers") or {}) if isinstance(s.get("headers"), dict) else None,
+                token=token, token_header=token_header, token_prefix=token_prefix,
             ))
         except Exception:
             continue

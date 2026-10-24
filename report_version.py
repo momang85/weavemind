@@ -25,15 +25,32 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 VERSIONS_FILE = "report_versions.json"
 RENDERER_VERSION = "report_pdf/v1"
 TEMPLATE_VERSION = "default"
+
+
+def _detect_truncation(body: str, *, finish_reason: str = "") -> dict:
+    """正文截断证据（唯一实现放在 `report_brief`，这里只做**懒导入**转发）。
+
+    懒导入的原因：`report_brief` 是成稿层，`report_version` 是版本层，顶层互相引用会
+    把依赖方向搞乱；而这条判据必须在装配、版本登记、worker 三处**完全一致**。
+    """
+    try:
+        import report_brief
+        return report_brief.detect_body_truncation(body, finish_reason=finish_reason)
+    except Exception as exc:                     # noqa: BLE001 - 判不出不阻断读写
+        logger.warning("截断判据不可用：%s", str(exc)[:120])
+        return {}
 
 
 def body_hash(text: str) -> str:
@@ -71,6 +88,31 @@ class ReportVersion:
     # `report_version_id` 与版本库里那条记录对不上，审计无法对账。
     # 记录里存下来的身份才是权威（`record()` 就把它随记录一起写），这里只负责带上它。
     stored_identity: str = ""
+    # P0-1（2026-10-21 实机）：正文被长度上限截断的半截稿**曾被静默采纳**（缺口更少就赢），
+    # 页面/下载/包内因此不是同一份完整正文。截断是正文自身的属性，登记时算一次存下来。
+    truncated: bool = False
+    truncation: dict = field(default_factory=dict)   # detect_body_truncation 的证据
+
+    def truncation_info(self) -> dict:
+        """本版正文的截断证据；旧记录没存这个字段时**现算**（闸门对历史稿同样生效）。"""
+        info = self.truncation if isinstance(self.truncation, dict) else {}
+        if "truncated" not in info:
+            info = _detect_truncation(self.body)
+        return dict(info or {})
+
+    def body_truncated(self) -> bool:
+        return bool(self.truncation_info().get("truncated"))
+
+    def truncation_reason(self) -> str:
+        """"正文在第 X 节截断，内容不完整"（不截断时为空串）。"""
+        if not self.body_truncated():
+            return ""
+        info = self.truncation_info()
+        try:
+            import report_brief
+            return report_brief.truncation_sentence(info)
+        except Exception:                        # noqa: BLE001
+            return "正文被截断，内容不完整"
 
     def identity_id(self) -> str:
         """身份 = 正文 + 来源 + 规则：同正文但证据变化时不是同一个"已验收版本"。
@@ -183,6 +225,7 @@ class VersionStore:
                rules_fingerprint: str = "", parent_id: str = "", iteration: int = 0,
                policy_version: str = "", acceptance: dict | None = None) -> ReportVersion:
         """登记一版正文。同正文同证据重复登记视为同一版本（幂等）。"""
+        _trunc = _detect_truncation(body)
         v = ReportVersion(
             version_id=body_hash(body), body=str(body or ""), root_task_id=self.root_task_id,
             parent_id=parent_id, iteration=int(iteration or 0),
@@ -190,7 +233,11 @@ class VersionStore:
             rules_version=str(rules_version or ""), rules_fingerprint=str(rules_fingerprint or ""),
             acceptance=dict(acceptance or {}), policy_version=str(policy_version or ""),
             created_at=time.time(),
+            truncated=bool(_trunc.get("truncated")), truncation=_trunc,
         )
+        if v.truncated:
+            logger.warning("登记到**截断**正文（task=%s，%d 字符）：%s",
+                           self.root_task_id, len(v.body), v.truncation_reason() or "见证据")
         with self._lock:
             data = self._load()
             versions = data.setdefault("versions", {})
@@ -200,6 +247,9 @@ class VersionStore:
                 raw = versions[key]
                 if v.acceptance and not raw.get("acceptance"):
                     raw["acceptance"] = dict(v.acceptance)
+                if "truncated" not in raw:      # 旧记录补上截断证据（不改正文/身份）
+                    raw["truncated"] = v.truncated
+                    raw["truncation"] = v.truncation
                 self._save(data)
                 return _from_raw(raw)
             versions[key] = asdict(v)
@@ -304,7 +354,13 @@ class VersionStore:
 
     # ── 采纳（原子切换）─────────────────────────────────────
     def adopt(self, version: ReportVersion, *, reason: str = "") -> bool:
-        """切换选中版本。**已取消/已终态**的任务由调用方先行拦截，此处只做原子赋值。"""
+        """切换选中版本。**已取消/已终态**的任务由调用方先行拦截，此处只做原子赋值。
+
+        P0-1：采纳一份**截断**正文时留 WARNING（可被 `assertLogs` 断言）并把截断证据
+        写进该条目（`truncated`/`truncation_note`）——采纳动作本身仍执行（半截稿也可能
+        是当时唯一的稿），但**不得**再被当成"完整交付"：交付谓词会把它判成未验收草稿。
+        `adopt_reason` 保持调用方原样，绝不追写（它是审计字段，被逐字断言）。
+        """
         with self._lock:
             data = self._load()
             versions = data.setdefault("versions", {})
@@ -316,9 +372,17 @@ class VersionStore:
                 raw["adopted"] = False
             versions[key]["adopted"] = True
             versions[key]["adopt_reason"] = str(reason or "")
+            _info = version.truncation_info()
+            if _info.get("truncated"):
+                versions[key]["truncated"] = True
+                versions[key]["truncation"] = _info
+                versions[key]["truncation_note"] = str(_info.get("reason") or "")
             data["selected"] = key
             data["selected_at"] = time.time()
             self._save(data)
+        if _info.get("truncated"):
+            logger.warning("采纳了**截断**正文（task=%s，%s）：%s",
+                           self.root_task_id, key[:12], str(_info.get("reason") or "")[:200])
         return True
 
     def reject_late(self, reason: str = "") -> None:
@@ -329,23 +393,58 @@ class VersionStore:
             self._save(data)
 
     def record_delivery(self, delivered_body: str, *, accepted_body: str = "",
-                        ok: bool = False, reason: str = "") -> dict:
+                        ok: bool = False, reason: str = "", draft_reason: str = "",
+                        truncated: bool | None = None, truncation: dict | None = None,
+                        projection: dict | None = None) -> dict:
         """记录**最终交付正文**的 hash 与它对应的选中版本（M0-a）。
 
         交付正文 = 装配后的完整文档（交付说明 + 分隔 + 研究正文），与研究正文不是
         同一份字节，所以两者的 hash 都要留：验收对象是研究正文，交付物是前者。
         同一次投递重复记录只保留一条（按 delivered_sha256 去重）。
+
+        P0-2b（同版对齐）：这条记录同时是**本版正文身份**的登记处——
+        `projection` 写清"交付字节 sha256/字符数 + 研究正文 sha256/字符数 + 选中版本身份
+        + 主文相对路径"，读取侧（`delivery_pipeline.delivery_state`）按它核对页面投影、
+        下载字节与包内主文是不是同一份。`draft_reason` 是**结构化**的未交付原因
+        （截断/未验收/硬门槛…），页面与包内清单直接读它，不再各自拼条件。
         """
         adopted = self.adopted()
-        entry = {
+        _acc_sha = body_hash(accepted_body) if accepted_body else ""
+        _trunc = dict(truncation or {})
+        if truncated is None:
+            truncated = bool(_trunc.get("truncated"))
+        if not _trunc and truncated:
+            _trunc = _detect_truncation(accepted_body or delivered_body)
+        proj = {
+            "schema": "weavemind.delivery_projection/1",
+            "body_sha256": (adopted.version_id if adopted is not None else "") or _acc_sha,
+            "body_chars": len(str(accepted_body or "")),
+            "accepted_body_sha256": _acc_sha,
             "delivered_sha256": body_hash(delivered_body),
-            "accepted_body_sha256": body_hash(accepted_body) if accepted_body else "",
+            "delivered_chars": len(str(delivered_body or "")),
+            "version_id": (adopted.version_id if adopted is not None else ""),
+            "identity_id": (adopted.identity_id() if adopted is not None else ""),
+            "md_relpath": "reports/report.md",     # 包内/工作区主文相对路径
+            "truncated": bool(truncated),
+            "at": time.time(),
+        }
+        proj.update(dict(projection or {}))
+        entry = {
+            "delivered_sha256": proj["delivered_sha256"],
+            "accepted_body_sha256": _acc_sha,
             "report_version_id": adopted.identity_id() if adopted else "",
             "aligned": bool(adopted) and adopted.version_id == body_hash(accepted_body or ""),
             "ok": bool(ok),
             "reason": str(reason or ""),
+            "draft_reason": str(draft_reason or ""),
+            "truncated": bool(truncated),
+            "truncation": _trunc,
+            "projection": proj,
             "at": time.time(),
         }
+        if entry["truncated"]:
+            logger.warning("交付登记：本版正文为**截断**稿（task=%s）：%s",
+                           self.root_task_id, str(entry.get("draft_reason") or "")[:200])
         with self._lock:
             data = self._load()
             deliveries = data.setdefault("deliveries", [])
@@ -423,7 +522,8 @@ def verified_delivery(version: ReportVersion | None, delivered_body: str, *,
     `status ∈ {verified, draft, unknown}`，判断顺序即优先级：
 
     1. `unknown`：没有选中版本，或该版验收无法证明属于本正文（短 hash / 身份不符）；
-    2. `draft`：验收**不是 pass**（`overall != "pass"`）、交付正文与该版不一致（装配后变了）、
+    2. `draft`：正文**被截断**（P0-1：截断正文绝不算完整交付，理由写明"在第 X 节截断"）、
+       验收**不是 pass**（`overall != "pass"`）、交付正文与该版不一致（装配后变了）、
        任务硬约束未满足、或必需评审无效；
     3. `verified`：以上全部成立。
 
@@ -439,6 +539,9 @@ def verified_delivery(version: ReportVersion | None, delivered_body: str, *,
         why = ("该版只有短 hash 验收，需重验" if version.acceptance_needs_reverify()
                else "验收身份与本正文不符（未知）")
         return DELIVERY_UNKNOWN, why
+    if version.body_truncated():
+        return DELIVERY_DRAFT, (version.truncation_reason()
+                                + "：截断正文不得当作完整交付，需重跑报告生成或人工补全")
     overall = str(acc.get("overall") or "")
     if overall != "pass":
         return DELIVERY_DRAFT, f"验收未通过（overall={overall or '未知'}）"

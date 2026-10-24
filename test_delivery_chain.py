@@ -6576,13 +6576,20 @@ class TestReviewHonestyProjection(unittest.TestCase):
 
     def test_recorded_review_is_shown_with_approver_and_version(self):
         """真实研究员写入的批准（含批准者/时间/版本）原样呈现。"""
-        ws = self._ws({"report_structure.json": {"findings": []},
-                       "human_review.json": {"status": "recorded", "approver": "研究员甲",
-                                             "at": "2026-09-20T10:00:00", "version_id": "abc123"}})
+        from report_version import VersionStore
+        ws = self._ws({"report_structure.json": {"findings": []}})
+        store = VersionStore(ws, "ui-review-01")
+        version = store.record("已完成的研究正文。")
+        store.adopt(version)
+        (ws / "human_review.json").write_text(json.dumps({
+            "status": "recorded", "approver": "研究员甲",
+            "at": "2026-09-20T10:00:00", "version_id": version.identity_id(),
+        }, ensure_ascii=False), encoding="utf-8")
         human = (self._payload(ws).get("review") or {}).get("human") or {}
         self.assertEqual(human.get("status"), "recorded")
         self.assertEqual(human.get("approver"), "研究员甲")
-        self.assertEqual(human.get("version_id"), "abc123")
+        self.assertEqual(human.get("version_id"), version.identity_id())
+        self.assertTrue(human.get("bound"))
 
     def test_frontend_shows_both_columns(self):
         """结果页源码级：机器验收与人工复核必须各占一行，且待复核文案写明"不代表已复核"。"""
@@ -10251,6 +10258,225 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
                          "绑定里要保存真实规则指纹")
 
 
+class TestSelectionIdentitySameSnapshot(unittest.TestCase):
+    """U90-R2：采纳→selection→正文→冻结→MD/PDF/ZIP 必须是**同一次**版本快照。
+
+    架构师裁决（2026-10-20）实测反例：三一包 manifest `report_version_id=23b61bee…`
+    而包内 `analysis/selection.json.adopted_identity=d290ab01…`——同一份包里"正文这
+    一段 = 这一次运行"的读者核对不成立。修复后：
+    1. `rebind_selection_identity`：正文仍绑定所选运行（run_id 在正文里）才回绑；
+       证明不了就**不改**，如实报 `consistent=False`（调用方记进清单，不隐藏）；
+    2. `export_snapshot` 冻结**之前**回绑 → 冻结成员、清单 `analysis_inputs.selection`
+       与 manifest `report_version_id` 同一身份；
+    3. `assemble_and_verify` 换版后同步回绑（下一次导出前工作区就一致）。
+    """
+
+    tid = "r2-sel-1"
+
+    RUN_ID = "a1b2c3d4e5f6"
+    MODEL_ID = "glm-4.7"
+    OLD_IDENTITY = "d290ab012e54" + "0" * 52
+
+    def setUp(self):
+        import task_state
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_r2sel_"))
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "r2sel.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _seed_selection(self, *, adopted_identity: str = "") -> dict:
+        from financial_analysis import store as fa
+        ws = ws_mod.task_workspace(self.tid)
+        return fa.save_selection(ws, {
+            "model_id": self.MODEL_ID, "run_id": self.RUN_ID,
+            "dataset_hash": "ds-1", "selected_at": "2026-10-20T10:00:00",
+        }, adopted_identity=adopted_identity, note="离线用例选择")
+
+    def _seed_adopted(self, body: str):
+        from report_version import VersionStore
+        ws = ws_mod.task_workspace(self.tid)
+        store = VersionStore(ws, self.tid)
+        v = store.record(body)
+        store.adopt(v, reason="U90-R2 用例")
+        return store, v
+
+    BODY_WITH_RUN = (f"# 研究正文\n\n## 分析卡\n\n"
+                     f"模型 glm-4.7（run=a1b2c3d4e5f6）本次对两期经营数据…\n\n"
+                     f"## 参考来源\n\n1. [年报](https://example.com/a)\n")
+
+    BODY_OTHER = ("# 研究正文（另一版）\n\n## 分析卡\n\n模型其他运行（run=9999aaaabbbb）"
+                  "构成另一版正文。\n")
+
+    def test_rebind_requires_run_id_in_body_and_leaves_trail(self):
+        from financial_analysis import store as fa
+        ws = ws_mod.task_workspace(self.tid)
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        # 正文带着所选运行 → 回绑成功并留痕
+        new_id = "23b61bee" + "7" * 56
+        out = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_WITH_RUN,
+                                           reason="修订换版")
+        self.assertTrue(out["changed"], out)
+        self.assertTrue(out["consistent"], out)
+        self.assertEqual(out["from"], self.OLD_IDENTITY)
+        self.assertEqual(out["to"], new_id)
+        self.assertEqual(out["verified_by"], "run_id_in_body")
+        cur = fa.load_selection(ws)
+        self.assertEqual(cur.get("adopted_identity"), new_id)
+        self.assertEqual(cur.get("rebound_from"), self.OLD_IDENTITY,
+                         "回绑必须留痕（从哪一版绑到哪一版）")
+        self.assertEqual([e.get("run_id") for e in cur.get("entries") or []],
+                         [self.RUN_ID], "回绑不改选择条目本身")
+        # 幂等：同一身份再回绑 → changed=False, consistent=True
+        again = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_WITH_RUN)
+        self.assertFalse(again["changed"])
+        self.assertTrue(again["consistent"])
+        # 正文没有所选运行 → 拒绝回绑（不得用回绑造假归属）
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        denied = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_OTHER,
+                                              reason="另一版")
+        self.assertFalse(denied["changed"], denied)
+        self.assertFalse(denied["consistent"], denied)
+        self.assertIn("找不到所选运行", denied["reason"])
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"),
+                         self.OLD_IDENTITY, "拒绝时不落盘")
+        # 没有正文可核对 → 同样拒绝（不凭选择记录单方面改身份）
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        blind = fa.rebind_selection_identity(ws, new_id, body_text="")
+        self.assertFalse(blind["changed"])
+        self.assertFalse(blind["consistent"])
+        # 没有选择记录 → 无身份可绑，直接一致
+        fa.selection_path(ws).unlink(missing_ok=True)
+        empty = fa.rebind_selection_identity(ws, new_id, body_text=self.BODY_WITH_RUN)
+        self.assertFalse(empty["present"])
+        self.assertTrue(empty["consistent"])
+
+    def test_export_snapshot_rebinds_selection_before_freeze(self):
+        """清单身份、冻结 selection 成员、manifest.selection 三处同一身份。"""
+        import hashlib
+        import zipfile
+        import delivery_pipeline as dp
+        from financial_analysis import store as fa
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        store, v = self._seed_adopted(self.BODY_WITH_RUN)
+        ws = ws_mod.task_workspace(self.tid)
+        delivered = self.BODY_WITH_RUN
+        store.record_delivery(delivered, accepted_body=str(v.body or ""), ok=True)
+        md = delivered.encode("utf-8")
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=delivered,
+                                  md_bytes=md, pdf_bytes=b"%PDF-1.4 r2")
+        self.assertTrue(snap["selection_binding"].get("changed"),
+                        snap["selection_binding"])
+        self.assertEqual(snap["selection_binding"].get("to"), v.identity_id())
+        sel_blob = json.loads(bytes(snap["payload"]["analysis/selection.json"])
+                              .decode("utf-8"))
+        self.assertEqual(sel_blob.get("adopted_identity"), v.identity_id(),
+                         "冻结进包的选择记录必须是回绑后的这一版")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        m = res.get("manifest") or {}
+        self.assertEqual(m.get("report_version_id"), v.identity_id())
+        self.assertEqual((m.get("analysis_inputs") or {}).get("selection", {})
+                         .get("adopted_identity"), v.identity_id(),
+                         "清单 analysis_inputs.selection 必须与采纳身份一致（三一实测反例）")
+        self.assertTrue(m.get("selection_binding", {}).get("changed"))
+        self.assertEqual(m.get("delivered_md_sha256"),
+                         hashlib.sha256(md).hexdigest())
+        with zipfile.ZipFile(ws / res["package"]) as zf:
+            inner = json.loads(zf.read("analysis/selection.json").decode("utf-8"))
+            self.assertEqual(inner.get("adopted_identity"), v.identity_id())
+        # 工作区 selection 同步回绑：下一次导出不再出现两版
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"), v.identity_id())
+
+    def test_export_snapshot_keeps_inconsistency_visible_when_unprovable(self):
+        """正文不带所选运行 → 不回绑，但不一致必须**可见**（快照+清单），不假成功。"""
+        import delivery_pipeline as dp
+        from financial_analysis import store as fa
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        store, v = self._seed_adopted(self.BODY_OTHER)
+        ws = ws_mod.task_workspace(self.tid)
+        delivered = self.BODY_OTHER
+        store.record_delivery(delivered, accepted_body=str(v.body or ""), ok=True)
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=delivered,
+                                  md_bytes=delivered.encode("utf-8"))
+        sb = snap.get("selection_binding") or {}
+        self.assertFalse(sb.get("changed"), sb)
+        self.assertFalse(sb.get("consistent"), sb)
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"),
+                         self.OLD_IDENTITY, "证明不了就不改工作区")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        m = res.get("manifest") or {}
+        self.assertFalse((m.get("selection_binding") or {}).get("consistent"),
+                         "清单必须如实记录不一致（不隐藏）")
+        self.assertEqual((m.get("analysis_inputs") or {}).get("selection", {})
+                         .get("adopted_identity"), self.OLD_IDENTITY,
+                         "包内选择记录保持原样（不篡改）")
+        self.assertEqual(m.get("report_version_id"), v.identity_id())
+
+    def _seed_data(self) -> None:
+        """可验收的最小数据面：来源 + 图 + 图表清单（数字/来源成对）。"""
+        import task_state
+        ws = ws_mod.task_workspace(self.tid)
+        proj = ws_mod.task_project_dir(self.tid)
+        proj.mkdir(parents=True, exist_ok=True)
+        (ws / "charts").mkdir(parents=True, exist_ok=True)
+        (ws / "charts" / "chart_1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+        (proj / "search_results.json").write_text(json.dumps([{
+            "title": "贵州茅台2024年报：营收1741亿元_新浪财经",
+            "url": "https://finance.sina.com.cn/a/1",
+            "snippet": "贵州茅台2024年营收1741亿元，净利润862亿元。",
+        }], ensure_ascii=False), encoding="utf-8")
+        (proj / "chart_manifest.json").write_text(json.dumps({"charts": [
+            {"file": "chart_1.png", "chart_id": "core_scale",
+             "binding": {"chart_id": "core_scale", "metric_labels": ["营业收入"],
+                         "unit": "亿元", "periods": [2023, 2024], "caliber": "合并"},
+             "grade": "publish", "question": "两期核心指标规模对比如何？",
+             "observation": "两期核心指标均下降", "type": "grouped_bar"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+
+    BODY_ACCEPT = ("# 贵州茅台2024年报核心财务数据\n\n## 核心指标\n\n"
+                   "| 指标 | 数值 | 来源 |\n|---|---|---|\n"
+                   "| 营业收入 | 1741亿元 | [1] |\n| 净利润 | 862亿元 | [1] |\n\n"
+                   f"## 分析卡\n\n模型 {MODEL_ID}（run={RUN_ID}）"
+                   "本次对两期经营数据得出以下结论…\n\n"
+                   "## 数据时效\n\n数据截至 2024-12-31 年度报告披露日，来源为公开财经报道，"
+                   "日终更新。\n\n"
+                   "## 参考来源\n\n1. [贵州茅台2024年报：营收1741亿元]"
+                   "(https://finance.sina.com.cn/a/1)\n\n"
+                   "## 免责声明\n\n本报告由织光 AI 自动生成，仅供参考，不构成任何投资建议；"
+                   "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。\n")
+
+    def test_assembly_rebinds_selection_after_version_change(self):
+        """装配把采纳版本换掉后，工作区 selection 的身份必须跟到**这一版**。"""
+        from delivery_pipeline import assemble_and_verify, accept_for_body
+        from financial_analysis import store as fa
+        from report_version import VersionStore
+        import task_state
+        task_state.mark_queued(self.tid, goal="贵州茅台2024年报核心财务数据",
+                               db_path=task_state.DB_PATH)
+        self._seed_data()
+        self._seed_selection(adopted_identity=self.OLD_IDENTITY)
+        ws = ws_mod.task_workspace(self.tid)
+        body = self.BODY_ACCEPT
+        # 编排器口径：模型正文先登记并采纳（唯一采纳点），装配再把简报立为最终版
+        store0 = VersionStore(ws, self.tid)
+        v_raw = store0.record(body)
+        store0.adopt(v_raw, reason="U90-R2 用例：模型正文先采纳")
+        verdict = accept_for_body(self.tid, "贵州茅台2024年报核心财务数据", body,
+                                  trigger="R2 用例", prefer_body=True, ws_dir=ws) or {}
+        asm = assemble_and_verify(self.tid, "贵州茅台2024年报核心财务数据", body,
+                                  wrapper="# 交付说明",
+                                  accept_fn=lambda t, g, b: verdict or None, ws_dir=ws)
+        store = VersionStore(ws, self.tid)
+        adopted = store.adopted()
+        self.assertTrue(adopted is not None)
+        self.assertEqual(fa.load_selection(ws).get("adopted_identity"),
+                         adopted.identity_id(),
+                         "装配后工作区 selection 必须绑定最终采纳版本")
+
+
 class TestNightClosureCounterexamples(unittest.TestCase):
     """09-22 晚间收口：冻结本轮点名的确定性缺口（同值/归因/比率/别名/分母/指纹）。
 
@@ -11907,6 +12133,201 @@ class TestX0PackageAndSidecars(unittest.TestCase):
                              '{"accept": "old"}')
             # 缺文件时不制造空文件（快照里没有就不"恢复"）
             self.assertEqual(web_ui._sidecar_restore(ws, {}), [])
+
+
+class TestTruncationGateAndSameDelivery(unittest.TestCase):
+    """P0-1/P0-2b（20261021 实测反例）：截断正文必须被拦住、同版交付身份必须可核对。
+
+    实测 ui-8b28c95ab1：模型输出 4569 字符截断在 §4.1 中间，被无稿采用成当前稿并
+    交付（页面 5825 字）——而工作区 `reports/report.md`（9753 字）与包内 `reports/
+    report.md`（9836 字）是另外两份，页面横幅又读任务行里采纳版自己的验收（2 个缺
+    口），工作区 `acceptance_report.json` 却是最后一次对完整稿的验收（3 个缺口）。
+    这条链上每一环都必须自己拦截/自证，不能再靠"谁记得当时发生了什么"。
+    """
+
+    GOAL_NOTE = "截断闸门与同版身份（离线链，不调模型）"
+
+    def setUp(self):
+        import task_state
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_trunc_"))
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "trunc.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_truncated_body_is_flagged_not_silently_adopted(self):
+        """截断正文装配交付 → 必须标草稿、标注截断位置、留 WARNING、记 draft_reason。"""
+        from delivery_pipeline import (accept_for_body, assemble_and_verify,
+                                       delivery_state)
+        from report_version import DELIVERY_DRAFT
+        import report_brief
+        tid = "trunc-gate-1"
+        goal = "某公司研究报告"
+        # 截断特征正文：末尾悬空（引号/括号不闭合），且停在 §4.1 中间
+        body = ("# 某公司研究报告\n\n## 一、经营概况\n\n" + "分析" * 200 +
+                "\n\n## 二、财务对照\n\n" + "对照" * 200 +
+                "\n\n## 四、现金流量表\n\n### 4.1 经营活动\n\n"
+                "- **行项目**：「购建固定资产」行（**必须为净额**，"
+                "不得以「经营活动现金流入小计」或「")
+        self.assertTrue(report_brief.is_body_truncated(body),
+                        "检测器必须先承认这个正文是截断的")
+        ws = ws_mod.task_workspace(tid)
+        # 先按"验收/采纳"把它记成语义上的当前稿（模拟：验收器没拦住这份残稿）
+        verdict = accept_for_body(tid, goal, body, trigger="截断用例",
+                                  prefer_body=True, ws_dir=ws) or {}
+        # 采纳是编排器的事（验收后一步）：这里补上，等价于"残稿成了当前稿"
+        from report_version import VersionStore
+        _store = VersionStore(ws, tid)
+        _v = _store.find_by_body(body)
+        if _v is not None:
+            _store.adopt(_v, reason="截断用例采纳")
+        with self.assertLogs("delivery_pipeline", level="WARNING") as logs:
+            asm = assemble_and_verify(
+                tid, goal, body, wrapper="# 交付说明",
+                accept_fn=lambda t, g, b: verdict, ws_dir=ws)
+        self.assertEqual(asm.get("status"), DELIVERY_DRAFT,
+                         f"截断正文交付不得记 verified：{asm.get('status')}")
+        self.assertEqual(str(asm.get("delivery_status")), DELIVERY_DRAFT)
+        reason = str(asm.get("draft_reason") or "")
+        self.assertIn("截断", reason)
+        self.assertIn("内容不完整", reason)
+        note = str(asm.get("report") or "")
+        self.assertIn("正文在第", note)
+        self.assertIn("截断", note)
+        self.assertIn("内容不完整", note)
+        self.assertTrue(any("截断" in m for m in logs.output),
+                        f"必须留可 assertLogs 的 WARNING：{logs.output[-2:]}")
+        # 交付登记里同样能读回截断结论（不依赖内存）
+        st = delivery_state(tid, ws_dir=ws)
+        self.assertTrue(st.get("truncated"), st.get("truncation"))
+        self.assertEqual(str(st.get("status")), "draft")
+        self.assertIn("截断", str(st.get("draft_reason") or ""))
+        self.assertTrue((st.get("projection") or {}).get("truncated"))
+
+    def test_delivery_projection_identity_is_single_source(self):
+        """页面/下载/包内读到的正文身份必须同源：登记 projection ↔ 结构 ↔ delivery_state。"""
+        from delivery_pipeline import (accept_for_body, assemble_and_verify,
+                                       delivery_state, projection_vs_package)
+        import report_brief
+        tid = "proj-identity-1"
+        body = ("# 同版对齐报告\n\n## 核心指标\n\n| 指标 | 数值 |\n|---|---|\n"
+                "| 营业收入 | 1741亿元 |\n\n## 参考来源\n\n"
+                "1. [年报](https://finance.sina.com.cn/a/1)\n\n"
+                "## 免责声明\n\n仅供参考。\n")
+        ws = ws_mod.task_workspace(tid)
+        ws.mkdir(parents=True, exist_ok=True)
+        # 真实链路里结构对象由 report_brief 先写成（页面详情读它），这里照做
+        report_brief.write_structure(tid, {"title": "同版对齐报告"}, ws_dir=ws)
+        verdict = accept_for_body(tid, "同版对齐报告", body,
+                                  trigger="同版用例", prefer_body=True,
+                                  ws_dir=ws)
+        from report_version import VersionStore
+        _store = VersionStore(ws, tid)
+        _v = _store.find_by_body(body)
+        if _v is not None:
+            _store.adopt(_v, reason="同版用例采纳")
+        asm = assemble_and_verify(
+            tid, "同版对齐报告", body, wrapper="# 交付说明",
+            accept_fn=lambda t, g, b: verdict, ws_dir=ws)
+        delivered = str(asm.get("report") or "")
+        reg = VersionStore(ws, tid).deliveries()
+        self.assertTrue(reg, "交付登记必须有记录")
+        proj = dict(reg[-1].get("projection") or {})
+        self.assertTrue(proj, f"登记项必须带 projection：{reg[-1]}")
+        # ① 身份自洽：交付字节 = 交付说明 + 正文，两个哈希都对得上
+        self.assertEqual(proj.get("delivered_sha256"),
+                         hashlib.sha256(delivered.encode("utf-8")).hexdigest())
+        self.assertEqual(proj.get("body_sha256"),
+                         hashlib.sha256(body.encode("utf-8")).hexdigest())
+        self.assertEqual(proj.get("schema"), "weavemind.delivery_projection/1")
+        # ② 结构对象（页面详情读取口径）盖的是同一份身份
+        self.assertEqual(
+            (report_brief.read_delivery_projection(tid, ws_dir=ws)
+             or {}).get("delivered_sha256"), proj["delivered_sha256"],
+            "结构对象里的正文身份必须与交付登记同源")
+        # ③ delivery_state（唯一读取口径）返回同一份
+        st = delivery_state(tid, ws_dir=ws)
+        self.assertEqual((st.get("projection") or {}).get("delivered_sha256"),
+                         proj["delivered_sha256"])
+        self.assertEqual(int((st.get("projection") or {}).get("delivered_chars")
+                             or 0), len(delivered))
+        # ④ 判定器：包内主文 == 交付正文 → match；换一版正文 → mismatch
+        ok = projection_vs_package(tid, ws_dir=ws, package="reports/report.md",
+                                   md_text=delivered,
+                                   md_sha256=proj["delivered_sha256"])
+        self.assertEqual(ok["verdict"], "match", ok)
+        bad = projection_vs_package(tid, ws_dir=ws, package="reports/report.md",
+                                    md_text="# 另一版正文\n\n不一样\n",
+                                    md_sha256=hashlib.sha256(
+                                        b"# other body").hexdigest())
+        self.assertEqual(bad["verdict"], "mismatch", bad)
+        # ⑤ 工作区 `reports/report.md` 若是另一份字节，读取口径必须如实报 mismatch
+        #（实测 ui-8b28c95ab1：页面 5825 字 / 工作区 9753 字 / 包内 9836 字，三份不同）
+        (ws / "reports").mkdir(parents=True, exist_ok=True)
+        (ws / "reports" / "report.md").write_text("# 工作区里另一版\n\n正文不同\n",
+                                                  encoding="utf-8")
+        st2 = delivery_state(tid, ws_dir=ws)
+        self.assertEqual((st2.get("md_file") or {}).get("verdict"), "mismatch",
+                         st2.get("md_file"))
+        # ⑥ 包里清单说"我就是这一版"、主文却是另一份 → 判历史包，不得当当前稿下载
+        import zipfile
+        from delivery_pipeline import package_statuses
+        _ad = _store.adopted()
+        with zipfile.ZipFile(ws / "deliverables_20261021_190912.zip", "w") as z:
+            z.writestr("reports/report.md", "# 工作区里另一版\n\n正文不同\n")
+            z.writestr("PACKAGE_MANIFEST.json", json.dumps({
+                "schema": "weavemind.package/1",
+                "report_version_id": _ad.identity_id(),
+                "research_body_sha256": _ad.version_id,
+            }, ensure_ascii=False))
+        ps = package_statuses(tid, ws_dir=ws)
+        _items = ps.get("packages") or ps.get("items") or []
+        self.assertTrue(_items, ps)
+        _it = _items[0]
+        self.assertEqual(_it.get("status"), "historical", _it)
+        self.assertIn("不是同一份", str(_it.get("reason")), _it)
+
+    def test_acceptance_snapshot_marks_authority(self):
+        """验收快照必须自报绑的哪一版；对另一版的快照要写清权威结论（P0-2b）。"""
+        from delivery_pipeline import accept_for_body, read_acceptance_summary
+        from report_version import VersionStore
+        tid = "accept-authority-1"
+        goal = "报告"
+        body_a = "# 报告A\n\n## 一、概况\n\n" + "内容" * 300 + "\n"
+        body_b = ("# 报告B\n\n## 一、概况\n\n" + "内容" * 300 +
+                  "\n\n## 二、对照\n\n| 指标 | 数值 |\n|---|---|\n"
+                  "| 净利润 | 862亿元 |\n")
+        ws = ws_mod.task_workspace(tid)
+        # A 版：登记并采纳（模拟"当前交付/采纳那一版"）
+        store = VersionStore(ws, tid)
+        store.adopt(store.record(body_a), reason="首版")
+        accept_for_body(tid, goal, body_a, trigger="用例A",
+                        prefer_body=True, ws_dir=ws)
+        s = read_acceptance_summary(tid, ws_dir=ws, with_authority=True)
+        self.assertTrue(s, "验收快照必须写出来")
+        self.assertTrue(s.get("authoritative"), s)
+        self.assertEqual(s.get("effective_overall"), s.get("overall"))
+        self.assertEqual(str(s.get("trigger")), "用例A")
+        self.assertEqual(int(s.get("body_chars") or 0), len(body_a))
+        # B 版被验收（快照被覆盖），采纳仍是 A 版 → 文件不再是权威那套
+        accept_for_body(tid, goal, body_b, trigger="用例B",
+                        prefer_body=True, ws_dir=ws)
+        s2 = read_acceptance_summary(tid, ws_dir=ws, with_authority=True)
+        self.assertEqual(str(s2.get("trigger")), "用例B")
+        self.assertFalse(s2.get("authoritative"), s2)
+        _conf = str(s2.get("acceptance_conflict") or "")
+        self.assertTrue(_conf, "必须写明两套验收数字各是什么")
+        self.assertIn("overall", _conf)
+        self.assertIn("缺口", _conf)
+        # 唯一权威结论 = 采纳版自己那份（不是文件里这份）
+        self.assertEqual(str(s2.get("effective_overall")),
+                         str(store.adopted().acceptance_overall()))
+        self.assertEqual(str(s2.get("adopted_body_sha256")),
+                         store.adopted().version_id)
+        self.assertIn("采纳", _conf)
 
 
 if __name__ == "__main__":

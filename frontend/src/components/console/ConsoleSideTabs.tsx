@@ -1,10 +1,11 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw, Paperclip } from 'lucide-react'
+import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw, Paperclip, PlayCircle } from 'lucide-react'
 import LiveActivity from '../LiveActivity'
 import MaterialPanel from './MaterialPanel'
 import { Alert, EmptyState, StatusBadge } from '../ui'
 import { normalizeDeliverySummary } from '../../lib/format'
+import { resumeBlockedReason, resumeLabel, resumeButtonState, resumeVisible, beginResumeNote, applyResumeResult, type ResumeNote, type ResumeResult } from '../../lib/resume'
 
 type Tab = 'live' | 'context' | 'results' | 'materials'
 
@@ -13,7 +14,7 @@ type Tab = 'live' | 'context' | 'results' | 'materials'
 export default memo(function ConsoleSideTabs({
   tab, setTab, taskId, isRunning,
   convMessages, resultItems, activeConversationId,
-  gapsFor, onToggleGaps, onViewReport, onSubmit, onPrefillGoal,
+  gapsFor, onToggleGaps, onViewReport, onSubmit, onPrefillGoal, onResume,
 }: {
   tab: Tab
   setTab: (t: Tab) => void
@@ -27,9 +28,15 @@ export default memo(function ConsoleSideTabs({
   onViewReport: (tid: string) => void
   onSubmit: (goalOverride?: string) => void
   onPrefillGoal?: (goal: string) => void
+  /** U90-B：失败任务的「继续执行」——由页面执行恢复请求；若页面把回执
+   *  （ResumeResult）返回，这里按三态渲染（U90-R3：失败可再点，不再永久禁用）。 */
+  onResume?: (tid: string) => ResumeResult | void | Promise<ResumeResult | void>
 }) {
   // 重跑二次确认：此前点一下就直接重跑（会重新规划并消耗额度），且没说明会发生什么
   const [rerunGoal, setRerunGoal] = useState<string | null>(null)
+  // U90-B/U90-R3：恢复请求的点击回执（逐任务，三态）
+  const [resumeNote, setResumeNote] = useState<Record<string, ResumeNote>>({})
+
   // 步骤级流式输出（O-21）：运行中且停留在"实时动态"标签时才轮询
   // /api/task/<id>/stream；内容不变不 setState（此前每 1.5s 无条件写入新字符串）
   const [streamText, setStreamText] = useState('')
@@ -54,35 +61,93 @@ export default memo(function ConsoleSideTabs({
     if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight
   }, [streamText])
 
+  // U90-B：点「继续执行」→ 由页面发恢复请求；这里按**回执三态**渲染按钮。
+  // U90-R3：旧实现点击时先写"已请求继续"并永久禁用——请求其实失败（如 503）
+  // 时用户既看不到失败原因也无法重试。现在：先置 pending，拿到结果再落地；
+  // 失败/超时可重试（按钮保持可点），只有服务端判定不可重试才禁用。
+  const doResume = async (tid: string, label: string) => {
+    if (!onResume) return
+    const note = resumeNote[tid]
+    if (note?.phase === 'pending' || note?.phase === 'ok') return
+    setResumeNote(prev => beginResumeNote(prev, tid))
+    let r: ResumeResult | void
+    try {
+      r = await onResume(tid)
+    } catch (e: any) {
+      r = { ok: false, phase: 'failed', retryable: true,
+            message: `恢复请求发送失败：${String(e?.message || e)}` }
+    }
+    const result: ResumeResult = (r && typeof r === 'object' && 'phase' in r)
+      ? r as ResumeResult
+      // 页面没回执（旧调用方）：按成功口径留痕，避免又变成"点了没反应"
+      : { ok: true, phase: 'ok', retryable: false, message: `已请求继续：${label}` }
+    setResumeNote(prev => applyResumeResult(prev, tid, result))
+  }
+
+  /** 失败/取消任务的「继续执行」区：按钮 + 为什么不能继续 + 上次失败原因。
+   *  同一份判定来自后端 `resume` 视图（web_ui._resume_view），前端不另猜状态。 */
+  const resumeRow = (item: any) => {
+    const resume = item?.resume
+    const note = resumeNote[item?.task_id]
+    const btn = resumeButtonState(note, resume)
+    const reason = resumeBlockedReason(resume)
+    const showReason = (item?.status === 'FAILED' || item?.status === 'CANCELLED') && reason
+    const failure = item?.status === 'FAILED' ? String(resume?.failure || '') : ''
+    if (!resumeVisible(resume) && !showReason && !failure && !note) return null
+    return (
+      <div className="mt-2 space-y-1">
+        {resumeVisible(resume) && (
+          <button onClick={() => doResume(item.task_id, resumeLabel(resume))}
+            disabled={btn.disabled}
+            title={btn.hint || undefined}
+            className="flex items-center gap-1 text-xs text-emerald-700 hover:text-emerald-700 disabled:opacity-60">
+            <PlayCircle className="w-3 h-3" /> {btn.label}
+          </button>
+        )}
+        {note && btn.hint && (
+          <div className={note.phase === 'ok' ? 'text-xs text-ink-faint' : 'text-xs text-amber-700/90'}>
+            {btn.hint}
+          </div>
+        )}
+        {failure && (
+          <div className="text-xs text-red-700/90">上次失败：{failure}</div>
+        )}
+        {showReason && !failure && (
+          <div className="text-xs text-ink-faint">{reason}</div>
+        )}
+      </div>
+    )
+  }
+
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+    <div className="bg-surface border border-line rounded-xl overflow-hidden flex flex-col">
       {/* 重跑确认：说明会发生什么，并给"改目标"的出口（此前点一下就重跑） */}
       {rerunGoal !== null && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           onClick={() => setRerunGoal(null)}>
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5"
+          <div className="w-full max-w-md rounded-xl border border-line-strong bg-surface p-5"
             onClick={e => e.stopPropagation()}>
-            <div className="mb-2 text-sm font-semibold text-slate-200">确认重跑？</div>
-            <p className="mb-3 text-xs leading-relaxed text-slate-400">
-              会用<b className="text-slate-300">同一目标</b>重新规划并执行，产生新的额度消耗；
+            <div className="mb-2 text-sm font-semibold text-ink">确认重跑？</div>
+            <p className="mb-3 text-xs leading-relaxed text-ink-muted">
+              会用<b className="text-ink">同一目标</b>重新规划并执行，产生新的额度消耗；
               原计划不会复用（复用原计划需要后端支持，当前按重新规划执行）。
             </p>
-            <div className="mb-4 max-h-24 overflow-y-auto rounded-lg bg-slate-800/60 px-3 py-2 text-xs text-slate-300">
+            <div className="mb-4 max-h-24 overflow-y-auto rounded-lg bg-surface-raised/60 px-3 py-2 text-xs text-ink">
               {rerunGoal}
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <button onClick={() => setRerunGoal(null)}
-                className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700">
+                className="rounded-lg bg-surface-raised px-3 py-2 text-xs text-ink hover:bg-line">
                 取消
               </button>
               {onPrefillGoal && (
                 <button onClick={() => { onPrefillGoal(rerunGoal); setRerunGoal(null) }}
-                  className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-cyan-400 hover:bg-slate-700">
+                  className="rounded-lg bg-surface-raised px-3 py-2 text-xs text-brand hover:bg-line">
                   改为修改目标
                 </button>
               )}
               <button onClick={() => { onSubmit(rerunGoal); setRerunGoal(null) }}
-                className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400">
+                className="rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white hover:bg-brand">
                 确认重跑
               </button>
             </div>
@@ -91,7 +156,7 @@ export default memo(function ConsoleSideTabs({
         document.body,
       )}
       {/* 标签页：实时动态 / 对话上下文 / 项目结果 / 补材料 */}
-      <div className="flex border-b border-slate-800 shrink-0">
+      <div className="flex border-b border-line shrink-0">
         {([
           { key: 'live', label: '实时动态', icon: Activity },
           { key: 'context', label: '对话', icon: MessagesSquare },
@@ -100,7 +165,7 @@ export default memo(function ConsoleSideTabs({
         ] as { key: Tab; label: string; icon: any }[]).map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors ${
-              tab === t.key ? 'text-cyan-400 bg-cyan-500/5 border-b-2 border-cyan-400' : 'text-slate-500 hover:text-slate-300'
+              tab === t.key ? 'text-brand bg-brand/5 border-b-2 border-brand' : 'text-ink-faint hover:text-ink'
             }`}>
             <t.icon className="w-3.5 h-3.5" /> {t.label}
           </button>
@@ -111,11 +176,11 @@ export default memo(function ConsoleSideTabs({
         {tab === 'live' && (
           <>
             {streamText && (
-              <div className="mb-4 bg-slate-900/80 border border-cyan-500/20 rounded-xl p-3">
-                <div className="text-xs text-cyan-400 font-semibold mb-1">
+              <div className="mb-4 bg-surface/80 border border-brand/20 rounded-xl p-3">
+                <div className="text-xs text-brand font-semibold mb-1">
                   生成内容（流式）· 实时
                 </div>
-                <pre ref={streamRef} className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-48 overflow-y-auto">
+                <pre ref={streamRef} className="whitespace-pre-wrap break-all text-ink text-xs font-sans max-h-48 overflow-y-auto">
                   {streamText}
                 </pre>
               </div>
@@ -127,19 +192,19 @@ export default memo(function ConsoleSideTabs({
         {tab === 'context' && (
           <div className="space-y-3">
             {convMessages.length === 0 && (
-              <div className="text-center text-slate-600 text-xs py-10">
+              <div className="text-center text-ink-faint text-xs py-10">
                 尚无对话。提交任务后，后续输入将自动延续同一上下文；也可在“历史”页切换旧对话。
               </div>
             )}
             {convMessages.map(m => (
               <div key={m.task_id} className="space-y-2">
-                <div className="ml-auto max-w-[85%] bg-cyan-500/10 border border-cyan-500/20 text-slate-200 text-xs rounded-lg rounded-tr-none px-3 py-2">
+                <div className="ml-auto max-w-[85%] bg-brand/10 border border-brand/20 text-ink text-xs rounded-lg rounded-tr-none px-3 py-2">
                   {m.goal}
                 </div>
-                <div className="max-w-[95%] bg-slate-800/50 border border-slate-800 text-slate-400 text-xs rounded-lg rounded-tl-none px-3 py-2">
+                <div className="max-w-[95%] bg-surface-raised/50 border border-line text-ink-muted text-xs rounded-lg rounded-tl-none px-3 py-2">
                   <div className="flex items-center gap-2 mb-1">
                     <StatusBadge status={m.status} />
-                    <span className="text-slate-600">{new Date(m.created_at).toLocaleTimeString()}</span>
+                    <span className="text-ink-faint">{new Date(m.created_at).toLocaleTimeString()}</span>
                   </div>
                   <pre className="whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-sans">
                     {normalizeDeliverySummary(m.report_preview) || '（运行中...）'}
@@ -147,16 +212,16 @@ export default memo(function ConsoleSideTabs({
                   {(m.status === 'SUCCESS' || m.status === 'FAILED' || m.status === 'SUCCESS_WITH_ISSUES') && (
                     <div className="flex gap-2 mt-2 flex-wrap">
                       <button onClick={() => onViewReport(m.task_id)}
-                        className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
+                        className="flex items-center gap-1 text-xs text-brand hover:text-brand">
                         <Eye className="w-3 h-3" /> 查看完整报告
                       </button>
                       <button onClick={() => setRerunGoal(m.goal)}
-                        className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300">
+                        className="flex items-center gap-1 text-xs text-violet-700 hover:text-violet-700">
                         <RefreshCw className="w-3 h-3" /> 重跑
                       </button>
                       {m.status === 'SUCCESS_WITH_ISSUES' && (
                         <button onClick={() => onToggleGaps(m.task_id)}
-                          className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300">
+                          className="flex items-center gap-1 text-xs text-amber-700 hover:text-amber-700">
                           {gapsFor[m.task_id] ? '收起' : '验收缺口'}
                         </button>
                       )}
@@ -170,6 +235,7 @@ export default memo(function ConsoleSideTabs({
                       </div>
                     </Alert>
                   )}
+                  {resumeRow(m)}
                 </div>
               </div>
             ))}
@@ -182,7 +248,7 @@ export default memo(function ConsoleSideTabs({
 
         {tab === 'results' && (
           <div className="space-y-2">
-            <p className="text-xs text-slate-500 mb-3">
+            <p className="text-xs text-ink-faint mb-3">
               {activeConversationId ? '当前对话的完成结果' : '最近完成的任务'}
             </p>
             {resultItems.length === 0 && (
@@ -190,23 +256,23 @@ export default memo(function ConsoleSideTabs({
                 description="任务完成后，这里显示结论摘要、报告入口与验收缺口。" />
             )}
             {resultItems.map(t => (
-              <div key={t.task_id} className="bg-slate-800/40 border border-slate-800 rounded-lg px-3 py-2">
+              <div key={t.task_id} className="bg-surface-raised/40 border border-line rounded-lg px-3 py-2">
                 <div className="flex items-center gap-2 mb-1">
                   <StatusBadge status={t.status} />
-                  <span className="text-slate-300 text-xs truncate flex-1">{t.goal}</span>
+                  <span className="text-ink text-xs truncate flex-1">{t.goal}</span>
                 </div>
                 <div className="flex gap-3 flex-wrap">
                   <button onClick={() => onViewReport(t.task_id)}
-                    className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
+                    className="flex items-center gap-1 text-xs text-brand hover:text-brand">
                     <Eye className="w-3 h-3" /> 查看
                   </button>
                   <button onClick={() => onSubmit(t.goal)}
-                    className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300">
+                    className="flex items-center gap-1 text-xs text-violet-700 hover:text-violet-700">
                     <RefreshCw className="w-3 h-3" /> 重新运行
                   </button>
                   {t.status === 'SUCCESS_WITH_ISSUES' && (
                     <button onClick={() => onToggleGaps(t.task_id)}
-                      className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300">
+                      className="flex items-center gap-1 text-xs text-amber-700 hover:text-amber-700">
                       {gapsFor[t.task_id] ? '收起' : '验收缺口'}
                     </button>
                   )}
@@ -219,6 +285,7 @@ export default memo(function ConsoleSideTabs({
                     </div>
                   </Alert>
                 )}
+                {resumeRow(t)}
               </div>
             ))}
           </div>

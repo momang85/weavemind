@@ -4,12 +4,13 @@ import {
   FlaskConical, Sparkles, Cpu, Filter, Activity
 } from 'lucide-react'
 import AgentTopology from '../components/AgentTopology'
+import { CAPABILITY_ZH, agentDisplayName, agentRawId } from '../lib/agentLabel'
 import { AgentInfo } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
 import { agentStatusDotClass, agentStatusLabel } from '../lib/statusMeta'
 
 const gradients = [
-  'from-cyan-500 to-blue-500', 'from-emerald-500 to-teal-500',
+  'from-brand to-blue-500', 'from-emerald-500 to-teal-500',
   'from-violet-500 to-purple-500', 'from-amber-500 to-orange-500',
   'from-rose-500 to-pink-500', 'from-sky-500 to-indigo-500',
 ]
@@ -29,8 +30,8 @@ function timeAgo(iso: string) {
   const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
   if (sec < 5) return '刚刚'
   if (sec < 60) return `${sec} 秒前`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return `${Math.floor(sec / 3600)}h ago`
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`
+  return `${Math.floor(sec / 3600)} 小时前`
 }
 
 // 状态语义（含 Agent 运行状态）统一走 lib/statusMeta，本页不再自建色板与英文标签
@@ -50,9 +51,9 @@ function AgentCard({
   const maxLoad = agent.status?.match(/\/(\d+)/)?.[1] ?? '5'
 
   return (
-    <div className={`bg-slate-900 border rounded-xl overflow-hidden transition-all duration-300 ${
+    <div className={`bg-surface border rounded-xl overflow-hidden transition-all duration-300 ${
       isAutoGen ? 'border-amber-500/50 ring-1 ring-amber-500/20' :
-      agent.status?.startsWith('offline') ? 'border-slate-800 opacity-60' : 'border-slate-800'
+      agent.status?.startsWith('offline') ? 'border-line opacity-60' : 'border-line'
     }`}>
       <div className="p-5">
         {/* Header */}
@@ -64,12 +65,12 @@ function AgentCard({
             <div className="flex items-center gap-1.5">
               <span className={agentStatusDotClass(agent.status)} />
               <span className={`text-xs font-medium ${
-                !agent.status || agent.status.startsWith('offline') ? 'text-slate-500' :
-                agent.status.includes('active') ? 'text-cyan-400' : 'text-emerald-400'
+                !agent.status || agent.status.startsWith('offline') ? 'text-ink-faint' :
+                agent.status.includes('active') ? 'text-brand' : 'text-emerald-700'
               }`}>{agentStatusLabel(agent.status)}</span>
             </div>
             {isAutoGen && (
-              <span className="flex items-center gap-1 text-xs font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">
+              <span className="flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-500/10 px-2 py-0.5 rounded-full">
                 <Sparkles className="w-2.5 h-2.5" /> 新物种
               </span>
             )}
@@ -77,19 +78,22 @@ function AgentCard({
         </div>
 
         {/* Name */}
-        <h3 className="text-slate-200 font-semibold text-sm mb-2">{agent.agent_id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</h3>
+        <h3 className="text-ink font-semibold text-sm mb-2">{agentDisplayName(agent)}</h3>
+        <div className="text-xs font-mono text-ink-faint mb-2" title="运行标识（队列与白名单按它匹配）">
+          {agentRawId(agent)}
+        </div>
 
         {/* Capability badges */}
         <div className="flex flex-wrap gap-1.5 mb-3">
           {agent.capabilities.split(',').map(c => (
-            <span key={c} className="px-2 py-0.5 bg-slate-800 rounded-md text-xs text-slate-400 font-mono">{c.trim()}</span>
+            <span key={c} className="px-2 py-0.5 bg-surface-raised rounded-md text-xs text-ink-muted font-mono">{c.trim()}</span>
           ))}
         </div>
 
         {/* Load + heartbeat */}
-        <div className="flex items-center justify-between text-xs text-slate-500">
+        <div className="flex items-center justify-between text-xs text-ink-faint">
           <span className="flex items-center gap-1">
-            <Cpu className="w-3 h-3" /> {load}/{maxLoad}
+            <Cpu className="w-3 h-3" /> 并发 {load}/{maxLoad}
           </span>
           <span className="flex items-center gap-1">
             <Clock className="w-3 h-3" /> {timeAgo(agent.last_heartbeat)}
@@ -100,13 +104,13 @@ function AgentCard({
           onClick={() => onKill(agent.agent_id)}
           disabled={demoMode || !agent.status || agent.status.startsWith('offline')}
           title={demoMode ? '演示模式下已停用（会真的终止本机智能体进程）' : '终止该智能体进程'}
-          className="mt-3 w-full flex items-center justify-center gap-1.5 text-xs text-red-400/80 hover:text-red-400 py-1.5 rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+          className="mt-3 w-full flex items-center justify-center gap-1.5 text-xs text-red-700/80 hover:text-red-700 py-1.5 rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
           <Power className="w-3.5 h-3.5" /> 终止
         </button>
 
         {/* Expand toggle */}
         <button onClick={onToggle}
-          className="mt-3 w-full flex items-center justify-center gap-1 text-xs text-slate-600 hover:text-slate-400 py-1.5 rounded-lg hover:bg-slate-800/50 transition-colors">
+          className="mt-3 w-full flex items-center justify-center gap-1 text-xs text-ink-faint hover:text-ink-muted py-1.5 rounded-lg hover:bg-surface-raised/50 transition-colors">
           {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           {expanded ? '收起详情' : '展开详情'}
         </button>
@@ -114,19 +118,19 @@ function AgentCard({
 
       {/* Expanded detail panel */}
       {expanded && (
-        <div className="px-5 pb-4 border-t border-slate-800 animate-fade-in">
+        <div className="px-5 pb-4 border-t border-line animate-fade-in">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4 text-center">
-            <div className="bg-slate-800/50 rounded-lg p-2.5">
-              <div className="text-emerald-400 font-bold text-lg">{agent.successRate ?? 0}%</div>
-              <div className="text-slate-500 text-xs">成功率</div>
+            <div className="bg-surface-raised/50 rounded-lg p-2.5">
+              <div className="text-emerald-700 font-bold text-lg">{agent.successRate == null ? '未取得' : `${agent.successRate}%`}</div>
+              <div className="text-ink-faint text-xs">成功率</div>
             </div>
-            <div className="bg-slate-800/50 rounded-lg p-2.5">
-              <div className="text-cyan-400 font-bold text-lg">{agent.tasks?.length ?? 0}</div>
-              <div className="text-slate-500 text-xs">任务数</div>
+            <div className="bg-surface-raised/50 rounded-lg p-2.5">
+              <div className="text-brand font-bold text-lg">{agent.tasks?.length ?? 0}</div>
+              <div className="text-ink-faint text-xs">本页列出的任务数</div>
             </div>
-            <div className="bg-slate-800/50 rounded-lg p-2.5">
-              <div className="text-violet-400 font-bold text-lg">{agent.avgTime ?? '-'}s</div>
-              <div className="text-slate-500 text-xs">平均耗时</div>
+            <div className="bg-surface-raised/50 rounded-lg p-2.5">
+              <div className="text-violet-700 font-bold text-lg">{agent.avgTime == null ? '未取得' : `${agent.avgTime} 秒`}</div>
+              <div className="text-ink-faint text-xs">平均耗时</div>
             </div>
           </div>
 
@@ -134,16 +138,16 @@ function AgentCard({
             <div className="mt-3 space-y-1 max-h-32 overflow-y-auto">
               {agent.tasks.slice(0, 5).map((t: any, i: number) => (
                 <div key={i} className="flex items-center gap-2 text-xs py-1">
-                  {t.status === 'SUCCESS' ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> :
-                   <XCircle className="w-3 h-3 text-red-400" />}
-                  <span className="text-slate-400 truncate">{t.goal?.substring(0, 40) ?? t.instruction?.substring(0, 40)}</span>
+                  {t.status === 'SUCCESS' ? <CheckCircle2 className="w-3 h-3 text-emerald-700" /> :
+                   <XCircle className="w-3 h-3 text-red-700" />}
+                  <span className="text-ink-muted truncate">{t.goal?.substring(0, 40) ?? t.instruction?.substring(0, 40)}</span>
                 </div>
               ))}
             </div>
           )}
 
           {isAutoGen && (
-            <div className="mt-3 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 rounded-lg p-2.5">
+            <div className="mt-3 flex items-center gap-2 text-xs text-amber-700 bg-amber-500/10 rounded-lg p-2.5">
               <FlaskConical className="w-3.5 h-3.5" />
               自动孵化生成 — 由中枢在检测到能力缺失时自动创建
             </div>
@@ -168,7 +172,7 @@ function LazyAgentCard(props: any) {
   }, [])
   return (
     <div ref={ref} className={visible ? 'agent-card-enter-active' : 'agent-card-enter'}>
-      {visible ? <AgentCard {...props} /> : <div className="bg-slate-900 border border-slate-800 rounded-xl h-48 animate-pulse" />}
+      {visible ? <AgentCard {...props} /> : <div className="bg-surface border border-line rounded-xl h-48 animate-pulse" />}
     </div>
   )
 }
@@ -248,9 +252,9 @@ export default function AgentsPage() {
   return (
     <div className="max-w-6xl mx-auto space-y-5">
       {/* Topology */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-        <h2 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-3">
-          <Activity className="w-4 h-4 text-cyan-400" /> Agent Topology
+      <div className="bg-surface border border-line rounded-xl p-5">
+        <h2 className="flex items-center gap-2 text-sm text-ink font-medium mb-3">
+          <Activity className="w-4 h-4 text-brand" /> 智能体拓扑
         </h2>
         <AgentTopology />
       </div>
@@ -258,50 +262,50 @@ export default function AgentsPage() {
       {/* Stats */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
-          { label: '总计', value: agents.length, color: 'text-cyan-400' },
-          { label: '在线', value: agents.filter(a => !a.status?.startsWith('offline')).length, color: 'text-emerald-400' },
-          { label: '忙碌', value: agents.filter(a => a.status?.includes('active')).length, color: 'text-blue-400' },
-          { label: '离线', value: agents.filter(a => !a.status || a.status.startsWith('offline')).length, color: 'text-slate-500' },
+          { label: '总计', value: agents.length, color: 'text-brand' },
+          { label: '在线', value: agents.filter(a => !a.status?.startsWith('offline')).length, color: 'text-emerald-700' },
+          { label: '忙碌', value: agents.filter(a => a.status?.includes('active')).length, color: 'text-blue-700' },
+          { label: '离线', value: agents.filter(a => !a.status || a.status.startsWith('offline')).length, color: 'text-ink-faint' },
         ].map(s => (
-          <div key={s.label} className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-center">
+          <div key={s.label} className="bg-surface border border-line rounded-xl p-4 text-center">
             <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
-            <div className="text-slate-500 text-xs mt-1">{s.label}</div>
+            <div className="text-ink-faint text-xs mt-1">{s.label}</div>
           </div>
         ))}
       </div>
 
       {/* T6 单智能体直发 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
-        <div className="text-xs font-semibold text-cyan-400">单智能体直发（不经编排器，直接 LLM 问答）</div>
+      <div className="bg-surface border border-line rounded-xl p-4 space-y-3">
+        <div className="text-xs font-semibold text-brand">单智能体直发（不经编排器，直接 LLM 问答）</div>
         <div className="flex gap-2">
           <input value={directGoal} onChange={e => setDirectGoal(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !demoMode) sendDirect() }}
             disabled={demoMode}
             placeholder={demoMode ? '演示模式下已停用（直发会调用真实付费模型）' : '输入问题，如：贵州茅台最新财报要点是什么'}
-            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500 disabled:opacity-50" />
+            className="flex-1 bg-surface-raised border border-line-strong rounded-lg px-3 py-2 text-sm text-ink placeholder-ink-faint focus:outline-none focus:border-brand disabled:opacity-50" />
           <button onClick={sendDirect} disabled={demoMode || directLoading || !directGoal.trim()}
             title={demoMode ? '演示模式下已停用（直发会调用真实付费模型）' : '不经编排器直接提问'}
-            className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40 shrink-0">
+            className="px-4 py-2 rounded-lg bg-brand/15 hover:bg-brand/25 text-brand text-sm disabled:opacity-40 shrink-0">
             {directLoading ? '发送中…' : '发送'}
           </button>
         </div>
         {directResult && (
-          <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3 space-y-2">
+          <div className="bg-surface-raised/50 border border-line-strong rounded-lg p-3 space-y-2">
             {directMode && (
               <div className="text-xs">
                 {directMode === 'searched'
-                  ? <span className="text-emerald-400">已检索 {directSources.length} 条来源</span>
-                  : <span className="text-amber-400">模型知识 · 未检索（未验证）</span>}
+                  ? <span className="text-emerald-700">已检索 {directSources.length} 条来源</span>
+                  : <span className="text-amber-700">模型知识 · 未检索（未验证）</span>}
               </div>
             )}
-            <div className="text-xs text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto">
+            <div className="text-xs text-ink whitespace-pre-wrap max-h-48 overflow-y-auto">
               {directResult}
             </div>
             {directSources.length > 0 && (
-              <div className="space-y-1 pt-1 border-t border-slate-700">
+              <div className="space-y-1 pt-1 border-t border-line-strong">
                 {directSources.slice(0, 5).map((s: any, i: number) => (
                   <a key={i} href={s.url} target="_blank" rel="noreferrer"
-                    className="block text-xs text-cyan-400 hover:text-cyan-300 truncate">
+                    className="block text-xs text-brand hover:text-brand truncate">
                     {s.title || s.url}
                   </a>
                 ))}
@@ -312,23 +316,26 @@ export default function AgentsPage() {
       </div>
 
       {/* Search + Filter */}
-      <div className="flex gap-3">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+      <div className="flex flex-wrap gap-2 sm:gap-3">
+        <div className="flex-1 min-w-[12rem] relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-faint" />
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search agents..."
-            className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-10 pr-4 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+            placeholder="搜索智能体…"
+            className="w-full bg-surface border border-line rounded-lg pl-10 pr-4 py-2.5 text-sm text-ink placeholder-ink-faint focus:outline-none focus:border-brand"
           />
         </div>
         {allCaps.map(cap => (
           <button key={cap} onClick={() => setFilter(filter === cap ? null : cap)}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono transition-colors ${
-              filter === cap ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' :
-              'bg-slate-900 border border-slate-800 text-slate-500 hover:text-slate-300'
+            // 中文能力名（与卡片标题同口径）；原始能力 id 放 title，排查时仍拿得到。
+            // 此前直接显示 `code_execution` / `data_analyzer` 等英文枚举，整页中文里的刺点。
+            title={`能力标识：${cap}`}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors ${
+              filter === cap ? 'bg-brand/20 text-brand border border-brand/30' :
+              'bg-surface border border-line text-ink-faint hover:text-ink'
             }`}>
-            <Filter className="w-3 h-3" /> {cap}
+            <Filter className="w-3 h-3" /> {CAPABILITY_ZH[cap] || cap}
           </button>
         ))}
       </div>
@@ -349,12 +356,12 @@ export default function AgentsPage() {
       </div>
 
       {filtered.length === 0 && (
-        <div className="text-center text-slate-600 py-12">无匹配智能体</div>
+        <div className="text-center text-ink-faint py-12">无匹配智能体</div>
       )}
 
       {!connected && (
-        <div className="text-center text-red-400 text-sm py-4 bg-red-500/10 rounded-xl">
-          后端断连 — 每2秒轮询
+        <div className="text-center text-red-700 text-sm py-4 bg-red-500/10 rounded-xl">
+          后端断连 — 每 3 秒自动重试
         </div>
       )}
     </div>

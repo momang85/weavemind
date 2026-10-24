@@ -17,6 +17,7 @@ logger = logging.getLogger("web_ui")
 
 from workspace import (
     _safe_project,
+    existing_task_project_dir,
     list_projects,
     task_workspace,
 )
@@ -491,9 +492,103 @@ def _list_tasks(limit=50):
             d = dict(r)
             d["created_at"] = _iso_utc(d.get("created_at"))
             d["completed_at"] = _iso_utc(d.get("completed_at"))
+            d["resume"] = _resume_view(d)
             out.append(d)
         return out
     except Exception: return []
+
+
+# ── U90-B：「能不能接着跑」的统一视图 ──────────────────────────────────────────
+# 与 `_post_task_resume` 的服务端硬门槛**同一口径**：只有 FAILED/CRASHED 可续跑；
+# SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED 是不可逆终态（复核红线：结论只能人工改，
+# 不得由接口重跑覆盖）。前端只按这里显隐按钮与解释文案，不再各自猜状态。
+
+_RESUME_ALLOWED_STATUS = ("FAILED", "CRASHED")
+_RESUME_RUNNING_STATUS = ("RUNNING", "PENDING", "QUEUED", "RECEIVED")
+_RESUME_TERMINAL_STATUS = ("SUCCESS", "SUCCESS_WITH_ISSUES")
+
+
+def _json_steps(raw) -> list:
+    """任务行里的步骤列表（steps_json 字符串或已解析列表）——解析失败按空，不抛。"""
+    if isinstance(raw, list):
+        return raw
+    s = str(raw or "").strip()
+    if not s or s[0] != "[" or len(s) > 2_000_000:
+        return []
+    try:
+        v = json.loads(s)
+    except Exception:
+        return []
+    return v if isinstance(v, list) else []
+
+
+def _step_verdict(entry) -> tuple:
+    """一条步骤记录 → `(step_id, 状态, 失败说明)`。
+
+    落库形状是 `{"step_id", "capability", "result": {"task_id","status","result"}}`：
+    **状态在嵌套的 result 里**，只看顶层会把所有步骤都判成未完成（与编排器
+    `_load_resumable_steps` 的取法一致）。
+    """
+    if not isinstance(entry, dict):
+        return "", "", ""
+    sid = str(entry.get("step_id") or entry.get("task_id") or "")
+    inner = entry.get("result")
+    status = str(entry.get("status") or "")
+    text = ""
+    if isinstance(inner, dict):
+        status = status or str(inner.get("status") or "")
+        text = str(inner.get("error") or inner.get("reason")
+                    or inner.get("result") or "")
+    elif inner is not None and not status:
+        text = str(inner)
+    status = status.upper()
+    why = ""
+    if status and status != "SUCCESS":
+        why = text.strip()[:300] or f"{sid or '该步骤'}未成功（{status}）"
+    return sid, status, why
+
+
+def _resume_view(row: dict) -> dict:
+    """`resume` 视图（U90-B）：按钮显隐 + 点击说明 + 失败原因，三处共用一份判定。
+
+    - `available=true` 只在 FAILED/CRASHED（与 `/resume` 接口 409 规则一致）；
+    - `reason` 说明**为什么能/不能继续**；失败的任务带第一步失败的位置与原因；
+    - `label` 是按钮文案；`endpoint` 是点击后调用的接口。
+    """
+    row = row or {}
+    status = str(row.get("status") or "").upper()
+    view = {"available": False, "status": status, "total": 0, "completed": 0,
+            "failed_step": "", "failure": "", "reason": "", "label": "",
+            "endpoint": f"/api/task/{row.get('task_id') or ''}/resume"}
+    if status in _RESUME_TERMINAL_STATUS:
+        view["reason"] = ("任务已完成：结论是不可重跑的终态；要修正内容走报告页的"
+                          "修订/复核入口，或补材料后在分析工作台复算。")
+    elif status == "CANCELLED":
+        view["reason"] = ("任务已取消：取消是持久终态，不会自动重跑；"
+                          "要重来请重新提交任务。")
+    elif status in _RESUME_RUNNING_STATUS:
+        view["reason"] = "任务正在执行中：等它收尾，无需恢复。"
+    elif status in _RESUME_ALLOWED_STATUS:
+        view["available"] = True
+        steps = _json_steps(row.get("steps_json") if "steps_json" in row
+                            else row.get("steps"))
+        view["total"] = len(steps)
+        for s in steps:
+            _sid, _st, _why = _step_verdict(s)
+            if _st == "SUCCESS":
+                view["completed"] += 1
+            elif _st and not view["failure"]:
+                view["failed_step"], view["failure"] = _sid, _why
+        view["label"] = (f"继续执行（跳过 {view['completed']}/{view['total']} 步）"
+                         if view["completed"] else "重新接管执行（无已完成步骤可复用）")
+        view["reason"] = (f"上次在第 {view['failed_step']} 步失败：{view['failure']}"
+                          if view["failure"] else
+                          "上次执行未完成：可从已成功的步骤继续，不重复整单。")
+    else:
+        view["reason"] = (f"状态未知（{status or '空'}）：不提供自动恢复，"
+                          "请从任务详情确认后再操作。")
+    return view
+
 
 def _build_conversation_context(conv_id, limit=4):
     """取该会话最近的消息（要求+结果摘要），拼成后续任务的对话上下文。"""
@@ -559,7 +654,7 @@ def _get_conversation(conv_id):
     try:
         db = sqlite3.connect(DB_PATH, timeout=5); db.row_factory = sqlite3.Row
         rows = db.execute(
-            "SELECT task_id, goal, status, created_at, completed_at, report "
+            "SELECT task_id, goal, status, created_at, completed_at, report, steps_json "
             "FROM task_history WHERE conversation_id=? ORDER BY created_at ASC",
             (conv_id,),
         ).fetchall()
@@ -570,6 +665,9 @@ def _get_conversation(conv_id):
             d["created_at"] = _iso_utc(d.get("created_at"))
             d["completed_at"] = _iso_utc(d.get("completed_at"))
             d["report_preview"] = (d.get("report") or "")[:500]
+            # U90-B：会话页的失败任务也要给「继续执行」按钮（同一份判定，
+            # 与列表/详情同口径）；查看/重跑之外多一条"接着跑"的路。
+            d["resume"] = _resume_view(d)
             out.append(d)
         return out
     except Exception:
@@ -667,6 +765,75 @@ def _deep_merge(base: dict, patch: dict) -> dict:
 # LLM 相关且含 api_key 的配置段：脱敏与"空值不回写"保护统一按此表
 _LLM_KEY_SECTIONS = ("llm", "embedding", "planner", "backup", "image")
 
+# 列表型配置段里的密钥字段：改道本机密钥仓（credentials.json），config.json 只留
+# 非密钥字段。键的构造是 "段名.<条目 id>.<字段>"，删除条目即整前缀清理。
+_LIST_SECRET_SECTIONS = (
+    ("data_sources", "id", "api_key"),
+    ("mcp_servers", "name", "api_key"),
+)
+
+
+def _route_list_secrets(body: dict) -> dict:
+    """保存前把列表型段里的 api_key 写进密钥仓，并从待落盘负载里移除。
+
+    空值语义与 LLM 段一致：GET 下发的是脱敏空串，**空串=保持不变**；要删除密钥须显式传
+    `clear_key: true`（前端"清除密钥"勾选框）。删除整个条目时按前缀清理孤儿凭据。
+
+    返回统计（只含计数，不含任何密钥值），供审计使用。
+    """
+    stats = {"written": 0, "cleared": 0, "dropped": 0}
+    try:
+        import credentials
+    except Exception as exc:                       # noqa: BLE001 - 密钥仓不可用就别写盘
+        logger.warning("密钥仓不可用，数据源密钥未落盘（配置照常保存）：%s", str(exc)[:120])
+        return stats
+    existing = _load_config() or {}
+    for section, id_field, key_field in _LIST_SECRET_SECTIONS:
+        items = body.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get(id_field) or "").strip()
+            if item.pop("clear_key", False) and rid:
+                if credentials.delete_secret(f"{section}.{rid}.{key_field}"):
+                    stats["cleared"] += 1
+                continue
+            value = str(item.pop(key_field, "") or "")
+            if rid and value:
+                if credentials.set_secret(f"{section}.{rid}.{key_field}", value):
+                    stats["written"] += 1
+        # 孤儿凭据：配置里已删掉的条目不再留钥匙
+        old = existing.get(section)
+        if isinstance(old, list):
+            new_ids = {str(i.get(id_field) or "") for i in items if isinstance(i, dict)}
+            for prev in old:
+                if not isinstance(prev, dict):
+                    continue
+                pid = str(prev.get(id_field) or "")
+                if pid and pid not in new_ids:
+                    stats["dropped"] += credentials.forget_prefix(f"{section}.{pid}")
+    return stats
+
+
+def _mark_list_key_states(out: dict) -> None:
+    """给列表型条目补"已配置"标记（不返回值；前端据此显示「已配置，留空保持不变」）。"""
+    try:
+        import credentials
+    except Exception:
+        return
+    for section, id_field, key_field in _LIST_SECRET_SECTIONS:
+        items = out.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get(id_field) or "").strip()
+            item["api_key_set"] = bool(rid) and credentials.has_secret(
+                f"{section}.{rid}.{key_field}")
+
 
 def _public_config(cfg: dict | None) -> dict:
     """返回给前端的配置副本：剥离 users 段与全部密钥。
@@ -674,6 +841,8 @@ def _public_config(cfg: dict | None) -> dict:
     - users（含密码哈希）不入响应；
     - LLM 相关五段的 api_key 置空 + api_key_set 标记（已配置），
       前端据此显示"已配置（留空保持不变）"掩码态；明文 key 永不下发；
+    - 用户自加数据源（data_sources）与 mcp_servers 的条目级 api_key 同样
+      置空 + api_key_set（真实密钥在 credentials.json，不进 config.json）；
     - notifications 段复用 public_notifications_config（脱敏
       password/sendkey，与 /api/notifications 同口径）；
     - 兜底递归清扫其余段中的 api_key/password/secret/sendkey/token 类键。
@@ -694,6 +863,8 @@ def _public_config(cfg: dict | None) -> dict:
             out["notifications"] = public_notifications_config(out["notifications"])
         except Exception:
             pass
+    # 列表条目的"已配置"看密钥仓，不看 config.json（密钥根本不在那里）
+    _mark_list_key_states(out)
     out.pop("audit", None)  # 审计配置属服务端内部，不回显
     return out
 
@@ -1175,6 +1346,77 @@ def _map_event_type(t: str) -> str:
         return "guardian"
     return "guardian"
 
+def _status_aux_snapshots() -> dict:
+    """`_system_status` 的**降级面**快照：Redis / 检索 / 行情源 / 预算 / 依赖 / 沙箱。
+
+    这些只依赖进程内状态与只读探测，**不依赖数据库**——所以正常路径与兜底路径
+    必须用同一份实现。此前兜底路径整段跳过它们，导致数据库不可读时
+    （例如**全新检出还没有 agents 表**，正是新用户首次启动的状态）健康页反而丢掉
+    Redis 降级、依赖健康这些最该展示的信息，接口形状也与正常返回不同
+    （消费方直接 `st["redis"]` 就 KeyError，CI 的
+    `test_task20_redis_degradation` 就是这样暴露的）。
+    """
+    out: dict = {}
+    # Redis 健康快照（可用性 + 降级持续时长）
+    try:
+        import redis_health as _redis_health
+        out["redis"] = _redis_health.status_snapshot()
+    except Exception as exc:
+        logging.getLogger("web_ui").warning("Redis 健康快照失败：%s", str(exc)[:120])
+        out["redis"] = {}
+    # 检索健康（Redis 可用时才有快照）
+    search_health: dict = {}
+    try:
+        if _redis_ready():
+            raw = _new_redis().get("search_engine_health")
+            if raw:
+                search_health = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        search_health = {}
+    out["search_health"] = search_health
+    # 行情数据源健康（eastmoney/tencent/sina 熔断 + 冷却），进程内快照
+    try:
+        from adapters.source_health import get_health as get_source_health
+        out["source_health"] = get_source_health()
+    except Exception:
+        out["source_health"] = {}
+    # 月度预算状态（超限降级可观测）
+    try:
+        from costs import get_budget_status
+        out["budget"] = get_budget_status()
+    except Exception:
+        out["budget"] = {}
+    # 统一依赖健康视图 + 唯一一份可行动健康视图
+    try:
+        import health_registry
+        dependencies = health_registry.snapshot()
+    except Exception:
+        dependencies = []
+    out["dependencies"] = dependencies
+    try:
+        import actionable_state as _as
+        out["health"] = _as.unified_health(dependencies, out["source_health"])
+    except Exception as exc:
+        logging.getLogger("web_ui").warning("统一健康视图失败：%s", str(exc)[:120])
+        out["health"] = {"items": [], "summary": {}, "ok": False, "causes": []}
+    # 代码执行沙箱（容器隔离不可用时必须显式说明）
+    try:
+        out["code_sandbox"] = _code_sandbox_status()
+    except Exception:
+        out["code_sandbox"] = {}
+    return out
+
+
+def _build_identity_view() -> dict:
+    """P1-E：构建指纹视图（失败只降级为空对象，不阻断状态接口）。"""
+    try:
+        import build_identity as _build_identity
+        return _build_identity.identity()
+    except Exception as exc:                             # noqa: BLE001
+        logging.getLogger("web_ui").warning("构建指纹视图失败：%s", str(exc)[:120])
+        return {}
+
+
 def _system_status():
     try:
         db = sqlite3.connect(DB_PATH, timeout=10); db.row_factory = sqlite3.Row
@@ -1252,6 +1494,15 @@ def _system_status():
                     search_health = json.loads(raw)
             except Exception:
                 pass
+        # 任务20：Redis 自身的可用性（**本进程**探测）。此前 Redis 不可用时这里只有
+        # 一堆读不到的快照（search/source/embedding 全"未知"），用户分不清是 Redis 挂了
+        # 还是上游没数据；现在把"Redis 不可用 + 降级模式已持续多久"直接说出来。
+        try:
+            import redis_health as _redis_health
+            redis_status = _redis_health.status_snapshot()
+        except Exception as exc:
+            logging.getLogger("web_ui").warning("Redis 健康快照失败：%s", str(exc)[:120])
+            redis_status = {}
         try:
             # 行情数据源健康（eastmoney/tencent/sina 熔断 + 冷却），进程内快照
             from adapters.source_health import get_health as get_source_health
@@ -1288,6 +1539,7 @@ def _system_status():
             "health": health,
             "dependencies": dependencies,
             "search_health": search_health,
+            "redis": redis_status,
             "source_health": source_health,
             "budget": budget,
             "queues": queues,
@@ -1298,6 +1550,9 @@ def _system_status():
             "uptime_sec": int(time.time() - _START_TIME),
             "survival_rate": survival,
             "llm_usage": _get_llm_usage(),
+            # P1-E：与 /api/health 同源的实例身份 + 构建指纹（磁盘 vs 已加载），
+            # 状态页据此如实展示"当前实例在跑哪份代码、是否需要重启"。
+            "build": _build_identity_view(),
         }
     except Exception:
         # 兜底必须与正常返回**同形状、同告警面**：此前少了 llm_warning/embedding_health，
@@ -1320,11 +1575,15 @@ def _system_status():
                 _publish_embed_alert(_fb_notice)
         except Exception:
             _fb_embedding = {}
-        return {"agents": [], "queues": {}, "tasks": {"total": 0, "success": 0, "today": 0},
-                "memory": {"conversations": 0, "strategies": 0}, "recent": [],
-                "uptime_sec": 0, "survival_rate": 100,
-                "llm_warning": _fb_warning, "embedding_health": _fb_embedding,
-                "llm_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+        # 降级面快照用与正常路径**同一份实现**补齐：数据库不可读时，
+        # Redis/依赖/沙箱这些"最该看见"的信息不能反而消失，接口形状也必须一致。
+        _fb = {"agents": [], "queues": {}, "tasks": {"total": 0, "success": 0, "today": 0},
+               "memory": {"conversations": 0, "strategies": 0}, "recent": [],
+               "uptime_sec": 0, "survival_rate": 100,
+               "llm_warning": _fb_warning, "embedding_health": _fb_embedding,
+               "llm_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+        _fb.update(_status_aux_snapshots())
+        return _fb
 
 def _code_sandbox_status() -> dict:
     """沙箱状态快照（模式/是否要求隔离/隔离是否就绪/镜像是否存在）。
@@ -2884,6 +3143,15 @@ def _publish_task(
     except Exception:
         pass
     received_at = time.time()
+    # P0-C 契约链：提交时就算研究意图（一般任务 / 待补契约的研究 / 界内 / 界外），
+    # 随响应与编排器消息一起走——前端据此**当场**请求缺失字段，而不是等任务跑完
+    # 才发现缺契约（此前"自由文本不是公司研究"的默认归类让研究任务静默走泛流程）。
+    _intent = _research_intent_of(goal, stored_request=research_request or None)
+    if _intent and str(_intent.get("status") or "") == "needs_contract":
+        _events.append({
+            "event": "contract_missing", "ts": time.time(), "instance": "",
+            "detail": f"研究意图=company_research，契约缺 {len(_intent.get('missing') or [])} 项"
+                      "（编排器将按文本要素有界推进；补契约入口见响应 questions）"})
     try:
         import health_registry as _hr
         _instance = _hr.instance_id()
@@ -2925,7 +3193,8 @@ def _publish_task(
             _row = {}
         return {"task_id": _ref, "conversation_id": conversation_id,
                 "status": str(_row.get("status") or "QUEUED"),
-                "project": project, "deduplicated": True}
+                "project": project, "deduplicated": True,
+                "research_intent": _intent}
     if _verdict == "conflict":
         # 同作用域同键但**内容不同**：明确冲突，不发布（否则会执行一个与键不符的请求）
         raise RuntimeError(
@@ -2947,6 +3216,9 @@ def _publish_task(
             "parent_task_id": parent_task_id,
             # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
             "research_request": dict(research_request or {}),
+            # P0-C 契约链：研究意图判定随消息下发（编排器据此区分一般任务与待补契约的研究；
+            # 已有判据就不再重算，两侧同源）
+            "research_intent": dict(_intent or {}),
             # C3/H3b：幂等键 + 提交时间线的前两段（收到/发布意图）随请求下发
             "idempotency_key": idem,
             "submit_events": _events,
@@ -2993,7 +3265,8 @@ def _publish_task(
         if row and str(row.get("task_id") or "") == tid:
             return {"task_id": tid, "conversation_id": conversation_id,
                     "status": str(row.get("status") or "QUEUED"),
-                    "project": project, "ack_pending_consume": True}
+                    "project": project, "ack_pending_consume": True,
+                    "research_intent": _intent}
         raise RuntimeError(
             f"编排器未在 {timeout:.0f}s 内接收任务（服务未启动或正在重启）；"
             "任务未被创建，请确认 `python launcher.py status` 中 orchestrator 在线"
@@ -3006,7 +3279,8 @@ def _publish_task(
                 "conversation_id": conversation_id,
                 "status": "QUEUED", "project": project, "deduplicated": True}
     return {"task_id": tid, "conversation_id": conversation_id,
-            "status": "QUEUED", "project": project}
+            "status": "QUEUED", "project": project,
+            "research_intent": _intent}
 
 
 def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
@@ -3050,8 +3324,9 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     # （缺证据的项要能被清单看见：目标达成与否 + 缺口/待核验条数）
     paper_meta: dict = {}
     try:
-        from workspace import task_project_dir as _tpd
-        proj = _tpd(tid)
+        # 只读定位：清单登记不建目录（打开历史任务不得产生空 project/）
+        from workspace import existing_task_project_dir as _tpd
+        proj = _tpd(tid) or (task_workspace(tid) / "project")
         for key, name in (("working_paper_json", "working_paper.json"),
                           ("working_paper_csv", "working_paper.csv")):
             fp = proj / name
@@ -3104,6 +3379,9 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         "status": status,
         "draft": status != DELIVERY_VERIFIED,
         "draft_reason": draft_reason,
+        # P0-5：清单也要自述"这一版正文是不是截断稿"，否则包内清单比页面"干净"
+        "truncated": bool(state.get("truncated")),
+        "truncation": state.get("truncation") or {},
         "review_valid": bool(state.get("review_valid")),
         "hard_fail": str(state.get("hard_fail") or ""),
         "working_paper": paper_meta,
@@ -3136,6 +3414,40 @@ def _read_export_manifest(tid: str) -> dict:
             return {}
         return json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
+        return {}
+
+
+def _research_intent_of(goal: str, stored_request=None) -> dict:
+    """研究意图/契约判定（P0-C 契约链）：提交页、任务详情、编排器共用**一条判据**。
+
+    只读、零派发、零模型调用（纯规则解析）。返回 `research_intent.assess` 的
+    完整结构（intent/status/source/fields/missing/questions/boundary/reason/
+    repair/backfill/schema）；失败返回空 dict，不编判定。"""
+    try:
+        import research_intent as _ri
+        goal = str(goal or "").strip()
+        if not goal:
+            return {}
+        a = _ri.assess(goal, stored_request=stored_request)
+        return a if isinstance(a, dict) else {}
+    except Exception as exc:                      # noqa: BLE001 - 判定不可用如实返回空
+        logger.warning("研究意图判定失败（goal=%s）：%s", str(goal)[:60],
+                       str(exc)[:120])
+        return {}
+
+
+def _research_intent_payload(tid: str, data: dict | None = None) -> dict:
+    """任务详情里的研究意图块：goal 从任务行取，契约用**任务真实记录**（不编）。"""
+    try:
+        import task_state as _ts
+        row = dict(data or {})
+        if not row or not row.get("goal"):
+            row = _ts.read_task(tid) or {}
+        if not str(row.get("goal") or "").strip():
+            return {}
+        return _research_intent_of(row.get("goal"),
+                                   stored_request=row.get("research_request"))
+    except Exception:                             # noqa: BLE001
         return {}
 
 
@@ -3398,9 +3710,11 @@ def _get_task_working_paper_file(self, p):
             continue
         tid = p.split("/api/task/")[-1].rsplit(suffix, 1)[0]
         try:
-            from workspace import task_project_dir
-            fp = task_project_dir(tid) / name
-            if not fp.exists():
+            # 只读定位：底稿下载不建目录（任务不存在 → 404，不产生空 project/）
+            from workspace import existing_task_project_dir
+            proj = existing_task_project_dir(tid)
+            fp = (proj / name) if proj else None
+            if fp is None or not fp.exists():
                 return self._json({"error": "working paper not found"}, 404)
             raw = fp.read_bytes()
         except Exception as exc:
@@ -3497,6 +3811,18 @@ npm run build</pre>
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
 class Handler(BaseHTTPRequestHandler):
+    def _write_body(self, body: bytes) -> None:
+        """写响应体；客户端提前断开只记 debug，不让已完成的请求变成错误栈。
+
+        浏览器刷新/关标签/切账号会主动 abort 连接（WinError 10053/10054），
+        请求本身已经处理完，这里再抛异常只会在服务端日志里刷一堆吓人的 traceback，
+        掩盖真正的故障。
+        """
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+            logger.debug("客户端提前断开连接，响应体未写完：%s", exc)
+
     def _json(self, data, code=200, extra_headers=None):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(code)
@@ -3505,14 +3831,14 @@ class Handler(BaseHTTPRequestHandler):
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.send_header("Content-Length",str(len(body)))
-        self.end_headers(); self.wfile.write(body)
+        self.end_headers(); self._write_body(body)
 
     def _html(self, html, code=200):
         body = html.encode()
         self.send_response(code)
         self.send_header("Content-Type","text/html; charset=utf-8")
         self.send_header("Content-Length",str(len(body)))
-        self.end_headers(); self.wfile.write(body)
+        self.end_headers(); self._write_body(body)
 
     def _share_link(self, token: str) -> str:
         """构造分享页绝对链接。
@@ -3605,6 +3931,7 @@ class Handler(BaseHTTPRequestHandler):
         if (
             path == "/api/config"
             or path == "/api/config/requirements"
+            or path.startswith("/api/diagnostics")
             or path == "/api/users"
             or path == "/api/notifications"
             or path == "/api/audit"
@@ -3877,6 +4204,31 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/share/") and p.endswith("/auth"):
             # F6：公开分享密码验证（无需登录，凭 token 本身访问）
             return self._handle_share_auth()
+        # 筛选页的写入口：管理员 + 被显式开通自助研究权限的角色（只作用于本账户作用域）。
+        # 其余 POST 仍一律仅管理员——研究权限不会外溢到配置/账号/审计等管理面。
+        if p in _SCREEN_WRITE_PATHS:
+            session = self._require_auth()
+            if session is None:
+                return
+            if not _screen_can_research(session):
+                audit_log(str(session.get("user") or ""), self._client_ip(),
+                          "screen.write.denied", target=p, result="fail",
+                          detail=f"role={session.get('role')!r} 无自助研究权限")
+                return self._json({
+                    "error": _screen_read_only_reason(str(session.get("role") or ""),
+                                                      _screen_research_roles()),
+                    "code": "screen_read_only",
+                }, 403)
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length) if length > 0 else b""
+                body = json.loads(raw) if raw else {}
+            except Exception:
+                return self._json({"error": "invalid json"}, 400)
+            for _pred, _h in _POST_ROUTES:
+                if _pred(self, p):
+                    return _h(self, p, body, session)
+            return self._json({"error": "not found"}, 404)
         # 其余 POST 均为写操作：仅管理员可执行（viewer 403）
         admin = self._require_admin()
         if admin is None:
@@ -3972,6 +4324,22 @@ def _drop_running_marker(task_id: str) -> bool:
 def main():
     from logging_setup import setup_logging
     setup_logging("webui")
+    # 单写者声明（screen 存储跨进程互斥）：同一筛选目录已有写入进程时拒绝启动，
+    # 而不是两个进程都「看起来正常」然后互相丢更新。
+    try:
+        import screen_store as _screen_store_claim
+        _writer_ok, _writer_info = _screen_store_claim.claim_writer()
+    except Exception as _claim_exc:                # noqa: BLE001 - 声明失败按拒绝处理
+        _writer_ok, _writer_info = False, {"error": f"写者声明异常：{_claim_exc}"}
+    if not _writer_ok:
+        _msg = f"启动拒绝：{_writer_info.get('error')}"
+        print(_msg, flush=True)
+        logging.getLogger("web_ui").error("%s holder=%s", _msg,
+                                          json.dumps(_writer_info.get("holder") or {},
+                                                     ensure_ascii=False)[:200])
+        raise SystemExit(2)
+    logging.getLogger("web_ui").info("screen writer claimed: pid=%s dir=%s",
+                                     _writer_info.get("pid"), _writer_info.get("screen_dir"))
     _init_db()
     _ensure_users_on_startup()
     _load_evolution_history()
@@ -4246,12 +4614,44 @@ def main():
 def _get_health(self, p):
     if p == "/api/health":
         # 公开健康检查：无需登录，供探活/负载均衡使用；附带沙箱状态供部署确认
-        return self._json({
+        payload = {
             "status": "ok",
             "service": "weavemind-web",
             "time": _now_iso(),
             "code_sandbox": _code_sandbox_status(),
-        })
+        }
+        # 任务20：Redis 可用性**公开可见**（探活/负载均衡据此摘流）。公开接口只暴露
+        # 布尔与延迟：错误文本里带内网地址/端口，不进无鉴权响应（完整版在 /api/status）。
+        try:
+            import redis_health as _redis_health
+            payload["redis"] = _redis_health.public_snapshot()
+        except Exception as exc:                         # noqa: BLE001 - 探活失败不坏探活接口
+            logging.getLogger("web_ui").warning("Redis 公开健康快照失败：%s", str(exc)[:120])
+        # 任务23：LLM 端点熔断状态公开可见（同口径：只有状态名/端点名/计数，
+        # 不含任何地址或密钥；Redis 镜像读不到时只报 CLOSED，不坏探活接口）。
+        try:
+            from llm_circuit_breaker import health_view as _llm_health_view
+            payload["llm"] = _llm_health_view()
+        except Exception as exc:                         # noqa: BLE001
+            logging.getLogger("web_ui").warning("LLM 熔断快照失败：%s", str(exc)[:120])
+        # P1-E：实例身份与构建指纹公开可见（探活/部署确认据此判断"在线是否已在
+        # 跑当前源码"）。只暴露短哈希/计数/时刻：不含绝对路径、环境变量值或密钥；
+        # 源码在启动后变过时 restart_required=true（如实呈现"待受控重启"）。
+        try:
+            import build_identity as _build_identity
+            payload["build"] = _build_identity.identity()
+        except Exception as exc:                         # noqa: BLE001 - 身份失败不坏探活
+            logging.getLogger("web_ui").warning("构建指纹失败：%s", str(exc)[:120])
+        # 单写者声明状态（公开只暴露布尔+pid，不含路径）：诊断「谁在写」用
+        try:
+            import screen_store as _ss_health
+            payload["screen_writer"] = {
+                "claimed_by_this_process": _ss_health._WRITER_LOCK_FH is not None,
+                "pid": os.getpid() if _ss_health._WRITER_LOCK_FH is not None else None,
+            }
+        except Exception:                                # noqa: BLE001 - 不坏探活
+            pass
+        return self._json(payload)
 
 def _get_bootstrap(self, p):
     if p == "/api/auth/bootstrap":
@@ -4425,9 +4825,11 @@ def _get_task_working_paper(self, p):
     if p.startswith("/api/task/") and p.endswith("/working_paper"):
         tid = p.split("/api/task/")[-1].rsplit("/working_paper", 1)[0]
         try:
-            from workspace import task_project_dir
-            path = task_project_dir(tid) / "working_paper.json"
-            if not path.exists():
+            # 只读定位：打不开任务时不建目录（P0-A）
+            from workspace import existing_task_project_dir
+            proj = existing_task_project_dir(tid)
+            path = (proj / "working_paper.json") if proj else None
+            if path is None or not path.exists():
                 return self._json({"error": "not found"}, 404)
             with open(path, "r", encoding="utf-8") as f:
                 return self._json(json.load(f))
@@ -5192,7 +5594,23 @@ def _get_task_page(self, p):
                         "aligned": _state.get("aligned"),
                         "accepted_body_matches": bool(_state.get("accepted_body_matches")),
                         "review_valid": bool(_state.get("review_valid")),
+                        # P0-5：截断闸门的结论必须能被页面读到（此前只在后端判、页面看不到
+                        # "为什么是草稿"），以及本版正文身份（projection）——页面/导出/包内
+                        # 清单读同一份，不再各自拼条件。
+                        "truncated": bool(_state.get("truncated")),
+                        "truncation": _state.get("truncation") or {},
+                        "projection": _state.get("projection") or {},
                     }
+                    # 研究简报面板（ResearchBriefPanel）读的是 `research`：把截断结论
+                    # 一并挂上，页面因此能明说"这份正文被判截断、只能算草稿"。
+                    if isinstance(research, dict):
+                        research["delivery"] = {
+                            "status": delivery["status"],
+                            "draft": delivery["draft"],
+                            "draft_reason": delivery["draft_reason"],
+                            "truncated": delivery["truncated"],
+                            "truncation": delivery["truncation"],
+                        }
                     # 页面里的验收结论也按**选中版本**给（同一份 payload 不得两个版本并存）
                     acceptance_bound = {
                         "overall": _state.get("acceptance_overall") or "",
@@ -5241,6 +5659,17 @@ def _get_task_page(self, p):
                 logging.getLogger("web_ui").warning("可行动状态计算失败（%s）：%s",
                                                     tid, str(exc)[:120])
                 actionable = None
+            # 任务19：检索覆盖率（可见性）——从步骤真值现算，与报告末尾的
+            # "数据来源摘要"同一口径（`search_coverage`）。没有检索步（纯代码/离线
+            # 任务）→ None，前端不显示这一块，不用 0% 冒充"检索质量差"。
+            search_coverage = None
+            try:
+                import search_coverage as _sc
+                _cov = _sc.summarize_search_coverage(data.get("steps") or [])
+                search_coverage = _cov if _cov.get("total_search_steps") else None
+            except Exception as exc:                     # noqa: BLE001
+                logging.getLogger("web_ui").warning("检索覆盖率计算失败（%s）：%s",
+                                                    tid, str(exc)[:120])
             return self._json({
             "task_id": tid,
             "status": data.get("status", "PENDING"),
@@ -5252,10 +5681,20 @@ def _get_task_page(self, p):
             "logs": data.get("logs") or [],
             "project": data.get("project", ""),
             "revision": bool(data.get("revision")),
+            # P0-C 契约链：任务详情带研究意图判定（只读、同一条判据），页面据此
+            # 显示"一般任务 / 待补契约的研究（缺哪些字段） / 界内 / 界外"。
+            "research_intent": _research_intent_payload(tid, data),
             # B 批：验收结论与交付状态都以**选中版本**为准（同一份 payload 不得两个版本并存）
             "acceptance": (dict(data.get("acceptance") or {}, **(acceptance_bound or {}))
                            if isinstance(data.get("acceptance"), dict)
                            else (acceptance_bound or data.get("acceptance"))),
+            # 任务18：逐项验收证据（checks/report_type/evaluated_at，来自任务行）。
+            # 与 `acceptance`（终态摘要）分键：库里只有摘要、或这一版没跑过验收 → null，
+            # 前端据此显示"证据未入库"，不回退去读可能被别的版本覆盖过的快照文件。
+            "acceptance_evidence": data.get("acceptance_evidence"),
+            # 任务19：检索覆盖率（total/ok/zero_source/degraded/incomplete/coverage_rate），
+            # 无检索步时为 null；报告末尾的"数据来源摘要"用的是同一份汇总
+            "search_coverage": search_coverage,
             "llm_degraded": data.get("llm_degraded"),
             "elapsed_sec": elapsed,
             "review_state": review_state,
@@ -5266,6 +5705,8 @@ def _get_task_page(self, p):
             "content_filter": content_filter,
             "research": research,
             "export": export,
+            # U90-B：「继续执行」按钮与解释的**同一份判定**（与 /tasks 列表一致）
+            "resume": _resume_view(data),
         })
         return self._json({"error":"not found"},404)
 
@@ -5452,8 +5893,9 @@ def _research_payload(tid: str, ws) -> dict | None:
             out["structure_current"] = False
         # 图表清单写在**项目目录**（渲染脚本的 cwd），工作区根目录只作回退
         try:
-            from workspace import task_project_dir as _tpd
-            _proj = _tpd(tid)
+            # 只读定位：图表清单读取不建目录（P0-A）
+            from workspace import existing_task_project_dir as _tpd
+            _proj = _tpd(tid) or ws
         except Exception:
             _proj = ws
         cp = _proj / "chart_manifest.json"
@@ -5482,10 +5924,12 @@ def _research_payload(tid: str, ws) -> dict | None:
         # 工作区 `human_review.json`——**只有真实研究员的复核动作**才写它，自动流程与
         # 执行者都不写，因此缺文件（或没写批准者）一律如实显示"待复核"。
         machine = {"overall": "", "version_id": "", "bound": False}
+        current_identity = ""
         try:
             from report_version import VersionStore as _VS
             _cur = _VS(ws, tid).adopted()
             if _cur is not None:
+                current_identity = _cur.identity_id()
                 machine = {"overall": _cur.acceptance_overall(),
                            "version_id": str(_cur.version_id or ""),
                            "bound": bool(_cur.acceptance_for_this_body())}
@@ -5510,16 +5954,24 @@ def _research_payload(tid: str, ws) -> dict | None:
                 _hit = None
             out["structure_version_exists"] = _hit is not None
             out["structure_version_adopt_reason"] = str((_hit or {}).get("adopt_reason") or "")
-        human = {"status": "pending", "approver": "", "at": "", "version_id": ""}
+        human = {"status": "pending", "approver": "", "at": "", "version_id": "",
+                 "bound": False, "reason": "无研究员批准记录"}
         hp = ws / "human_review.json"
         if hp.exists():
             try:
                 h = _json.loads(hp.read_text(encoding="utf-8")) or {}
                 # 缺批准者不算已复核（fail closed）：不允许匿名/自动填写的"批准"
                 if str(h.get("status") or "") == "recorded" and str(h.get("approver") or "").strip():
-                    human = {"status": "recorded", "approver": str(h.get("approver") or ""),
+                    review_version = str(h.get("version_id") or "")
+                    review_bound = bool(current_identity and review_version == current_identity)
+                    human = {"status": "recorded" if review_bound else "pending",
+                             "approver": str(h.get("approver") or ""),
                              "at": str(h.get("at") or ""),
-                             "version_id": str(h.get("version_id") or "")}
+                             "version_id": review_version, "bound": review_bound,
+                             "reason": ("绑定当前采纳版" if review_bound else
+                                        "批准记录缺少版本身份" if not review_version else
+                                        "当前无采纳版，无法绑定批准记录" if not current_identity else
+                                        "既有批准记录不属于当前采纳版")}
             except Exception:
                 pass
         out["review"] = {"machine": machine, "human": human}
@@ -5851,6 +6303,9 @@ def _analysis_workbench(tid: str) -> dict:
     from workspace import task_workspace
     ws = task_workspace(tid)
     out: dict = {"task_id": tid, "ok": False, "reason": "",
+                 # U90-C：没有可复算输入时，面板要给"下一步做什么"；
+                 # can_freeze=按现有事实确定性补算，next_action ∈ freeze/material/recompute
+                 "can_freeze": False, "next_action": "",
                  "models": [], "runs": [], "inputs": {}, "cards": []}
     try:
         from financial_analysis import registry as _reg
@@ -5870,6 +6325,18 @@ def _analysis_workbench(tid: str) -> dict:
                 _obs_by_fact[str(o["fact_id"])] = o
     except Exception as exc:                        # noqa: BLE001 - 索引建不出不影响其它字段
         logger.warning("原始依据索引构建失败（task=%s）：%s", tid, str(exc)[:120])
+    # U90-C：**"没有可复算输入"时页面必须给出下一步**，不能只丢一句缺口。
+    # 判定只读工作区、不落盘、不调模型：本次任务是否留有可冻结的事实来源
+    # （`project/working_paper.json` 优先，其次 `project/financials.json`）。
+    # 有来源 ⇒ 可以按现有事实补算（确定性、零模型调用）；没有 ⇒ 如实说"补不了"。
+    _freeze_src = ""
+    try:
+        from workers.data_analyzer_worker import DataAnalyzerWorker as _DAW
+        _picked = _DAW._financial_source(ws)
+        _freeze_src = str(_picked[0]) if _picked else ""
+    except Exception as exc:                        # noqa: BLE001 - 判定失败按"不能补算"
+        logger.warning("补算来源判定失败（task=%s）：%s", tid, str(exc)[:120])
+        _freeze_src = ""
     out["inputs"] = {
         "present": sorted(fa_store.input_payload_bytes(ws)),
         "dataset_hash": str((inputs.get("dataset") or {}).get("dataset_hash") or ""),
@@ -5877,6 +6344,8 @@ def _analysis_workbench(tid: str) -> dict:
         "contract": (inputs.get("context") or {}).get("contract") or {},
         "recomputable": bool((inputs.get("dataset") or {}).get("dataset")),
         "observations": len(_obs_by_fact),
+        # 可用事实来源（working_paper / financials / 空）——补算按钮据此显隐
+        "source": _freeze_src,
     }
     _ds_hash = str(out["inputs"]["dataset_hash"] or "")
     try:
@@ -5904,9 +6373,51 @@ def _analysis_workbench(tid: str) -> dict:
                        for p in (_pkgs.get("packages") or [])]
     out["adopted_identity"] = str(_pkgs.get("adopted_identity") or "")
     if not out["inputs"]["recomputable"]:
-        out["reason"] = ("该任务没有可复算输入（analysis/dataset.json）："
-                         "先让分析步跑完（分析链会落 dataset/plan/context）")
+        # U90-C：缺口要**如实且可行动**——要么能补算（有本次任务事实），要么明确说
+        # 该补材料/重跑，绝不把"补不了"伪装成"已就绪"。
+        out["can_freeze"] = bool(_freeze_src)
+        if _freeze_src:
+            _src_label = ("本次任务的工作底稿（project/working_paper.json）"
+                          if _freeze_src == "working_paper" else
+                          "本次任务的财务事实（project/financials.json）")
+            out["reason"] = (
+                "该任务没有可复算输入（analysis/dataset.json）：分析步没跑或没落盘。"
+                f"工作区留有{_src_label}，可点『补算分析输入』按现有事实冻结数据集"
+                "并复算注册模型（确定性、不调模型）；资料不足的模型会如实留缺口，"
+                "不会编数据。")
+            out["next_action"] = "freeze"
+        else:
+            out["reason"] = (
+                "该任务没有可复算输入（analysis/dataset.json），且工作区没有本次任务的"
+                "事实来源（project/working_paper.json 与 project/financials.json 均不存在）："
+                "无法离线补算。要么补一份披露材料（材料页→补材料），要么重跑研究；"
+                "系统不会用猜测的数据补齐。")
+            out["next_action"] = "material"
     runs = fa_store.load_runs(ws)
+    # U90-C（10-20）：**把注册模型接进"改假设"面板**——不只列已有运行的模型。
+    # 情景模型（scenario_sensitivity/cash_pressure）注册了可改的情景参数，但本任务
+    # 可能还没算过它：此前模型选择器只列"已有运行"的模型 ⇒ 用户在页面上根本没有
+    # "改一个情景参数"的入口（只剩 rounding 这种字符串选择还没渲染）。
+    # 这里把 registry 里的非比率模型清单一起回显（ran=是否已算过），
+    # 只读 registry：确定性、不调模型、不落盘。列不出就如实空。
+    try:
+        _ran_mids = {str(r.get("model_id") or "") for r in runs}
+        out["models"] = [
+            {
+                "id": str(s.model_id),
+                "label": str(s.question or s.model_id),
+                "ran": str(s.model_id) in _ran_mids,
+                "allowed_params": {
+                    k: (list(v) if isinstance(v, (tuple, list)) else v)
+                    for k, v in dict(getattr(s, "allowed_params", {}) or {}).items()
+                },
+                "default_params": dict(getattr(s, "default_params", {}) or {}),
+            }
+            for s in _reg.specs()
+            if not str(s.model_id).startswith("ratio:")
+        ]
+    except Exception as exc:                        # noqa: BLE001 - 清单列不出就如实空
+        logger.warning("注册模型清单读取失败（task=%s）：%s", tid, str(exc)[:120])
     cards: list[dict] = []
     for r in runs:
         mid = str(r.get("model_id") or "")
@@ -5985,6 +6496,8 @@ def _analysis_workbench(tid: str) -> dict:
         c["in_report"] = (str(c.get("run_id") or "") in _selected_ids) if _selected_ids \
             else bool(c.get("selected"))
     out["ok"] = bool(out["inputs"]["recomputable"])
+    if out["ok"]:
+        out["next_action"] = "recompute"
     return out
 
 
@@ -5998,6 +6511,79 @@ def _get_task_analysis(self, p):
     if not _task_exists(tid):
         return self._json({"error": "task not found"}, 404)
     return self._json(_analysis_workbench(tid))
+
+
+def _post_task_analysis_freeze(self, p, body, admin):
+    """`POST /api/task/<id>/analysis/freeze`：用**现有事实**补算可复算分析输入（U90-C）。
+
+    复用 data_analyzer 的同一条冻结链（`_run_financial`：冻结数据集 → 编译计划 →
+    跑注册模型 → 落盘 dataset/plan/context + analysis_runs.json）——**确定性、零模型
+    调用、零派发**：不新增服务/worker/DB，也不拿猜测数据顶上。
+
+    - 已有输入：200 + `already=true`（幂等，不重算；要改假设走复算入口）；
+    - 任务在跑：409（正在写工作区，同时补算会互相覆盖）；
+    - 没有本次任务事实来源：409 + `code=no_source`（离线补不了，如实说）；
+    - 契约要素不全：409 + `code=contract_gap` + 缺什么（不降门槛、不编数据）。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/analysis/freeze")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/analysis/freeze", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    import task_state as _ts
+    from workspace import task_workspace
+    from financial_analysis import store as fa_store
+    from workers.data_analyzer_worker import ContractGap as _ContractGap
+    from workers.data_analyzer_worker import DataAnalyzerWorker as _DAW
+    ws = task_workspace(tid)
+    if fa_store.input_payload_bytes(ws).get("analysis/dataset.json"):
+        return self._json({"status": "ok", "already": True,
+                           "note": "已有可复算输入，未重算（要改假设请用分析工作台的复算入口）",
+                           "analysis": _analysis_workbench(tid)})
+    try:
+        if _ts.is_running(tid):
+            return self._json(
+                {"error": "任务正在运行：等它收尾后再补算（避免与分析步同时写工作区）",
+                 "code": "task_running"}, 409)
+    except Exception:                            # noqa: BLE001 - 读不到状态就不挡
+        pass
+    source = _DAW._financial_source(ws)
+    if source is None:
+        return self._json(
+            {"error": "工作区没有本次任务的事实来源（project/working_paper.json 与 "
+                      "project/financials.json 均不存在）：无法离线补算；请补一份披露"
+                      "材料或重跑研究。系统不会用猜测的数据补齐。",
+             "code": "no_source", "analysis": _analysis_workbench(tid)}, 409)
+    row = {}
+    try:
+        row = _ts.read_task(tid) or {}
+    except Exception:                            # noqa: BLE001 - 读不到就按空目标
+        row = {}
+    ctx = dict(row.get("context") or {}) if isinstance(row.get("context"), dict) else {}
+    ctx.setdefault("root_task_id", ctx.get("root_task_id") or tid)
+    task = {"task_id": tid, "goal": str(row.get("goal") or ""),
+            "workspace": str(ws), "context": ctx}
+    worker = _DAW.__new__(_DAW)                  # 只用静态冻结链，不连 Redis
+    res = worker._run_financial(ws, "", task, source)
+    if str(res.get("status")) == "failed" and not res.get("runs"):
+        # 契约要素不全/没有相容观察：409 + 原文缺口（不落任何运行记录）
+        return self._json({"status": "failed", "error": str(res.get("error") or "补算失败"),
+                           "code": "contract_gap", "gap": str(res.get("gap") or ""),
+                           "dataset_source": res.get("dataset_source") or {},
+                           "analysis": _analysis_workbench(tid)}, 409)
+    _valid = sum(1 for r in (res.get("runs") or [])
+                 if str(r.get("status") or "") == "validated")
+    return self._json({
+        "status": "ok", "already": False,
+        "result": {"runs_total": len(res.get("runs") or []),
+                   "runs_validated": _valid,
+                   "dataset_hash": str(res.get("dataset_hash") or ""),
+                   "dataset_source": res.get("dataset_source") or {},
+                   "gaps": list(res.get("gaps") or [])},
+        # 资料不足的模型如实留缺口：结果里明说哪些模型没跑出来
+        "analysis": _analysis_workbench(tid)})
 
 
 def _post_task_analysis_recompute(self, p, body, admin):
@@ -7381,15 +7967,19 @@ def _post_task_package(self, p, body, admin):
     pdf_bytes = b""
     pdf_error = ""
     try:
-        # PDF 从**同一份交付正文**渲染（不再各自重读"当前版本"）
+        # PDF 从**同一份交付正文**渲染（不再各自重读"当前版本"）。
+        # 任务22：优先用**主文**（附录前）渲染——更短=更快=更清楚，来源清单等
+        # 附录内容仍可从完整正文/交付包查阅；没有附录级标题时即完整正文本身。
+        from report_quality import split_report_appendix
         from report_pdf import markdown_to_pdf
+        pdf_source, _appendix = split_report_appendix(delivered)
         title = ""
         for ln in delivered.split("\n"):
             s = ln.strip()
             if s.startswith("# "):
                 title = s[2:].strip()
                 break
-        pdf_bytes = markdown_to_pdf(delivered, title=title or "任务报告", workspace=ws)
+        pdf_bytes = markdown_to_pdf(pdf_source, title=title or "任务报告", workspace=ws)
     except Exception as exc:                     # noqa: BLE001 - PDF 失败不阻断打包
         pdf_error = str(exc)[:160]
     try:
@@ -7409,7 +7999,9 @@ def _post_task_package(self, p, body, admin):
                 "retry": True}, 409)
         if "version changed" in str(exc):
             return self._json({
-                "error": "导出期间发生修订（交付正文与采纳版本不一致），未生成新包；请重试",
+                "error": ("交付正文与当前采纳版本不一致（恢复/修订后页面投影可能未更新），"
+                          "未生成新包，不把旧正文贴上新身份；请先重新装配或重验该版本，"
+                          "页面正文刷新后再导出（单纯重试不会好）"),
                 "retry": True}, 409)
         logger.warning("导出快照失败（task=%s）：%s", tid, str(exc)[:200])
         return self._json({"error": f"导出快照失败：{str(exc)[:160]}"}, 500)
@@ -7439,6 +8031,7 @@ def _post_task_package(self, p, body, admin):
         "snapshot": {
             "report_version_id": snap.get("report_version_id"),
             "research_body_sha256": snap.get("body_sha256"),
+            "selection_binding": snap.get("selection_binding"),
             "sources_fingerprint": snap.get("sources_fingerprint"),
             "rules_version": snap.get("rules_version"),
             "rules_fingerprint": snap.get("rules_fingerprint"),
@@ -7516,6 +8109,99 @@ def _post_task_cancel(self, p, body, admin):
               target=tid, result="ok")
     return self._json({"status": "ok", "task_id": tid,
                        "note": "已请求停止；编排器会在下一个派发边界收尾"})
+
+
+def _post_task_resume(self, p, body, admin):
+    """POST /api/task/<task_id>/resume：人工恢复**终态 FAILED** 的任务（任务26）。
+
+    为什么需要这个入口：任务 FAILED 后旧路径只能整单重跑（再提交一个新任务）——
+    已成功的步骤（抓取/计算，可能花了 20 分钟）全部重来。这里把状态翻回 RUNNING
+    并通知编排器**重新接管**：编排器按持久化的步骤状态跳过已成功步骤
+    （step_resumed）、恢复 Redis 持久化的死链清单，只跑未完的步骤。
+
+    只认 FAILED/CRASHED：SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED 是不可逆终态，
+    不得被静默改写（复核红线：结论只能人工改，不能由接口改）。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/resume")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/resume", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    row = {}
+    try:
+        import task_state as _ts
+        row = _ts.read_task(tid) or {}
+    except Exception:
+        row = {}
+    status = str(row.get("status") or "").upper()
+    if status not in ("FAILED", "CRASHED"):
+        # R3：409 带上真实状态与"能否再试"，页面据此决定按钮是否可再点
+        # （旧实现只给一句 error，页面把任何回执都当成"点过了"，失败不可重试）
+        _running = status in ("RUNNING", "QUEUED", "PENDING", "QRUNNING")
+        return self._json(
+            {"error": f"只有失败的任务可以恢复（当前 {status or '未知'}）",
+             "status": status, "retryable": False, "resumed": _running,
+             "note": ("任务已在运行：无需重复恢复，刷新即可看到进展"
+                      if _running else "该状态是不可逆终态，不能由接口改写")}, 409)
+    if not _redis_ready():
+        return self._json({"error": "Redis 未连接，无法恢复任务；稍后可再试",
+                           "status": status, "retryable": True}, 503)
+    # 翻转 FAILED → RUNNING（CAS：只有翻成功的一方赢得重新接管权；
+    # 两个恢复入口竞争时后者拿到 409，不会各自建线程执行两次）
+    try:
+        import task_state as _ts
+        won = _ts.mark_resumed(tid)
+    except Exception as exc:
+        return self._json({"error": f"恢复失败：{str(exc)[:120]}",
+                           "status": status, "retryable": True}, 500)
+    if not won:
+        # CAS 落空：另一方赢了（或状态已变）。回读真实状态如实回报——
+        # 若已是 RUNNING，说明**确实已被恢复**（可刷新查看），不要再点。
+        try:
+            now = str((_ts.read_task(tid) or {}).get("status") or "").upper()
+        except Exception:
+            now = ""
+        _resumed = now in ("RUNNING", "QUEUED", "PENDING", "QRUNNING")
+        return self._json(
+            {"error": "任务已被另一个入口恢复或状态已变化，未重复接管",
+             "status": now, "retryable": not _resumed,
+             "resumed": _resumed,
+             "note": ("任务已在运行：本次未重复接管，刷新即可看到进展"
+                      if _resumed else "状态已变化，请刷新后按当前状态决定")}, 409)
+    # 通知编排器重新接管（resume_task 消息与普通提交同通道但**分流**：
+    # 终态任务的收执早已消费过，走普通提交会被 promote_received 判 "already" 跳过）
+    try:
+        r = _new_redis()
+        r.publish("orchestrator:main", json.dumps({
+            "type": "resume_task", "task_id": tid,
+            "goal": str(row.get("goal") or ""),
+            "user_id": admin.get("user", ""),
+            "project": str(row.get("project") or "default"),
+        }, ensure_ascii=False))
+    except Exception:
+        # R3：发布失败时状态已经翻成 RUNNING，若不回滚，用户重试会拿到
+        # 409「当前 RUNNING」——失败不可再次操作，只能等看护线程按 stale
+        # RUNNING 收口。回滚是 CAS（只回滚本次恢复刚写的 phase），编排器若已
+        # 接管则回滚落空，此时如实告诉用户"先刷新看状态"，不谎称可重试。
+        try:
+            _undone = bool(_ts.mark_resume_undone(
+                tid, reason="resume_task 发布失败"))
+        except Exception:
+            _undone = False
+        return self._json(
+            {"error": ("恢复未生效：未能通知编排器，已回滚为失败态，可稍后再试"
+                       if _undone else
+                       "恢复未生效：未能通知编排器，且状态未能回滚——"
+                       "请先刷新查看任务当前状态，不要重复点击"),
+             "status": "FAILED" if _undone else "",
+             "retryable": _undone}, 503)
+    audit_log(admin.get("user", ""), self._client_ip(), "task.resume",
+              target=tid, result="ok")
+    return self._json({"status": "ok", "task_id": tid,
+                       "note": "已请求恢复；编排器将按持久化步骤状态续跑"
+                               "（跳过已成功步骤，只跑未完步骤）"})
 
 
 def _post_step_confirm(self, p, body, admin):
@@ -7794,7 +8480,17 @@ def _post_config(self, p, body, admin):
             audit_log(admin.get("user", ""), self._client_ip(), "config.save",
                       result="fail", detail="; ".join(issues)[:200])
             return self._json({"error": "配置校验失败", "issues": issues}, 400)
+        # 用户自加数据源 / MCP 条目的密钥改道本机密钥仓（config.json 只留非密钥字段）；
+        # 被删除的条目同步清掉孤儿凭据。统计只含计数，不含任何密钥值。
+        secret_stats = _route_list_secrets(body)
         _save_config(body)
+        # 登记表失效：新加/停用/删除的数据源立即生效（net_policy 下次读取重载），
+        # 不必重启进程
+        try:
+            import net_policy as _net
+            _net.invalidate_registry()
+        except Exception:
+            pass
         llm = body.get("llm",{})
         if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
         if llm.get("base_url"): os.environ["LLM_BASE_URL"] = llm["base_url"]
@@ -7805,8 +8501,38 @@ def _post_config(self, p, body, admin):
             _clear_balance_cache()
         except Exception:
             pass
-        audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
-        return self._json({"status":"saved"})
+        audit_log(admin.get("user", ""), self._client_ip(), "config.save",
+                  result="ok",
+                  detail=("secrets: written=%(written)d cleared=%(cleared)d "
+                          "dropped=%(dropped)d" % secret_stats))
+        return self._json({"status":"saved", "secrets": secret_stats})
+
+
+def _get_diagnostics_network(self, p):
+    """GET /api/diagnostics/network：公网出口 DNS 分类（RUNTIME-1022 P0-B，只读脱敏）。
+
+    设置页/运维排障用：资料域名被本机 DNS 映射到保留段（198.18.0.x、2001:2::x，
+    fake-IP 特征）时 SSRF 防线会拒绝——这个接口把"哪个目标、落在哪个保留段、下一步
+    看哪里"讲清楚，避免把出口问题误报成密钥问题或"没有数据"。只做 DNS 解析
+    （不发 HTTP 请求、不新建请求点），不返回完整配置/凭据；`?refresh=1` 强制重解析。
+    """
+    if p != "/api/diagnostics/network":
+        return
+    refresh = "refresh=1" in (self.path or "")
+    import net_policy as _np
+    report = {}
+    try:
+        import net_diag
+        report = net_diag.egress_report(refresh=refresh)
+    except Exception as exc:
+        report = {"state": "unknown", "summary": f"出口诊断不可读：{str(exc)[:80]}",
+                  "probed": 0, "counts": {}, "targets": [], "advice": []}
+    try:
+        proxy = _np.proxy_settings_report()
+    except Exception:
+        proxy = {}
+    return self._json({"network_egress": report, "proxy": proxy,
+                       "hint": "fake-IP 特征 ≠ 已识别代理软件；主机侧 DNS/代理调整需人工审批"})
 
 
 def _get_config_requirements(self, p):
@@ -7848,6 +8574,10 @@ def _get_config_requirements(self, p):
             resolved = settings_schema.resolve(item, cfg, env)
             api_key_set = bool(resolved.get("value")) and item.get("kind") == "secret"
             display_value = settings_schema.mask(item, resolved.get("value"), api_key_set)
+            # 列表段（数据源/MCP/端点登记）的条目里可能混着历史明文 api_key：递归清零，
+            # 与 /api/config 同口径——密钥只从密钥仓读，任何接口都不回发明文。
+            if isinstance(display_value, list):
+                display_value = _scrub_secret_keys(display_value)
             health_item = health.get(str(item.get("health") or "")) or {}
             entries_out.append({
                 "path": item["path"],
@@ -7910,7 +8640,9 @@ def _post_config_test(self, p, body, admin):
         allowed = set(settings_schema.testable_targets().keys()) | {"mcp", "lora"}
     except Exception:
         allowed = {"llm", "planner", "backup", "embedding"}
-    if target not in allowed:
+    # 逐源探测：`data_source:<id>`（设置页每个数据源一个"测试"按钮）
+    per_source = target.startswith("data_source:")
+    if target not in allowed and not per_source:
         return self._json({"error": f"不支持的探测目标：{target or '(空)'}"}, 400)
     ip = self._client_ip()
     if ip not in ("127.0.0.1", "::1"):
@@ -7918,6 +8650,17 @@ def _post_config_test(self, p, body, admin):
         if locked:
             return self._json({"error": f"探测过于频繁，请 {wait}s 后重试"}, 429)
         _bf_record(f"cfgtest:{ip}")
+    if per_source:
+        sid = target.split(":", 1)[1].strip()
+        try:
+            import data_sources
+            result = data_sources.probe_source(sid)
+        except Exception as exc:
+            return self._json({"error": f"数据源探测失败：{str(exc)[:150]}"}, 500)
+        audit_log(admin.get("user", ""), ip, "config.test", target=target,
+                  result="ok" if result.get("ok") else "fail",
+                  detail=str(result.get("reason") or "")[:120])
+        return self._json(result)
     try:
         import health_registry
         result = health_registry.live_probe(target)
@@ -7979,8 +8722,13 @@ def _post_users(self, p, body, admin):
     if password and len(password) < 8:
         return self._json({"error": "密码至少 8 位"}, 400)
     new_role = role or str((users.get(username) or {}).get("role") or "viewer")
-    if new_role not in ("admin", "viewer"):
-        return self._json({"error": "角色只能是 admin 或 viewer"}, 400)
+    research_roles = _screen_research_roles()
+    # B1：角色不再硬编码两值。admin 恒可用；viewer 恒可用；其余角色必须是本次部署
+    # 在 config.json → screen.research_roles 里显式开通的（不放开任意字符串）。
+    if new_role not in ("admin", "viewer") and new_role not in research_roles:
+        allowed = "、".join(("admin", "viewer") + tuple(research_roles))
+        return self._json({"error": f"角色不可用：本部署允许 {allowed}；"
+                                    "自助研究角色需先在 config.json → screen.research_roles 开通"}, 400)
     admins = [n for n, i in users.items()
               if isinstance(i, dict) and str(i.get("role")) == "admin"]
     if (exists and username in admins and new_role != "admin"
@@ -9432,10 +10180,1073 @@ def _post_research_study_hypothesis_card(self, p, body, admin):
 
 
 # ============================================================
+# 可解释选股 MVP（R1-SCREEN-1023，R1-B）：预览/执行/查看原版/证据
+#
+# 边界：写操作仅 admin（do_POST 统一 _require_admin）；GET 只读走
+# _role_allowed_get（viewer 可看结果历史）；筛选纯计算零模型调用；
+# 结果不可变（screen_store），「查看原版」永不重算。
+# ============================================================
+
+def _screen_scope(session) -> dict:
+    """服务端从**会话**推导作用域；请求体自报的 owner/project 一律不采信。
+
+    现有产品只有账户角色（admin/viewer），没有项目 CRUD：个人作用域的 project 固定
+    `personal`。将来引入项目时，这里改为按项目成员关系校验，仍然不从客户端取值。
+    """
+    user = str((session or {}).get("user") or "").strip()
+    if not user:
+        raise ValueError("缺会话用户：无法确定作用域")
+    return {"user": user, "project": "personal"}
+
+
+def _screen_scope_or_401(self):
+    """GET 侧取作用域：未登录直接 401（不靠默认 root 兜底）。"""
+    session = self._auth_session()
+    if session is None:
+        self._json({"error": "未登录或登录已过期"}, 401)
+        return None
+    try:
+        return _screen_scope(session)
+    except ValueError as exc:
+        self._json({"error": str(exc)}, 401)
+        return None
+
+
+_SCREEN_WRITE_PATHS = ("/api/screen/preview", "/api/screen/run",
+                       "/api/screen/datasets", "/api/screen/preset",
+                       "/api/screen/preset/delete",
+                       # B3：清单写入、规则模板导出/导入（导入只校验+预览，不执行）
+                       "/api/screen/watchlist", "/api/screen/rules/export",
+                       "/api/screen/rules/import", "/api/screen/cost/rebuild",
+                       # C1：数据准备（预览只记 previews 计数；取数写数据集与成本账本）
+                       "/api/screen/prepare/plan", "/api/screen/prepare/collect",
+                       # A3：本人研究任务事实物化（只写本作用域数据集，零网络）
+                       "/api/screen/prepare/research-collect")
+
+
+def _screen_research_roles() -> list[str]:
+    """`config.json` 的 `screen.research_roles`：允许自助研究写入的角色白名单。
+
+    默认空 = 只有管理员能写（与现状一致）。允许的只有**本作用域**内的写操作：
+    上传自己的数据集、执行自己的筛选、保存/删除自己的预设；其他 POST 一律仍仅管理员。
+    """
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    raw = ((cfg.get("screen") or {}).get("research_roles")) or []
+    if not isinstance(raw, list):
+        return []
+    return [str(r).strip() for r in raw if str(r).strip()]
+
+
+def _screen_can_research(session: dict | None) -> bool:
+    """管理员恒可写；其他角色只有被显式列入 `screen.research_roles` 才可写。"""
+    role = str((session or {}).get("role") or "")
+    if role == "admin":
+        return True
+    return bool(role) and role in _screen_research_roles()
+
+
+def _screen_read_only_reason(role: str, roles: list[str]) -> str:
+    if role == "admin":
+        return ""
+    if not roles:
+        return ("当前账号是只读角色：可查看结果、做人工复筛对比、下载模板与导出证据；"
+                "执行筛选、上传数据、保存预设需要管理员，或由管理员在配置里为你的角色开通研究权限")
+    return (f"当前角色「{role}」不在自助研究白名单（本部署已开通：{'、'.join(roles)}）内："
+            "只读可用；如需写入请让管理员把你的角色加进 config.json → screen.research_roles")
+
+
+def _screen_sort_query(q) -> dict | None:
+    """`?sort=gross_margin:desc` → `{field, direction}`（展示态，不进结果身份）。"""
+    raw = (q.get("sort") or [""])[0].strip()
+    if not raw:
+        return None
+    field, _, direction = raw.partition(":")
+    return {"field": field, "direction": direction or "desc"}
+
+
+def _screen_fields_payload() -> dict:
+    """字段目录（表单第 2 步的候选与单位提示）+ 期间政策说明。"""
+    import stock_screen as _ss
+    return {
+        "schema": _ss.SCHEMA_VERSION, "impl_version": _ss.IMPL_VERSION,
+        "field_map_version": _ss.FIELD_MAP_VERSION,
+        "ops": list(_ss.OPS),
+        "amount_units": ["元", "万", "亿"],
+        "period_modes": [{"mode": mode, "label": _ss.PERIOD_MODE_LABELS[mode],
+                          "comparable": mode != "latest_each"}
+                         for mode in _ss.PERIOD_MODES],
+        "fields": [spec.as_dict() for spec in _ss.FIELD_SPECS.values()],
+    }
+
+
+def _get_screen_fields(self, p):
+    return self._json({"status": "ok", **_screen_fields_payload()})
+
+
+def _get_screen_pool(self, p):
+    """`GET /api/screen/pool`：表单第 1 步的股票池目录（来源身份 + 输入里真实可用的主体）。
+
+    不预置公司清单、不猜代码：目录里有什么，选择器才显示什么。
+    """
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    from urllib.parse import parse_qs
+    q = parse_qs(urlparse(self.path).query)
+    did = (q.get("dataset") or [""])[0].strip()
+    if did:                                  # 用「我上传的数据集」当股票池来源
+        meta, dataset_payload, error = screen_store.load_dataset(scope, did)
+        if error:
+            return self._json({"error": error}, 404)
+        return self._json({
+            "status": "ok", "scope": dict(scope),
+            "source": screen_store.dataset_source_meta(meta),
+            "available_pool": screen_store.available_pool(dataset_payload),
+            "note": "用户提供的数据集：池内主体来自这份文件，不是官方缓存",
+        })
+    payload, errors = screen_store.pool_catalog()
+    if errors:
+        # 首次启动（试用包内没有官方缓存）不是错误：池为空 + 明确下一步。
+        # 只有"缓存文件不存在"这一种情况降级；其它读取失败仍按 500 如实报。
+        _only_missing = all("文件不存在" in str(e) for e in errors)
+        if _only_missing:
+            return self._json({
+                "status": "ok", "scope": dict(scope),
+                "source": {"label": "还没有官方数据", "sha256": "", "row_count": 0,
+                           "synthetic": False, "user_provided": False, "official": False,
+                           "origin": ""},
+                "available_pool": [],
+                "errors": errors,
+                "note": "还没有官方缓存（文件不存在）：这不是错误，也没有预置任何公司。"
+                        "可上传自己的 CSV/JSON，或用包内合成样例 "
+                        "data/samples/synthetic_5_companies.json 试跑。",
+            })
+        return self._json({"error": "；".join(errors), "errors": errors}, 500)
+    payload["scope"] = dict(scope)
+    try:
+        screen_store.record_cost(scope, previews=1)
+    except Exception:                              # noqa: BLE001 - 记账失败不阻断预览
+        pass
+    return self._json(payload)
+
+
+def _get_screen_runs(self, p):
+    """`GET /api/screen/runs`：**本作用域**历史结果摘要（新到旧；viewer 可看）。"""
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    try:
+        limit = int((q.get("limit") or ["50"])[0] or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    return self._json({"status": "ok", "scope": dict(scope),
+                       "runs": screen_store.list_runs(scope, min(max(limit, 1), 200)),
+                       "note": "只列当前用户作用域内的结果；损坏的条目带 integrity/usable 标记"})
+
+
+def _get_screen_run(self, p):
+    """`GET /api/screen/run?id=<run_id>&sort=<field>:<asc|desc>`：查看原版（永不重算）。"""
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    import stock_screen as _ss
+    q = parse_qs(urlparse(self.path).query)
+    rid = (q.get("id") or [""])[0].strip()
+    sort, sort_errors = _ss.validate_sort(_screen_sort_query(q))
+    if sort_errors:
+        return self._json({"error": "；".join(sort_errors), "errors": sort_errors}, 400)
+    run, manifest, err = screen_store.load_run(scope, rid)
+    if err:
+        return self._json(err, 400 if err.get("code") in ("invalid_id", "ambiguous") else 404)
+    if run is not None:
+        run = screen_store.apply_view(run, sort)
+    return self._json({"status": "ok", "run": run, "manifest": manifest,
+                       "scope": dict(scope),
+                       "note": "原版结果：与执行时冻结的哈希绑定；重新筛选请走 POST /api/screen/run"})
+
+
+def _get_screen_compare(self, p):
+    """`GET /api/screen/compare?a=<run_id>&b=<run_id>`：两份**已冻结**结果的人工复筛对比。
+
+    只读：不重算、不写盘、不改任何一份结果；读数对比只走字段白名单；
+    规则/股票池/期间口径任一不同 → 归因标注为「不可直接归因」。
+    """
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    a = (q.get("a") or [""])[0].strip()
+    b = (q.get("b") or [""])[0].strip()
+    if not a or not b:
+        return self._json({"error": "缺参数：需要 a（基准结果 id）与 b（对照结果 id）"}, 400)
+    try:
+        result, errors = screen_store.compare_runs(scope, a, b)
+    except Exception as exc:                       # noqa: BLE001 - 不把内部异常吞成 200
+        return self._json({"error": f"对比失败：{exc}"}, 500)
+    if errors:
+        text = "；".join(errors)
+        code = 400 if ("同一份结果" in text or "非法" in text or "缺参数" in text) else 404
+        return self._json({"error": text, "errors": errors}, code)
+    return self._json(result)
+
+
+def _get_screen_company(self, p):
+    """`GET /api/screen/company?code=&run=&dataset=`：统一公司页的只读投影（W1）。
+
+    联合定位 `code + run/dataset`；只给代码时返回「选择输入」态候选（本作用域最近记录），
+    绝不按代码自动打开别人的或不明来源的记录。读侧不新建事实库、不抽报告文字。
+    """
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    import stock_screen as _ss
+    q = parse_qs(urlparse(self.path).query)
+    code = (q.get("code") or [""])[0].strip().upper()
+    run_token = (q.get("run") or [""])[0].strip()
+    dataset_id = (q.get("dataset") or [""])[0].strip()
+    if not code:
+        return self._json({"error": "缺参数：需要 code（如 600031.SH）"}, 400)
+    watchlist, _werr = screen_store.load_watchlist(scope)
+    watch_item = next((it for it in (watchlist.get("items") or [])
+                       if str(it.get("code") or "").upper() == code), None)
+    base = {"status": "ok", "scope": dict(scope), "company": {"code": code, "name": ""},
+            "watch": {"in_watchlist": bool(watch_item), "version": (watch_item or {}).get("version"),
+                      "note": (watch_item or {}).get("note", ""),
+                      "baseline_run": watchlist.get("baseline_run") or ""},
+            "as_of": "", "identity": None, "financials": [], "conditions": [],
+            "gaps": [], "conflicts": [], "pending_pit": [], "evidence": None,
+            "note": ""}
+    if run_token:
+        run, _manifest, err = screen_store.load_run(scope, run_token)
+        if err:
+            return self._json({"error": err.get("error"), "code": err.get("code")}, 404)
+        if run is None or run.get("integrity") == "unreadable":
+            return self._json({"status": "stale_reference",
+                               "error": "记录不存在或不可读：不重新生成替代品"}, 409)
+        usable = bool(run.get("usable", True))
+        ent = next((e for e in (run.get("entities") or [])
+                    if str(e.get("entity_id") or "").upper() == code), None)
+        row = None
+        for group in ("pass", "fail", "insufficient"):
+            for cand in (run.get("rows") or {}).get(group) or []:
+                if str(cand.get("entity_id") or "").upper() == code:
+                    row = cand
+                    break
+            if row:
+                break
+        if ent is None and row is None:
+            return self._json({"status": "not_in_run",
+                               "error": f"该记录没有覆盖 {code}（不是「公司没有数据」，而是本次范围未含）",
+                               "identity": {"run_id": run.get("run_id"),
+                                            "as_of": run.get("as_of")}}, 404)
+        source = dict(run.get("source") or {})
+        base["company"]["name"] = (ent or row or {}).get("entity") or ""
+        base["identity"] = {
+            "run_id": run.get("run_id"), "result_hash": run.get("result_hash"),
+            "snapshot_id": run.get("snapshot_id"), "as_of": run.get("as_of"),
+            "created_at": run.get("created_at"), "report_period": run.get("report_period"),
+            "impl_version": run.get("impl_version"),
+            "field_map_version": run.get("field_map_version"),
+            "usable": usable, "integrity": run.get("integrity") or "ok",
+            "dataset_id": source.get("dataset_id") or "", "source_label": source.get("label") or "",
+            "official": bool(source.get("official")), "user_provided": bool(source.get("user_provided")),
+            "synthetic": bool(source.get("synthetic")),
+            "provenance": dict(source.get("provenance") or {}),
+            "periods": list((ent or {}).get("periods") or ()),
+        }
+        base["as_of"] = run.get("as_of") or ""
+        for o in (ent or {}).get("observations") or []:
+            base["financials"].append({k: o.get(k) for k in
+                                       ("metric", "metric_label", "period", "period_kind",
+                                        "value", "unit", "currency", "caliber", "state",
+                                        "source_url", "fact_id")})
+        for item in (row or {}).get("readings") or []:
+            base["conditions"].append({k: item.get(k) for k in
+                                       ("field", "label", "status", "value", "unit",
+                                        "display", "formula", "reason")})
+        base["verdict"] = (row or {}).get("verdict")
+        base["eval_period"] = (row or {}).get("eval_period")
+        base["reasons"] = list((row or {}).get("reasons") or ())
+        base["gaps"] = list((ent or {}).get("gaps") or ())
+        base["conflicts"] = list((ent or {}).get("conflicts") or ())
+        base["pending_pit"] = [dict(x) for x in ((ent or {}).get("pending_pit") or [])]
+        base["evidence"] = {"endpoint": "/api/screen/evidence",
+                            "query": {"run": run.get("run_id"), "entity": code}}
+        if not usable:
+            base["status"] = "stale_reference"
+            base["note"] = "记录完整性未通过：可查看但不得复用为可采纳结果"
+    elif dataset_id:
+        meta, payload, error = screen_store.load_dataset(scope, dataset_id)
+        if error:
+            return self._json({"status": "corrupt", "error": error}, 404)
+        rows = [r for r in (payload.get("rows") or [])
+                if str(r.get("code") or "").upper() == code]
+        if not rows:
+            return self._json({"status": "not_in_dataset",
+                               "error": f"该数据集没有覆盖 {code}"}, 404)
+        base["company"]["name"] = str(rows[0].get("entity") or "")
+        base["identity"] = {"dataset_id": meta.get("dataset_id"), "name": meta.get("name"),
+                            "as_of": "", "created_at": meta.get("created_at"),
+                            "official": bool(meta.get("official")),
+                            "user_provided": bool(meta.get("user_provided")),
+                            "synthetic": bool(meta.get("synthetic")),
+                            "provenance_kind": meta.get("provenance_kind") or "",
+                            "periods": sorted({str(r.get("period") or "")[:10] for r in rows})}
+        labels = {"revenue": "营业收入", "operating_cost": "营业成本",
+                  "gross_profit": "毛利", "net_profit": "归母净利润",
+                  "net_profit_consolidated": "净利润（合并）",
+                  "operating_cashflow": "经营活动现金流", "rd_expense": "研发费用",
+                  "total_assets": "资产总计", "total_liabilities": "负债合计",
+                  "accounts_receivable": "应收账款", "inventory": "存货",
+                  "accounts_payable": "应付账款", "admin_expense": "管理费用",
+                  "selling_expense": "销售费用",
+                  "taxes_and_surcharges": "税金及附加"}
+        for r in sorted(rows, key=lambda x: str(x.get("period") or "")):
+            for metric in _ss.AMOUNT_METRICS:
+                if r.get(metric) in (None, ""):
+                    continue
+                base["financials"].append({
+                    "metric": metric, "metric_label": labels.get(metric, metric),
+                    "period": str(r.get("period") or "")[:10], "value": r.get(metric),
+                    "unit": r.get("unit") or "", "currency": r.get("currency") or "",
+                    "caliber": r.get("caliber") or "", "state": "ok",
+                    "source_url": r.get("source_url") or ""})
+        base["note"] = "这只是数据集里的已有字段（没有执行筛选，因此没有条件命中/缺口结论）"
+    else:
+        candidates = []
+        for item in screen_store.list_runs(scope, 50):
+            pool = [str(c).upper() for c in item.get("pool") or []]
+            if code in pool:
+                candidates.append({"run_id": item.get("run_id"),
+                                   "created_at": item.get("created_at"),
+                                   "as_of": item.get("as_of"),
+                                   "counts": item.get("counts"),
+                                   "usable": item.get("usable"),
+                                   "source_label": (item.get("source") or {}).get("label")})
+        base["status"] = "select_input"
+        base["candidates"] = candidates[:20]
+        base["note"] = ("只有公司代码不够：请选择一次本人冻结记录（或一份数据集）再打开；"
+                        "不按代码自动打开不明来源记录"
+                        if candidates else
+                        "还没有包含这家公司的记录：请先选择材料并执行筛选，或直接选择一份数据集")
+    return self._json(base)
+
+
+def _get_screen_brief(self, p):
+    """`GET /api/screen/brief?base=&current=`：两次本人冻结记录的自选变化简报（W2）。
+
+    确定性只读投影：零模型、零外网；不改旧结果、不重算；同输入 → 同 brief_id。
+    """
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    import watch_brief
+    q = parse_qs(urlparse(self.path).query)
+    base_tok = (q.get("base") or [""])[0].strip()
+    cur_tok = (q.get("current") or [""])[0].strip()
+    if not base_tok or not cur_tok:
+        return self._json({"error": "缺参数：需要 base 与 current（两份冻结记录 id）"}, 400)
+    runs = {}
+    for key, tok in (("base", base_tok), ("current", cur_tok)):
+        run, _manifest, err = screen_store.load_run(scope, tok)
+        if err:
+            return self._json({"error": f"{key}：{err.get('error')}", "code": err.get("code")}, 404)
+        if run is None or run.get("integrity") == "unreadable" or not run.get("usable", True):
+            return self._json({"status": "failed",
+                               "error": f"{key}记录不可验证（integrity={run.get('integrity') if run else 'unreadable'}）："
+                                        "不生成替代品"}, 409)
+        runs[key] = run
+    if runs["base"].get("run_id") == runs["current"].get("run_id"):
+        return self._json({"error": "同一份记录不能和自己比较：请选择两次不同记录"}, 400)
+    watchlist, _werr = screen_store.load_watchlist(scope)
+    brief, errors = watch_brief.build_brief(
+        runs["base"], runs["current"],
+        watchlist_items=watchlist.get("items") or [],
+        watchlist_rev=watchlist.get("rev") or "")
+    if errors:
+        return self._json({"status": "failed", "errors": errors}, 400)
+    brief["status"] = "ok"
+    brief["scope"] = dict(scope)
+    brief["watchlist"] = {"rev": watchlist.get("rev"), "count": len(watchlist.get("items") or []),
+                          "baseline_run": watchlist.get("baseline_run") or ""}
+    return self._json(brief)
+
+
+def _get_screen_evidence(self, p):
+    """`GET /api/screen/evidence?run=<run_id>&entity=<code>`：某一份结果里某家公司的证据。
+
+    绑 (run_id, entity_id)，不绑「最近一次任务」；观察带 fact_id/来源 URL 可核对。
+    """
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    rid = (q.get("run") or [""])[0].strip()
+    entity = (q.get("entity") or [""])[0].strip()
+    run, _manifest, err = screen_store.load_run(scope, rid)
+    if err:
+        return self._json(err, 400 if err.get("code") in ("invalid_id", "ambiguous") else 404)
+    if run is None or run.get("integrity") == "unreadable":
+        return self._json({"error": "结果不存在或不可读"}, 404)
+    ev = screen_store.evidence(run, entity)
+    if ev is None:
+        return self._json({"error": f"该结果里没有主体 {entity}（不绑最近任务，不猜）"}, 404)
+    ev["usable"] = run.get("usable", True)
+    return self._json({"status": "ok", "evidence": ev})
+
+
+def _post_screen_preview(self, p, body, admin):
+    """`POST /api/screen/preview`：输入预览（股票池可用性、PIT 排除、规则/期间政策校验）。
+
+    body：`{pool, as_of, rules?, period_policy?}`。只做**预览**：不执行、不落结果。
+    """
+    scope = _screen_scope(admin)
+    import screen_store
+    pool = body.get("pool")
+    as_of = str(body.get("as_of") or "").strip()
+    payload, errors = screen_store.preview(
+        scope=scope, pool=pool, as_of=as_of, rules_raw=body.get("rules"),
+        period_policy_raw=body.get("period_policy"),
+        dataset_id=str(body.get("dataset_id") or "").strip())
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.preview", target=str(payload.get("snapshot_id"))[:16],
+              result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} "
+                      f"pool={len(payload.get('pool') or [])} as_of={payload.get('as_of')}"))
+    return self._json(payload)
+
+
+def _post_screen_run(self, p, body, admin):
+    """`POST /api/screen/run`：执行一次筛选并落**不可变结果**（同一身份重复执行复用）。
+
+    body：`{pool, as_of, rules, period_policy?, sort?}`。
+    - `period_policy` 进身份与哈希；`sort` 只是展示态（不进身份、不改 result_hash）；
+    - 数据/规则/期间政策一变 → 新 run_id，旧结果原样保留；
+    - 同身份历史结果损坏 → **409**（不复用、不覆盖），恢复走显式隔离接口。
+    """
+    scope = _screen_scope(admin)
+    import screen_store
+    import time as _time
+    pool = body.get("pool")
+    as_of = str(body.get("as_of") or "").strip()
+    sort = body.get("sort") if isinstance(body.get("sort"), dict) else None
+    _cost_t0 = _time.monotonic()
+    try:
+        run, errors = screen_store.execute(
+            scope=scope, pool=pool, as_of=as_of, rules_raw=body.get("rules"),
+            period_policy_raw=body.get("period_policy"), sort_raw=sort,
+            dataset_id=str(body.get("dataset_id") or "").strip())
+    except screen_store.StoreWriteError as exc:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "screen.run", target="-", result="fail", detail=f"store_write_failed {exc}")
+        return self._json({"error": str(exc), "code": "store_unavailable",
+                           "note": "瞬时写入失败：没有写入任何结果，可原样重试"}, 503)
+    except screen_store.FrozenCorruptError as exc:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "screen.run", target=str(exc.run_id), result="fail",
+                  detail=f"frozen_corrupt integrity={exc.integrity}")
+        return self._json({
+            "error": f"{exc}：{exc.detail}" if exc.detail else str(exc),
+            "code": "frozen_corrupt", "integrity": exc.integrity,
+            "run_id": exc.run_id,
+            "note": "已冻结的结果不会被覆盖或自动修复；如需重跑同身份，请先显式隔离损坏目录"
+                    "（POST /api/screen/run/quarantine）",
+        }, 409)
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    _cost_ms = int((_time.monotonic() - _cost_t0) * 1000)
+    _reused = bool(run.get("reused"))
+    try:
+        _cost_state = screen_store.record_cost(
+            scope, runs_total=1, compute_runs=0 if _reused else 1,
+            cache_hits=1 if _reused else 0, compute_ms=0 if _reused else _cost_ms)
+    except Exception as _cost_exc:                 # noqa: BLE001 - 记账失败不阻断筛选
+        _cost_state = {"recorded": False,
+                       "recording": {"ok": False, "reason": "exception", "detail": str(_cost_exc)}}
+    _metering = {"recorded": bool(_cost_state.get("recorded")),
+                 "recording": dict(_cost_state.get("recording") or {})}
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.run", target=str(run.get("run_id")),
+              result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} "
+                      f"pool={len(run.get('pool') or [])} as_of={run.get('as_of')} "
+                      f"period={run.get('report_period') or run.get('period_policy')} "
+                      f"counts={run.get('counts')} reused={run.get('reused')}"))
+    _notes = ["结果已冻结：规则/数据/期间政策变更会生成新结果，旧结果原样保留；"
+              "排序只影响展示顺序"]
+    if not _metering["recorded"]:
+        _notes.append("注意：结果已保存，但本次成本计量未成功记录（"
+                      + str((_metering.get("recording") or {}).get("reason") or "?")
+                      + "）——不冒充已记账")
+    return self._json({"status": "ok", "run": run, "scope": dict(scope),
+                       "metering": _metering,
+                       "cost": {"reused": _reused, "compute_ms": 0 if _reused else _cost_ms,
+                                "model_calls": 0, "network_requests": 0,
+                                "note": "本次只做确定性计算，未调用模型、未发出站请求"},
+                       "note": "；".join(_notes)})
+
+
+def _get_screen_presets(self, p):
+    """`GET /api/screen/presets`：**本作用域**已保存的股票池+规则预设（viewer 可看）。"""
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    try:
+        limit = int((q.get("limit") or ["50"])[0] or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        presets = screen_store.list_presets(scope, min(max(limit, 1), 200))
+    except Exception as exc:                       # noqa: BLE001 - 接口不吞异常成 200
+        return self._json({"error": f"读取预设失败：{exc}"}, 500)
+    return self._json({"status": "ok", "scope": dict(scope), "presets": presets,
+                       "note": "预设可编辑；它只是偏好，不改变任何已冻结结果"})
+
+
+def _get_screen_preset(self, p):
+    """`GET /api/screen/preset?id=`：读一份预设（表单回填用；跨作用域 404）。"""
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    pid = (q.get("id") or [""])[0].strip()
+    preset = screen_store.load_preset(scope, pid) if pid else None
+    if preset is None:
+        return self._json({"error": "预设不存在或不可读"}, 404)
+    return self._json({"status": "ok", "scope": dict(scope), "preset": preset})
+
+
+def _post_screen_preset(self, p, body, admin):
+    """`POST /api/screen/preset`：新增或更新预设（带 `preset_id` 即更新；只在本作用域内）。"""
+    scope = _screen_scope(admin)
+    import screen_store
+    preset, errors = screen_store.save_preset(
+        scope=scope, name=body.get("name"), pool=body.get("pool"),
+        rules_raw=body.get("rules"), as_of=str(body.get("as_of") or ""),
+        note=str(body.get("note") or ""), preset_id=str(body.get("preset_id") or ""),
+        dataset_id=str(body.get("dataset_id") or ""))
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.preset.save", target=str(preset.get("preset_id")), result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} "
+                      f"pool={len(preset.get('pool') or [])} "
+                      f"rules={len(preset.get('rules') or [])} "
+                      f"dataset={preset.get('dataset_id') or '-'}"))
+    return self._json({"status": "ok", "scope": dict(scope), "preset": preset})
+
+
+def _post_screen_preset_delete(self, p, body, admin):
+    """`POST /api/screen/preset/delete`：删预设（只删偏好，不碰已冻结结果）。"""
+    scope = _screen_scope(admin)
+    import screen_store
+    pid = str(body.get("preset_id") or "").strip()
+    if not pid:
+        return self._json({"error": "缺 preset_id"}, 400)
+    if not screen_store.delete_preset(scope, pid):
+        return self._json({"error": "预设不存在或不可删除"}, 404)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.preset.delete", target=pid, result="ok",
+              detail=f"scope={scope['user']}/{scope['project']}")
+    return self._json({"status": "ok", "deleted": pid, "scope": dict(scope)})
+
+
+def _get_screen_watchlist(self, p):
+    """`GET /api/screen/watchlist`：本作用域的研究清单（观察对象，不是持仓）。"""
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    data, errors = screen_store.load_watchlist(scope)
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 500)
+    return self._json({"status": "ok", "scope": dict(scope), "watchlist": data,
+                       "note": "清单是观察对象：不是持仓、不是已执行组合、不影响任何已冻结结果"})
+
+
+def _post_screen_watchlist(self, p, body, admin):
+    """`POST /api/screen/watchlist`：加入/移出清单或改备注（只动本人作用域）。
+
+    `if_version`（或兼容 `if_updated_at`）：客户端上次看到的该条版本；期间被另一页面
+    改过 → 409，返回 `current`（现在的备注/version），前端提示刷新后重试，不覆盖对方内容。
+    """
+    scope = _screen_scope(admin)
+    import screen_store
+    action = str(body.get("action") or "add").strip().lower()
+    if action in ("set_baseline", "clear_baseline"):
+        try:
+            data, errors = screen_store.watchlist_set_baseline(
+                scope=scope, run_token=str(body.get("run_id") or body.get("run") or ""),
+                if_rev=body.get("if_rev"), clear=(action == "clear_baseline"))
+        except screen_store.VersionConflict as exc:
+            audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                      f"screen.watchlist.{action}", target="-", result="conflict")
+            return self._json({"error": str(exc), "code": "version_conflict",
+                               "current": exc.current}, 409)
+        if errors:
+            return self._json({"error": "；".join(errors), "errors": errors}, 400)
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  f"screen.watchlist.{action}", target="-", result="ok")
+        return self._json({"status": "ok", "scope": dict(scope), "watchlist": data})
+    try:
+        data, errors = screen_store.watchlist_mutate(
+            scope=scope, action=action, code=body.get("code"),
+            name=str(body.get("name") or ""), note=str(body.get("note") or ""),
+            if_version=body.get("if_version"),
+            if_updated_at=str(body.get("if_updated_at") or ""))
+    except screen_store.VersionConflict as exc:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  f"screen.watchlist.{action}", target=str(body.get("code") or ""),
+                  result="conflict", detail=f"scope={scope['user']}/{scope['project']}")
+        return self._json({"error": str(exc), "code": "version_conflict",
+                           "current": exc.current,
+                           "note": "并发修改：没有覆盖别人刚保存的内容；请以 current 为准刷新后再改"}, 409)
+    if errors:
+        corrupted = any("损坏" in e or "未写入" in e for e in errors)
+        return self._json({"error": "；".join(errors), "errors": errors,
+                           "code": "watchlist_corrupt" if corrupted else "invalid_input"},
+                          409 if corrupted else 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              f"screen.watchlist.{action}", target=str(body.get("code") or ""), result="ok",
+              detail=f"scope={scope['user']}/{scope['project']} items={len(data.get('items') or [])}")
+    return self._json({"status": "ok", "scope": dict(scope), "watchlist": data,
+                       "note": "清单只在本作用域可见；备注不影响筛选与结果"})
+
+
+def _post_screen_rules_export(self, p, body, admin):
+    """`POST /api/screen/rules/export`：导出可分享的规则模板（不含池/备注/结果/身份）。"""
+    scope = _screen_scope(admin)
+    import screen_store
+    data, errors = screen_store.export_rules_template(
+        scope=scope, rules_raw=body.get("rules"),
+        period_policy_raw=body.get("period_policy"),
+        note=str(body.get("note") or ""))
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.rules.export", target="-", result="ok",
+              detail=f"scope={scope['user']}/{scope['project']} "
+                     f"rules={len((data.get('template') or {}).get('rules') or [])}")
+    return self._json(data)
+
+
+def _post_screen_rules_import(self, p, body, admin):
+    """`POST /api/screen/rules/import`：校验并预览模板；**不执行、不落结果**。"""
+    scope = _screen_scope(admin)
+    import screen_store
+    data, errors = screen_store.import_rules_template(scope, body.get("template"))
+    if errors:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "screen.rules.import", target="-", result="fail",
+                  detail=f"scope={scope['user']}/{scope['project']} invalid")
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.rules.import", target="-", result="ok",
+              detail=f"scope={scope['user']}/{scope['project']} "
+                     f"rules={(data.get('preview') or {}).get('rules_count')}")
+    return self._json(data)
+
+
+def _get_screen_cost(self, p):
+    """`GET /api/screen/cost`：本作用域的成本与请求分账（不估算、不补 0）。"""
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    data, errors = screen_store.load_cost(scope)
+    if errors and data.get("integrity") in ("corrupt", "unreadable"):
+        # 账本损坏不是接口故障：如实返回损坏状态（含原字节大小），修复要显式动作
+        return self._json({"status": "degraded", "scope": dict(scope), "cost": data,
+                           "errors": errors, "error": "；".join(errors),
+                           "rebuild": {"endpoint": "/api/screen/cost/rebuild",
+                                       "confirm_required": True}})
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 500)
+    return self._json({"status": "ok", "scope": dict(scope), "cost": data})
+
+
+def _post_screen_cost_rebuild(self, p, body, admin):
+    """`POST /api/screen/cost/rebuild`：显式重建**损坏的**成本账本（归档坏字节，再开新账）。
+
+    只在账本确实损坏时执行；confirm=false 只返回说明。可读账本绝不改写。
+    """
+    scope = _screen_scope(admin)
+    import screen_store
+    confirm = bool(body.get("confirm"))
+    data, errors = screen_store.rebuild_cost(scope, confirm=confirm)
+    if errors:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "screen.cost.rebuild", target="-", result="refused",
+                  detail=f"scope={scope['user']}/{scope['project']} {'；'.join(errors)[:120]}")
+        return self._json({"error": "；".join(errors), "errors": errors,
+                           "note": "不做隐式自愈：重建只针对确认损坏的账本，且必须显式 confirm"}, 409)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.cost.rebuild", target="-", result="ok",
+              detail=f"scope={scope['user']}/{scope['project']} archived={data.get('archived')}")
+    return self._json({"status": "ok", "scope": dict(scope),
+                       "archived": data.get("archived"), "cost": data.get("cost"),
+                       "note": "坏字节已原样归档；新账本从 0 开始，之前少记的不会凭空补出来"})
+
+
+def _get_screen_prepare_materials(self, p):
+    """`GET /api/screen/prepare/materials`：我已有什么材料 + 数据源选择表（只读本作用域）。"""
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_prepare
+    try:
+        data = screen_prepare.materials_projection(scope)
+        sources = screen_prepare.sources_catalog()
+    except Exception as exc:                         # noqa: BLE001 - 读取失败不当空材料
+        return self._json({"error": f"读取材料失败：{exc}"}, 500)
+    return self._json({"status": "ok", "scope": dict(scope), "materials": data,
+                       "sources": sources,
+                       "note": "材料只来自本账号作用域与只读缓存；缺材料不等于已取数"})
+
+
+def _post_screen_prepare_plan(self, p, body, admin):
+    """`POST /api/screen/prepare/plan`：覆盖与缺口预览（**不取数、不落结果**）。"""
+    scope = _screen_scope(admin)
+    import screen_prepare
+    data = screen_prepare.prepare_plan(
+        scope, body.get("codes") or [], body.get("periods") or [],
+        dataset_id=str(body.get("dataset_id") or ""),
+        as_of=str(body.get("as_of") or ""))
+    import screen_store
+    try:
+        screen_store.record_cost(scope, previews=1)
+    except Exception:                                # noqa: BLE001 - 记账失败不阻断预览
+        pass
+    return self._json(data)
+
+
+def _post_screen_prepare_collect(self, p, body, admin):
+    """`POST /api/screen/prepare/collect`：受约束取数（来源 ID + 公司 + 期间，不收 URL）。"""
+    scope = _screen_scope(admin)
+    import screen_prepare
+    import screen_store
+    if any(k in body for k in ("url", "urls", "path", "file", "filepath")):
+        return self._json({"error": "取数入口只接受来源 ID / 公司代码 / 期间："
+                                    "不接受客户端 URL 或磁盘路径", "code": "client_url_rejected"}, 400)
+    try:
+        data, errors = screen_prepare.collect(
+            scope=scope, source_id=str(body.get("source") or ""),
+            codes=body.get("codes") or [], periods=body.get("periods") or [],
+            probe_only=bool(body.get("probe_only")))
+    except screen_store.StoreWriteError as exc:
+        return self._json({"error": str(exc), "code": "store_unavailable",
+                           "note": "瞬时写入失败：没有写入任何数据集，可原样重试"}, 503)
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.prepare.collect", target=str(data.get("source")), result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} "
+                      f"dataset={((data.get('dataset') or {}).get('dataset_id'))} "
+                      f"counters={data.get('counters')}"))
+    return self._json(data)
+
+
+def _get_screen_prepare_research_materials(self, p):
+    """`GET /api/screen/prepare/research-materials`：本人研究任务的材料投影（只读）。
+
+    带 `?task_id=` 时只投影该任务（包括"无权限/任务不存在/底稿缺失/无准入事实"这类
+    **显式不可用**原因）；不带时列本账号名下可用与不可用的全部任务。
+    """
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import research_materials
+    from urllib.parse import parse_qs
+    q = parse_qs(urlparse(self.path).query)
+    task_id = str((q.get("task_id") or [""])[0] or "").strip()
+    try:
+        if task_id:
+            data = research_materials.research_material(scope, task_id)
+        else:
+            data = research_materials.materials_from_research(scope)
+    except Exception as exc:                         # noqa: BLE001 - 投影失败不当空材料
+        return self._json({"error": f"读取研究任务材料失败：{exc}"}, 500)
+    key = "task" if task_id else "research"
+    return self._json({"status": "ok", "scope": dict(scope), key: data,
+                       "note": "只投影本账号名下研究任务的准入事实/底稿/来源准入；"
+                               "没有从报告正文反抽数字，也没有扫描其他账号目录"})
+
+
+def _post_screen_prepare_research_collect(self, p, body, admin):
+    """`POST /api/screen/prepare/research-collect`：把**显式选定**的任务事实物化成数据集。
+
+    只接受 task_id / fact_ids / periods：客户端 URL 与磁盘路径一律拒绝（与 collect 同纪律）。
+    """
+    scope = _screen_scope(admin)
+    import research_materials
+    import screen_store
+    if any(k in body for k in ("url", "urls", "path", "file", "filepath")):
+        return self._json({"error": "研究材料物化只接受任务事实（task_id/fact_ids/periods）："
+                                    "不接受客户端 URL 或磁盘路径",
+                           "code": "client_url_rejected"}, 400)
+    try:
+        data, errors = research_materials.collect_from_research(
+            scope, task_id=str(body.get("task_id") or ""),
+            fact_ids=body.get("fact_ids") or [], periods=body.get("periods") or [],
+            name=str(body.get("name") or ""))
+    except screen_store.StoreWriteError as exc:
+        return self._json({"error": str(exc), "code": "store_unavailable",
+                           "note": "写入未完成：没有写入或改写任何数据集；"
+                                   "可先修好存储再原样重试"}, 503)
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.prepare.research_collect", target=str(data.get("source")), result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} "
+                      f"task={((data.get('task') or {}).get('task_id'))} "
+                      f"dataset={((data.get('dataset') or {}).get('dataset_id'))} "
+                      f"reused={data.get('reused')} "
+                      f"facts={len(data.get('requested_fact_ids') or [])} "
+                      f"rows={data.get('row_count')}"))
+    return self._json(data)
+
+
+def _get_screen_capabilities(self, p):
+    """`GET /api/screen/capabilities`：当前账号在本页能做什么（界面据此收起写入口，避免点出 403）。"""
+    session = self._auth_session()
+    if session is None:
+        return self._json({"error": "未登录或登录已过期"}, 401)
+    role = str(session.get("role") or "")
+    roles = _screen_research_roles()
+    can = _screen_can_research(session)
+    return self._json({
+        "status": "ok", "role": role, "can_research": can,
+        "scope": _screen_scope(session),
+        "self_service_roles": roles,
+        "read_only_reason": "" if can else _screen_read_only_reason(role, roles),
+        "note": "自助研究权限只作用于本账户作用域；跨账户数据仍不可见，管理员接口不受影响",
+    })
+
+
+def _get_screen_template(self, p):
+    """`GET /api/screen/template`：下载上传模板（CSV + 两行示例）。登录即可，不需要管理员。"""
+    session = self._auth_session()
+    if session is None:
+        return self._json({"error": "未登录或登录已过期"}, 401)
+    import screen_store
+    raw = ("\ufeff" + screen_store.template_csv()).encode("utf-8")   # BOM：Excel 直接双击不乱码
+    self.send_response(200)
+    self.send_header("Content-Type", "text/csv; charset=utf-8")
+    self.send_header("Content-Disposition",
+                     'attachment; filename="weavemind-screen-template.csv"')
+    self.send_header("Content-Length", str(len(raw)))
+    self.end_headers()
+    self.wfile.write(raw)
+
+
+def _get_screen_datasets(self, p):
+    """`GET /api/screen/datasets`：本作用域数据入口清单（官方缓存 + 我上传的数据集）。
+
+    三类来源在响应里**显式区分**：`official_cache`（服务端配置，official=true）/
+    `user_upload`（official=false，永不可自封官方）/（合成夹具只在隔离实例出现）。
+    """
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    try:
+        limit = int((q.get("limit") or ["50"])[0] or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    datasets = screen_store.list_datasets(scope, min(max(limit, 1), 200))
+    _payload, source_errors, source_meta = screen_store.load_source()
+    official = {
+        "kind": "official_cache",
+        "label": "官方披露缓存（服务端配置）",
+        "raw_label": (source_meta or {}).get("label") or "",
+        "official": bool((source_meta or {}).get("official")),
+        "synthetic": bool((source_meta or {}).get("synthetic")),
+        "row_count": int((source_meta or {}).get("row_count") or 0),
+        "sha256": str((source_meta or {}).get("sha256") or "")[:16],
+        "provenance": dict((source_meta or {}).get("provenance") or {}),
+        "usable": not source_errors,
+        "errors": list(source_errors),
+    }
+    return self._json({
+        "status": "ok", "scope": dict(scope), "official_source": official,
+        "datasets": datasets,
+        "note": "官方缓存由服务端配置；上传的数据集只在本账户可见，且始终标为「用户提供」，"
+                "不能声明为官方数据。切换数据来源会生成新的结果身份，旧结果原样保留。",
+    })
+
+
+def _get_screen_dataset(self, p):
+    """`GET /api/screen/dataset?id=`：一份上传数据集的元信息 + 可用主体（跨作用域 404）。"""
+    from urllib.parse import parse_qs
+    scope = _screen_scope_or_401(self)
+    if scope is None:
+        return
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    did = (q.get("id") or [""])[0].strip()
+    if not did:
+        return self._json({"error": "缺 id"}, 400)
+    meta, payload, error = screen_store.load_dataset(scope, did)
+    if error:
+        return self._json({"error": error}, 404)
+    return self._json({
+        "status": "ok", "scope": dict(scope), "dataset": meta,
+        "source": screen_store.dataset_source_meta(meta),
+        "available_pool": screen_store.available_pool(payload),
+        "note": "用户提供的数据集：可用于筛选与证据定位，但结果来源不会标成官方数据",
+    })
+
+
+def _post_screen_dataset(self, p, body, admin):
+    """`POST /api/screen/datasets`：上传一份 CSV 数据集（管理员；同内容复用同一 ID）。
+
+    body：`{name?, filename?, content}`（`content` 是 CSV 文本）。不联网、不调用模型。
+    """
+    scope = _screen_scope(admin)
+    import screen_store
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return self._json({"error": "缺 content：请上传 CSV 文本（可先下载模板）"}, 400)
+    try:
+        meta, reused, errors = screen_store.save_dataset(
+            scope=scope, name=body.get("name"), filename=body.get("filename"),
+            text=content)
+    except screen_store.StoreWriteError as exc:
+        audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+                  "screen.dataset.save", target="-", result="fail",
+                  detail=f"store_write_failed {exc}")
+        return self._json({"error": str(exc), "code": "store_unavailable",
+                           "note": "瞬时写入失败：没有写入任何数据集，可原样重试"}, 503)
+    if errors:
+        return self._json({"error": "；".join(errors), "errors": errors}, 400)
+    try:
+        _metering_state = screen_store.record_cost(scope, prepare_requests=1)
+    except Exception as _m_exc:                    # noqa: BLE001 - 记账失败不阻断上传
+        _metering_state = {"recorded": False,
+                           "recording": {"ok": False, "reason": "exception", "detail": str(_m_exc)}}
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.dataset.save", target=str(meta.get("dataset_id")),
+              result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} rows={meta.get('row_count')} "
+                      f"codes={len(meta.get('codes') or [])} reused={reused}"))
+    _ds_notes = ["数据集已存到本账户作用域：可反复用于筛选，不需重复上传；"
+                 "它不是官方数据，结果来源会标为「用户提供」"]
+    _metering = {"recorded": bool(_metering_state.get("recorded")),
+                 "recording": dict(_metering_state.get("recording") or {})}
+    if not _metering["recorded"]:
+        _ds_notes.append("注意：数据集已保存，但成本计量未成功记录（"
+                         + str((_metering.get("recording") or {}).get("reason") or "?") + "）")
+    return self._json({"status": "ok", "scope": dict(scope), "dataset": meta,
+                       "reused": reused, "metering": _metering,
+                       "note": "；".join(_ds_notes)})
+
+
+def _get_screen_legacy(self, p):
+    """`GET /api/screen/legacy`（仅管理员）：R1 原型实例级旧记录 + 归属建议（只读、不迁移）。"""
+    session = self._auth_session()
+    if session is None:
+        return self._json({"error": "未登录或登录已过期"}, 401)
+    if session.get("role") != "admin":
+        return self._json({"error": "权限不足：仅管理员可查看 legacy 记录"}, 403)
+    import screen_store
+    return self._json(screen_store.legacy_overview())
+
+
+def _get_screen_legacy_run(self, p):
+    """`GET /api/screen/legacy/run?id=`（仅管理员）：诊断查看 legacy 结果（不可采纳/不得复用）。"""
+    from urllib.parse import parse_qs
+    session = self._auth_session()
+    if session is None:
+        return self._json({"error": "未登录或登录已过期"}, 401)
+    if session.get("role") != "admin":
+        return self._json({"error": "权限不足：仅管理员可查看 legacy 记录"}, 403)
+    import screen_store
+    q = parse_qs(urlparse(self.path).query)
+    rid = (q.get("id") or [""])[0].strip()
+    run, manifest, err = screen_store.legacy_load_run(rid)
+    if err:
+        return self._json(err, 400 if err.get("code") in ("invalid_id", "ambiguous") else 404)
+    return self._json({"status": "ok", "run": run, "manifest": manifest,
+                       "note": "legacy 诊断视图：无 owner、不可采纳、不得复用/比较；"
+                               "归属迁移需在授权流程中显式执行"})
+
+
+def _post_screen_run_quarantine(self, p, body, admin):
+    """`POST /api/screen/run/quarantine`（仅管理员）：显式隔离损坏结果目录。
+
+    body：`{run_id, confirm: true}`。只允许隔离 `integrity != ok` 的目录；原样移入
+    `quarantine/<scope>/`（保留原始字节），绝不重写、绝不删除内容。
+    """
+    scope = _screen_scope(admin)
+    import screen_store
+    if body.get("confirm") is not True:
+        return self._json({"error": "需要显式 confirm: true（隔离会移动目录，不会被自动执行）"}, 400)
+    rid = str(body.get("run_id") or "").strip()
+    if not rid:
+        return self._json({"error": "缺 run_id"}, 400)
+    detail, err = screen_store.quarantine_run(scope, rid)
+    if err:
+        return self._json(err, 400 if err.get("code") in ("invalid_id", "ambiguous",
+                                                          "not_damaged") else 404)
+    audit_log(str((admin or {}).get("user") or ""), self._client_ip(),
+              "screen.run.quarantine", target=str(detail.get("run_id")), result="ok",
+              detail=(f"scope={scope['user']}/{scope['project']} "
+                      f"integrity={detail.get('integrity')} to={detail.get('moved_to')}"))
+    return self._json({"status": "ok", **detail, "scope": dict(scope)})
+
+
+# ============================================================
 # 路由表（E 重构：do_GET/do_POST 业务分支表化，保持原 if 顺序）
 # ============================================================
 _GET_ROUTES = [
     (lambda self, p: p == "/api/health", _get_health),
+    (lambda self, p: p == "/api/screen/fields", _get_screen_fields),
+    (lambda self, p: p == "/api/screen/pool", _get_screen_pool),
+    (lambda self, p: p == "/api/screen/runs", _get_screen_runs),
+    (lambda self, p: p == "/api/screen/compare", _get_screen_compare),
+    (lambda self, p: p == "/api/screen/company", _get_screen_company),
+    (lambda self, p: p == "/api/screen/brief", _get_screen_brief),
+    (lambda self, p: p == "/api/screen/run", _get_screen_run),
+    (lambda self, p: p == "/api/screen/evidence", _get_screen_evidence),
+    (lambda self, p: p == "/api/screen/presets", _get_screen_presets),
+    (lambda self, p: p == "/api/screen/preset", _get_screen_preset),
+    (lambda self, p: p == "/api/screen/capabilities", _get_screen_capabilities),
+    (lambda self, p: p == "/api/screen/watchlist", _get_screen_watchlist),
+    (lambda self, p: p == "/api/screen/cost", _get_screen_cost),
+    (lambda self, p: p == "/api/screen/prepare/materials", _get_screen_prepare_materials),
+    (lambda self, p: p == "/api/screen/prepare/research-materials", _get_screen_prepare_research_materials),
+    (lambda self, p: p == "/api/screen/template", _get_screen_template),
+    (lambda self, p: p == "/api/screen/datasets", _get_screen_datasets),
+    (lambda self, p: p == "/api/screen/dataset", _get_screen_dataset),
+    (lambda self, p: p == "/api/screen/legacy", _get_screen_legacy),
+    (lambda self, p: p == "/api/screen/legacy/run", _get_screen_legacy_run),
     (lambda self, p: p == "/api/research-study/sample", _get_research_study_sample),
     (lambda self, p: p == "/api/research-study/studies", _get_research_study_studies),
     (lambda self, p: p == "/api/research-study/file", _get_research_study_file),
@@ -9462,6 +11273,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/actionable"), _get_task_actionable),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/config/requirements", _get_config_requirements),
+    (lambda self, p: p == "/api/diagnostics/network", _get_diagnostics_network),
     (lambda self, p: p == "/api/users", _get_users),
     (lambda self, p: p == "/api/llm-mode", _get_llm_mode),
     (lambda self, p: p == "/api/notifications", _get_notifications),
@@ -9490,6 +11302,19 @@ _GET_ROUTES = [
 
 _POST_ROUTES = [
     (lambda self, p: self.path == "/api/share" or self.path.startswith("/api/share/"), _post_share),
+    (lambda self, p: self.path == "/api/screen/datasets", _post_screen_dataset),
+    (lambda self, p: self.path == "/api/screen/preview", _post_screen_preview),
+    (lambda self, p: self.path == "/api/screen/run", _post_screen_run),
+    (lambda self, p: self.path == "/api/screen/preset", _post_screen_preset),
+    (lambda self, p: self.path == "/api/screen/preset/delete", _post_screen_preset_delete),
+    (lambda self, p: self.path == "/api/screen/run/quarantine", _post_screen_run_quarantine),
+    (lambda self, p: self.path == "/api/screen/watchlist", _post_screen_watchlist),
+    (lambda self, p: self.path == "/api/screen/rules/export", _post_screen_rules_export),
+    (lambda self, p: self.path == "/api/screen/rules/import", _post_screen_rules_import),
+    (lambda self, p: self.path == "/api/screen/cost/rebuild", _post_screen_cost_rebuild),
+    (lambda self, p: self.path == "/api/screen/prepare/plan", _post_screen_prepare_plan),
+    (lambda self, p: self.path == "/api/screen/prepare/collect", _post_screen_prepare_collect),
+    (lambda self, p: self.path == "/api/screen/prepare/research-collect", _post_screen_prepare_research_collect),
     (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
     (lambda self, p: self.path == "/task", _post_task),
     (lambda self, p: self.path == "/api/research-study/upload", _post_research_study_upload),
@@ -9500,6 +11325,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/research-study/hypothesis-card", _post_research_study_hypothesis_card),
     (lambda self, p: self.path == "/api/research-study/experiment", _post_research_study_experiment),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/freeze"), _post_task_analysis_freeze),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/recompute"), _post_task_analysis_recompute),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/adopt"), _post_task_analysis_adopt),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
@@ -9508,6 +11334,7 @@ _POST_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate"), _post_task_candidate),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/package"), _post_task_package),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/resume"), _post_task_resume),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
     (lambda self, p: self.path == "/api/step/confirm", _post_step_confirm),
     (lambda self, p: self.path == "/api/context/extract", _post_context_extract),

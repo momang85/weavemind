@@ -246,6 +246,69 @@ def _financials_payload_usable(payload) -> tuple[bool, str]:
     return True, ""
 
 
+def _paper_details(paper) -> dict:
+    """底稿 → 交付/图表用的**明细载荷**（结构化分支与官方原文分支共用）。
+
+    为什么必须共用一处（U90-C 根因，2026-10-20 实机 `ui-cc853cf86b`）：
+    `chart_rows` 只读 `rows_detail`/`derived_detail` 两个键，而 `build_result` 的
+    **官方原文分支**（结构化 API 不可用、底稿由已准入年报财务表产出）当时只返回
+    `rows`/`derived` 的**条数**。于是这类任务的 `chart_rows` 恒 `ok=False`
+    → `report_brief.build_structure` **静默返回 None** → 装配沿用旧正文
+    → 用户点"采纳这版"时正文里找不到所选运行，报"正文不是采纳版本的正文"
+    （现象是采纳失败，根因在底稿明细没带出来）。两条分支的明细口径从此不可再分叉。
+    """
+    return {
+        "rows_detail": [{"metric": r.get("metric"),
+                         "metric_label": r.get("metric_label"),
+                         "period": r.get("period"),
+                         "value": r.get("value"),
+                         "unit": r.get("unit"),
+                         "caliber": r.get("caliber"),
+                         "caliber_source": r.get("caliber_source"),
+                         "caliber_evidence": r.get("caliber_evidence"),
+                         # D1：稳定 fact_id 必须带出来——报告侧主张绑定要按
+                         # "指标/期间/口径/单位"逐条对上底稿事实；没有 id 就只能按数值猜
+                         # （历史反例："2023 净利润 100 万元"被"2024 收入 100 亿元"支持）
+                         "fact_id": r.get("fact_id"),
+                         # 字段位置：简报附录要回答"这个数字取自哪个字段"
+                         "source_locator": r.get("source_locator")}
+                        for r in paper.rows],
+        # 可重算的派生行（同比等，单位 %）：注入给模型解释，也便于读侧核对
+        # `formula` 一并带出：报告里要能复核"这个百分比怎么算出来的"（溯源按公式认）
+        "derived_detail": [{"metric": r.get("metric"),
+                            "metric_label": r.get("metric_label"),
+                            "period": r.get("period"),
+                            "value": r.get("value"),
+                            "unit": r.get("unit"),
+                            "caliber": r.get("caliber"),
+                            "caliber_evidence": r.get("caliber_evidence"),
+                            "formula": r.get("formula"),
+                            "fact_id": r.get("fact_id"),
+                            "source_locator": r.get("source_locator"),
+                            "derived_from": list(r.get("derived_from") or [])}
+                           for r in paper.derived],
+        # R3：经营维度事实（产品/渠道/地区 + 实物量 + 推算）+ 组内闭合说明
+        "operating_detail": [{"metric": r.get("metric"),
+                              "metric_label": r.get("metric_label"),
+                              "period": r.get("period"),
+                              "value": r.get("value"),
+                              "unit": r.get("unit"),
+                              "caliber": r.get("caliber"),
+                              "caliber_evidence": r.get("caliber_evidence"),
+                              "dimensions": ((r.get("source_locator") or {})
+                                             .get("dimensions") or {}),
+                              "table": ((r.get("source_locator") or {})
+                                        .get("table") or {}),
+                              "locator": ((r.get("source_locator") or {})
+                                          .get("locator") or ""),
+                              "fact_id": r.get("fact_id"),
+                              "verify_state": r.get("verify_state"),
+                              "formula": r.get("formula") or ""}
+                             for r in paper.rows
+                             if str(r.get("metric") or "") in _facts.OPERATING_METRICS],
+    }
+
+
 def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict:
     """**只算不写**的底稿结果（供读取侧复用：交付状态/硬门槛在页面与导出里也要能重算）。
 
@@ -305,6 +368,9 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                            "derived_from": list(getattr(f, "derived_from", []) or [])}
                           for f in off_facts],
                 "operating_facts": [], "scope_notes": [],
+                # U90-C：明细载荷与结构化分支**同源**——否则 chart_rows 恒 ok=False，
+                # 装配静默沿用旧正文，用户"改一个情景参数再采纳"必然失败（详见 _paper_details）
+                **_paper_details(paper),
                 "rows": len(paper.rows), "derived": len(paper.derived),
                 "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
                 "audit": paper.audit,
@@ -367,56 +433,9 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
         "request_source": request_source,
         "candidates": candidates,
         "selection": paper.selection,
-        # 交付硬门槛要用它做"文档主体作用域"判定（只需要指标/期间/值）；
-        # 口径与依据一并带出：报告步骤的"已选事实"块要能把口径证据讲给读者
-        "rows_detail": [{"metric": r.get("metric"),
-                         "metric_label": r.get("metric_label"),
-                         "period": r.get("period"),
-                         "value": r.get("value"),
-                         "unit": r.get("unit"),
-                         "caliber": r.get("caliber"),
-                         "caliber_source": r.get("caliber_source"),
-                         "caliber_evidence": r.get("caliber_evidence"),
-                         # D1：稳定 fact_id 必须带出来——报告侧主张绑定要按
-                         # "指标/期间/口径/单位"逐条对上底稿事实；没有 id 就只能按数值猜
-                         # （历史反例："2023 净利润 100 万元"被"2024 收入 100 亿元"支持）
-                         "fact_id": r.get("fact_id"),
-                         # 字段位置：简报附录要回答"这个数字取自哪个字段"
-                         "source_locator": r.get("source_locator")}
-                        for r in paper.rows],
-        # 可重算的派生行（同比等，单位 %）：注入给模型解释，也便于读侧核对
-        # `formula` 一并带出：报告里要能复核"这个百分比怎么算出来的"（溯源按公式认）
-        "derived_detail": [{"metric": r.get("metric"),
-                            "metric_label": r.get("metric_label"),
-                            "period": r.get("period"),
-                            "value": r.get("value"),
-                            "unit": r.get("unit"),
-                            "caliber": r.get("caliber"),
-                            "caliber_evidence": r.get("caliber_evidence"),
-                            "formula": r.get("formula"),
-                            "fact_id": r.get("fact_id"),
-                            "source_locator": r.get("source_locator"),
-                            "derived_from": list(r.get("derived_from") or [])}
-                           for r in paper.derived],
-        # R3：经营维度事实（产品/渠道/地区 + 实物量 + 推算）+ 组内闭合说明
-        "operating_detail": [{"metric": r.get("metric"),
-                              "metric_label": r.get("metric_label"),
-                              "period": r.get("period"),
-                              "value": r.get("value"),
-                              "unit": r.get("unit"),
-                              "caliber": r.get("caliber"),
-                              "caliber_evidence": r.get("caliber_evidence"),
-                              "dimensions": ((r.get("source_locator") or {})
-                                             .get("dimensions") or {}),
-                              "table": ((r.get("source_locator") or {})
-                                        .get("table") or {}),
-                              "locator": ((r.get("source_locator") or {})
-                                          .get("locator") or ""),
-                              "fact_id": r.get("fact_id"),
-                              "verify_state": r.get("verify_state"),
-                              "formula": r.get("formula") or ""}
-                             for r in paper.rows
-                             if str(r.get("metric") or "") in _facts.OPERATING_METRICS],
+        # 明细载荷（rows_detail/derived_detail/operating_detail）与官方原文分支**同一个 helper**：
+        # 两条分支各写一份时曾经分叉——官方原文分支漏了明细，交付装配就静默用旧正文（U90-C 根因）
+        **_paper_details(paper),
         "scope_notes": scope_notes,
         # X0：官方原文与结构化事实**共同供数**的说明（含金额口径统一）——读者能分清
         # "哪条来自官方三表（带页码）"与"哪条来自结构化字段"

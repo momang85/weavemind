@@ -79,6 +79,28 @@ class TestSearchGapPredicate(unittest.TestCase):
         self.assertFalse(pred(None))
         self.assertFalse(pred("无候选 URL"))
 
+    def test_downstream_step_quoting_the_phrase_is_not_a_gap(self):
+        """P1-5（20261021 复验）：写作步正文引用「无候选 URL」不是检索缺口步。
+
+        真机反例（`ui-8b28c95ab1`）：`step_id=5`（content_summary）的成稿里引用了
+        检索缺口叙述，裸子串匹配把它标成缺口步 → 交付与日志写
+        「资料缺口：步骤 5 检索未获取到有效来源」，用户按提示去找步骤 5，
+        找到的是写作步（真正的检索步是步骤 1）。
+        """
+        pred = orchestrator_v2.OrchestratorV2._is_search_gap_skip
+        downstream = {"status": "SUCCESS",
+                      "result": "检索步无候选 URL，本次按现有资料写作……"}
+        self.assertFalse(pred(downstream, cap="content_summary"))
+        self.assertFalse(pred(downstream, cap="report_generator"))
+        # 显式标记仍然成立（与能力无关：门禁自己打的标记是权威）
+        self.assertTrue(pred({"gate_skipped": True,
+                              "result": "无候选 URL"},
+                             cap="content_summary"))
+        # 检索类步按文本判定（历史数据没有 gate_skipped 标记）
+        self.assertTrue(pred({"result": "无候选 URL（检索未产出可用来源），已跳过抓取"},
+                             cap="web_fetch"))
+        self.assertTrue(pred({"result": "无候选 URL"}, cap="web_search"))
+
 
 class TestNormalizeUnexecutedSteps(unittest.TestCase):
     def test_missing_status_becomes_cancelled_unexecuted(self):

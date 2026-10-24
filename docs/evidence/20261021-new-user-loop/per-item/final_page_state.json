@@ -1,0 +1,66 @@
+{
+ "adopt_msgs_on_page": null,
+ "adopted": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13",
+ "current_package": "deliverables_20261021_152053_9ab4b5.zip",
+ "current_package_ok": true,
+ "final_task": {
+  "export": {
+   "current_package": "deliverables_20261021_152053_9ab4b5.zip",
+   "current_package_note": "",
+   "current_version_id": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13",
+   "manifest_version_id": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13",
+   "package": "deliverables_20261021_152053_9ab4b5.zip",
+   "package_body_version_id": "f87523d818179bb6d1b62523c73ef90d18e0fd9de5ca781c2635c87f60f5badb",
+   "package_identity_ok": true
+  },
+  "llm_calls": {
+   "calls": 38,
+   "failed": 9
+  },
+  "resume": {
+   "available": false,
+   "completed": 0,
+   "endpoint": "/api/task/ui-d59152ebb9/resume",
+   "failed_step": "",
+   "failure": "",
+   "label": "",
+   "reason": "任务已完成：结论是不可重跑的终态；要修正内容走报告页的修订/复核入口，或补材料后在分析工作台复算。",
+   "status": "SUCCESS_WITH_ISSUES",
+   "total": 0
+  },
+  "search_coverage": {
+   "coverage_rate": 0,
+   "degraded_steps": 1,
+   "incomplete_steps": 0,
+   "ok_steps": 0,
+   "redis_degraded_steps": 0,
+   "total_search_steps": 1,
+   "zero_source_steps": 0
+  },
+  "status": "SUCCESS_WITH_ISSUES"
+ },
+ "packages": [
+  {
+   "identity": "885673ec21c6dee2d8b23251f68b237cf1d18dc69e5fd7322a0e0465d86cf8aa",
+   "name": "deliverables_20261021_145534.zip",
+   "status": "historical"
+  },
+  {
+   "identity": "ea96713eef6c53969147e7bb5084072b1092bc15954ec74d82367ebcb0639031",
+   "name": "deliverables_20261021_151250_2aabd6.zip",
+   "status": "historical"
+  },
+  {
+   "identity": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13",
+   "name": "deliverables_20261021_152053_9ab4b5.zip",
+   "status": "current"
+  }
+ ],
+ "served_pdf": {
+  "body_sha": "83a93ec4f1c5bac87c125de8135b5d11852e3c46bf365a48c23f57cc95f89931",
+  "draft": "0",
+  "sha256": "83a93ec4f1c5bac87c125de8135b5d11852e3c46bf365a48c23f57cc95f89931",
+  "size": 5526922,
+  "ver": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13"
+ }
+}

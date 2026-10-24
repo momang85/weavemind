@@ -1,0 +1,84 @@
+﻿.54亿元
+0s
+耗时
+75%
+成功率
+9/12
+Steps
+24
+Files
+分析工作台（选运行 → 改假设 → 复算 → 对比 → 采纳 → 导出）
+分析卡（已验证运行）：未进正文
+归母净利润变化：-3,342,541,438.15元（run=519c5db160f8）
+原始依据（12 条观察，可回溯）
+profit_bridge
+operating_drivers
+cash_reconciliation
+profit_to_cash
+cash_quality
+working_capital
+scenario_sensitivity
+cash_pressure
+519c5db160f8｜validated｜2026-10-21T06:43:09
+rounding
+yi_2
+yuan_2
+确定性复算
+采纳这版
+导出当前包
+尚无与当前采纳稿（ea96713eef6c）同版的包：点"导出当前包"会先生成
+任务完成
+— SUCCESS_WITH_ISSUES
+数字可信度
+达阈值
+共 139 个：
+引用 78
+计算 50
+模型知识 0
+不可溯源 11
+数字溯源率92%（128/139）
+金额溯源率93%（77/83）
+不可溯源数字（最多显示 10 条，共 11 条）
+- 17.83
+- 22.83
+- 11.64亿元
+- 11.68亿元
+- 15.02亿元
+- 33.43
+- 31.54
+- 5.87 亿元
+- 18.31 亿元
+- 80.33 亿元
+口径：分母 = 报告正文提取到的关键数字个数；本域阈值 70%，域=财务。 金额溯源率只统计带货币单位的数字，与整体溯源率分开看——整体达标不代表金额可信。
+可重算底稿
+目标达成（6/6）
+资料截至 2025-04-30
+指标	主体	期间	数值	来源	核实状态	fact_id
+营业收入	洋河股份	2024年	28876296993.56 元	
+来源位置	unverified	fact-29afad46307ce002
+营业收入	洋河股份	2023年	33126277551.51 元	
+来源位置	unverified	fact-7d428ffd289a0b17
+总资产	洋河股份	2024年	67345265219.62 元	
+来源位置	unverified	fact-1f7e62b896f0a74d
+总资产	洋河股份	2023年	69792287455.91 元	
+来源位置	unverified	fact-8692c38f82bec622
+accounts_receivable	洋河股份	2024年	8994904.73 元	
+来源位置	unverified	fact-c79d1e990d92933a
+accounts_receivable	洋河股份	2023年	3528778.28 元	
+来源位置	unverified	fact-92b888fbd5251051
+inventory	洋河股份	2024年	19732881051.73 元	
+来源位置	unverified	fact-9b729e481f87019c
+inventory	洋河股份	2023年	18954235402.25 元	
+来源位置	unverified	fact-d9da5f40141efe0e
+accounts_payable	洋河股份	2024年	1264620215.06 元	
+来源位置	unverified	fact-38b95ffc5934f9af
+accounts_payable	洋河股份	2023年	1425873552.42 元	
+来源位置	unverified	fact-d0340eb40f43b1bd
+总负债	洋河股份	2024年	15652219365.74 元	
+来源位置	unverified	fact-ad5d4187daac8066
+总负债	洋河股份	2023年	17742423481.05 元	
+来源位置	unverified	fact-e1c96652e1b81e97
+total_revenue	洋河股份	2024年	28876296993.56 元	
+来源位置	unverified	fact-5546af850da8c66f
+total_revenue	洋河股份	2023年	33126277551.51 元	
+来源位置	unverified	fact-027f2972e

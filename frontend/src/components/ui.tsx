@@ -25,10 +25,14 @@ export function SectionTitle({ icon, title, extra }: {
   icon?: ReactNode; title: string; extra?: ReactNode
 }) {
   return (
-    <div className="flex items-center gap-2 mb-3">
-      {icon}
-      <h2 className="text-sm font-medium text-ink-muted">{title}</h2>
-      {extra && <div className="ml-auto text-xs text-ink-faint">{extra}</div>}
+    // 窄屏改为上下两行：此前标题与说明共用一行（`ml-auto`），375 宽下说明被压到
+    // 约 50px，逐字折行成「数值句从 / ModelRun 读 / 数装配」几乎不可读（20261022 复验）。
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2 mb-3">
+      <div className="flex items-center gap-2 min-w-0">
+        {icon}
+        <h2 className="text-sm font-medium text-ink-muted">{title}</h2>
+      </div>
+      {extra && <div className="text-xs text-ink-faint sm:ml-auto sm:text-right sm:max-w-[60%]">{extra}</div>}
     </div>
   )
 }
@@ -59,7 +63,7 @@ export function StatusBadge({ status, withHint = false }: { status?: string; wit
   return (
     <span className="inline-flex items-center gap-2">
       <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>
-      {withHint && hint && <span className="text-xs text-slate-500">{hint}</span>}
+      {withHint && hint && <span className="text-xs text-ink-faint">{hint}</span>}
     </span>
   )
 }
@@ -67,9 +71,9 @@ export function StatusBadge({ status, withHint = false }: { status?: string; wit
 // ── 反馈 ──────────────────────────────────────────────────────────
 
 const ALERT_STYLE = {
-  info: { cls: 'bg-cyan-500/10 border-cyan-500/25 text-cyan-300', Icon: Info },
-  warn: { cls: 'bg-amber-500/10 border-amber-500/25 text-amber-300', Icon: AlertTriangle },
-  danger: { cls: 'bg-red-500/10 border-red-500/25 text-red-300', Icon: OctagonAlert },
+  info: { cls: 'bg-brand/10 border-brand/25 text-brand', Icon: Info },
+  warn: { cls: 'bg-amber-500/10 border-amber-500/25 text-amber-700', Icon: AlertTriangle },
+  danger: { cls: 'bg-red-500/10 border-red-500/25 text-red-700', Icon: OctagonAlert },
 } as const
 
 /** 统一告警/提示条：info / warn / danger 三档，替换散写的四种横幅。 */
@@ -128,7 +132,7 @@ export function ErrorState({ title = '加载失败', description, onRetry }: {
     <Alert tone="danger" title={title}
       action={onRetry ? (
         <button onClick={onRetry}
-          className="px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs transition-colors">
+          className="px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-700 text-xs transition-colors">
           重试
         </button>
       ) : undefined}>

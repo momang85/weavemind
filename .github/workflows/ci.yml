@@ -64,6 +64,30 @@ jobs:
         run: python test_task13_metrics_split.py
       - name: "Capability-worker routing gate & URL normalization (P1)"
         run: python test_task14_dispatch_routing.py
+      - name: "Dead-url cache on net_policy reject (per-task, no retry on deterministic reject)"
+        run: python test_task15_dead_url_cache.py
+      - name: "Retryable flag on step results (skip retry for logic errors)"
+        run: python test_task16_retryable_flag.py
+      - name: "Capability×executor cross-table and routing mismatch alert (P2)"
+        run: python test_task17_routing_metrics.py
+      - name: "Acceptance evidence persisted to task DB and exposed via API (P1)"
+        run: python test_task18_acceptance_evidence.py
+      - name: "Search coverage summary in report footer and task detail API (P1)"
+        run: python test_task19_search_coverage.py
+      - name: "Redis graceful degradation: probe, dispatch gate, self-heal, health surfaces (P1)"
+        run: python test_task20_redis_degradation.py
+      - name: "Supervise mode on by default with restart audit and alert (P1)"
+        run: python test_task21_supervise_default.py
+      - name: "Report compaction: body cap, body/appendix split, packaged body (P1)"
+        run: python test_task22_report_compaction.py
+      - name: "LLM circuit breaker: 5-strike OPEN, ordered backup failover, 60s probe, guardian alert (P1)"
+        run: python test_task23_llm_failover.py
+      - name: "Dead-source annotation in report and fingerprint (compliance line)"
+        run: python test_task24_dead_source_annotation.py
+      - name: "Disclaimer enforcement: mandate, auto-inject, AI-marker weak gap (compliance red line)"
+        run: python test_task25_disclaimer_enforcement.py
+      - name: "Step checkpointer resume + dead-fetch persistence + resume API (cost/hygiene)"
+        run: python test_task26_checkpointer.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)
@@ -126,6 +150,38 @@ jobs:
         run: python test_task_projection.py
       - name: Writer consolidation tests
         run: python test_writer_consolidation.py
+      - name: "Search retry keeps already-obtained candidates (no budget starvation)"
+        run: python test_search_candidate_kept.py
+      - name: "Source exclusion audit (candidate vs adopted vs excluded, package inclusion)"
+        run: python test_source_exclusion_registry.py
+      - name: "Source admission (subject / period / purpose / as-of; pending vs rejected)"
+        run: python test_source_admission.py
+      - name: "Research intent & contract chain (free text research, scope boundary, no silent backfill)"
+        run: python test_research_intent.py
+      - name: "Trusted egress diagnosis (address classes, bounded probes, no secrets)"
+        run: python test_net_diag.py
+      - name: "Workspace addressing (stable root, read-only reads, history readability)"
+        run: python test_workspace_addressing.py
+      - name: "Search evidence audit (attempts vs adopted, stage budget, no-regain stop)"
+        run: python test_search_evidence.py
+      - name: "Build identity (disk vs loaded source, frontend build, no path/key leak)"
+        run: python test_build_identity.py
+      - name: "Test vs production log isolation (WEAVEMIND_LOG_DIR priority, tempdir fallback)"
+        run: python test_log_isolation.py
+      - name: "LLM stream fallback attribution, bad non-SSE response, probe path"
+        run: python test_llm_stream_fallback_and_bad_response.py
+      - name: "Probe failure attribution (endpoint vs model vs transport) and template defaults"
+        run: python test_probe_error_attribution.py
+      - name: "Orchestrator instance claim order (no cleanup before claim)"
+        run: python test_orchestrator_claim_order.py
+      - name: "Human review binding to current adopted version (F4)"
+        run: python test_human_review_binding.py
+      - name: "Metrics p95 nearest-rank"
+        run: python test_metrics_p95_nearest_rank.py
+      - name: "Search year token digit boundary (stock code is not a year)"
+        run: python test_search_year_boundary.py
+      - name: "Workspace event timestamps and subject-token gate"
+        run: python test_ws_time_and_topic_gate.py
       - name: Checkpoint tests
         run: python test_checkpointer.py
       - name: Financial chain tests
@@ -142,6 +198,8 @@ jobs:
         run: python test_notifications.py
       - name: Settings requirements tests
         run: python test_settings_requirements.py
+      - name: "User data sources (settings editor, credentials vault, registered egress, probe)"
+        run: python test_data_source_settings.py
       - name: Task time optimization tests
         run: python test_task_time_optimization.py
       - name: "Y2a event calendar & market event returns (disclosure-date evidence, future filter, caliber gate, overlap dedup, replay)"

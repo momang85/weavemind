@@ -1,0 +1,135 @@
+{
+  "task": "ui-10ea37599d",
+  "downloads": [
+    {
+      "file": "ui-10ea37599d.report.md",
+      "url": "/api/task/ui-10ea37599d/report.md",
+      "status": 200,
+      "content_type": "text/markdown; charset=utf-8",
+      "bytes": 19913,
+      "sha256": "675483ff31228ac363e2c3562733331bc2471fea4894456ce8be5ae5ca04e7d0",
+      "manifest_markdown_sha256": "675483ff31228ac363e2c3562733331bc2471fea4894456ce8be5ae5ca04e7d0",
+      "md_matches_manifest": true
+    },
+    {
+      "file": "ui-10ea37599d.pdf",
+      "url": "/api/task/ui-10ea37599d/pdf",
+      "status": 200,
+      "content_type": "application/pdf",
+      "bytes": 5519744,
+      "sha256": "e42f39398be92512d7dd33cdc3af298d246f0b97fb3bd14fc18cdab6b213e9de",
+      "pages": 8,
+      "opens_readable": true,
+      "text_probe": {
+        "洋河": true,
+        "归母净利润": true,
+        "营业收入": true
+      },
+      "text_sample": "洋河股份 经营分析简报（2023-2024 年度） | 研究状态：研究草稿／待补原始披露--必答问题未完成（2/3）：收入变化的量价与结构依据、利润变化 | 的分解（其中部分覆盖 2 项：收入变化的量价与结构依据[已取得部分构成]、利润变化的分解[已取得 | 部分构成]）；29 条肯定结论处于未证实状态（未支持/部分支持/待核查）（数字与格式的机器验收不 | 因此改变；本条",
+      "manifest_pdf_sha256": "e42f39398be92512d7dd33cdc3af298d246f0b97fb3bd14fc18cdab6b213e9de",
+      "pdf_matches_manifest": true
+    },
+    {
+      "file": "deliverables_20261020_180828_e1871e.zip",
+      "url": "/files/ui-10ea37599d/deliverables_20261020_180828_e1871e.zip",
+      "status": 200,
+      "content_type": "application/x-zip-compressed",
+      "bytes": 5742597,
+      "sha256": "323ef1de68d82a535d1c9fd71f6148e7689c1c0c700f11341d45962d73872840",
+      "outer_report_version_id": "97b839ed1a146890bd98a7e489442335fe8d2fa53723b24f404f86c2e76e8baf",
+      "outer_files": [
+        "markdown",
+        "pdf",
+        "working_paper_csv",
+        "working_paper_json"
+      ],
+      "members": 23,
+      "inner_report_version_id": "97b839ed1a146890bd98a7e489442335fe8d2fa53723b24f404f86c2e76e8baf",
+      "version_id_consistent": true,
+      "zip_md_sha256": "675483ff31228ac363e2c3562733331bc2471fea4894456ce8be5ae5ca04e7d0",
+      "zip_pdf_sha256": "80ea23f197b5041bc524d567b1435d66caaefdb1fe7a297a2e4de75ca13fe94a",
+      "md_same_as_download": true,
+      "pdf_same_as_download": false,
+      "inner_delivered_md_sha256": "675483ff31228ac363e2c3562733331bc2471fea4894456ce8be5ae5ca04e7d0",
+      "inner_pdf_sha256": "80ea23f197b5041bc524d567b1435d66caaefdb1fe7a297a2e4de75ca13fe94a",
+      "inner_md_bound": true,
+      "inner_drift": {
+        "evidence/citation_evidence.json": "missing_on_disk",
+        "analysis/analysis_runs.json": "changed_on_disk",
+        "analysis/dataset.json": "missing_on_disk",
+        "analysis/plan.json": "missing_on_disk",
+        "analysis/context.json": "missing_on_disk",
+        "analysis/selection.json": "missing_on_disk",
+        "analysis/analysis_cards.md": "missing_on_disk",
+        "analysis/analysis_detail.md": "missing_on_disk",
+        "analysis/resilience_card.md": "missing_on_disk"
+      },
+      "inner_analysis_inputs": {
+        "schema": "weavemind.analysis_inputs/1",
+        "present": [
+          "analysis/context.json",
+          "analysis/dataset.json",
+          "analysis/plan.json"
+        ],
+        "missing": [],
+        "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+        "dataset_source": {
+          "kind": "working_paper",
+          "file": "working_paper.json",
+          "label": "worker:working_paper.json"
+        },
+        "contract": {
+          "entity": "洋河股份",
+          "entity_id": "002304.SZ",
+          "periods": [
+            "2023年",
+            "2024年"
+          ],
+          "as_of": "2025-04-30",
+          "caliber": "合并"
+        },
+        "recomputable": true,
+        "selection": {
+          "schema": "weavemind.analysis_selection/1",
+          "entries": [
+            {
+              "model_id": "scenario_sensitivity",
+              "run_id": "a25a4fff12ed4a5365a25ba12b6a4fd8e51231e391703a9979a175aeb82ca2c6",
+              "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+              "params_hash": "4bb957744960680a",
+              "params": {
+                "revenue_growth": 0.1,
+                "gross_margin_delta": 0.01,
+                "expense_change_ratio": 0
+              },
+              "rules_version": "validation/1.1.0",
+              "selected_at": "2026-10-20T18:07:15",
+              "output_ids": [
+                "a25a4fff12ed-00-scenario_net_profit",
+                "a25a4fff12ed-01-scenario_sensitivity",
+                "a25a4fff12ed-02-collection_days_capital_per_day",
+                "a25a4fff12ed-03-collection_days_sensitivity_10d",
+                "a25a4fff12ed-04-margin_threshold_to_hold_base_profit",
+                "a25a4fff12ed-05-margin_gap_to_threshold_pp",
+                "a25a4fff12ed-06-revenue_growth_to_hold_target"
+              ]
+            }
+          ],
+          "adopted_identity": "97b839ed1a146890bd98a7e489442335fe8d2fa53723b24f404f86c2e76e8baf",
+          "in_package": true,
+          "note": "包内带选择记录：正文分析卡按所选运行装配"
+        }
+      },
+      "inner_analysis_runs": {
+        "schema": "weavemind.analysis_runs/1",
+        "count": 12,
+        "validated": 12
+      },
+      "members_checked": 22,
+      "members_not_in_manifest": [],
+      "member_mismatch": [],
+      "all_listed_members_match": true
+    }
+  ],
+  "md_starts_with_report": true
+}

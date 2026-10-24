@@ -1,0 +1,1018 @@
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index e99373f..40e85ad 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -19,6 +19,7 @@ const MemoryPage = lazy(() => import('./pages/Memory'))
+ const EvalsPage = lazy(() => import('./pages/Evals'))
+ const SkillsPage = lazy(() => import('./pages/Skills'))
+ const ResearchStudyPage = lazy(() => import('./pages/ResearchStudy'))
++const StockScreenPage = lazy(() => import('./pages/StockScreen'))
+ 
+ function PageFallback() {
+   return (
+@@ -125,6 +126,7 @@ export default function App() {
+             <Route path="/evals" element={<EvalsPage />} />
+             <Route path="/skills" element={<SkillsPage />} />
+             <Route path="/research-study" element={<ResearchStudyPage />} />
++            <Route path="/screen" element={<StockScreenPage />} />
+             <Route path="/settings" element={<SettingsPage />} />
+             <Route path="/audit" element={<AuditPage />} />
+             <Route path="/metrics" element={<MetricsPage />} />
+diff --git a/frontend/src/components/AppLayout.tsx b/frontend/src/components/AppLayout.tsx
+index 37a9393..2406588 100644
+--- a/frontend/src/components/AppLayout.tsx
++++ b/frontend/src/components/AppLayout.tsx
+@@ -1,7 +1,7 @@
+ import { ReactNode, useState, useEffect, useRef } from 'react'
+ import { createPortal } from 'react-dom'
+ import { NavLink, useLocation } from 'react-router-dom'
+-import { Settings, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X, Microscope, BookOpen, ChevronDown, ArrowUpRight } from 'lucide-react'
++import { Settings, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X, Microscope, BookOpen, ChevronDown, ArrowUpRight, Filter } from 'lucide-react'
+ import { useTaskStore } from '../stores/useTaskStore'
+ import { useVisibleInterval } from '../lib/useVisibleInterval'
+ import { useDemoRunner } from '../stores/useDemoRunner'
+@@ -11,6 +11,7 @@ import { BrandMark } from './Brand'
+ 
+ const researchNav = [
+   { to: '/', icon: BookOpen, label: '研究工作台', subtitle: '从公开资料，到可复核的研究' },
++  { to: '/screen', icon: Filter, label: '可解释选股', subtitle: '自己的股票池 + 财务规则，候选带理由与缺口' },
+   { to: '/history', icon: Clock, label: '研究档案', subtitle: '找回研究、继续对话与查看交付' },
+   { to: '/research-study', icon: Microscope, label: '研究试验', subtitle: '在本地验证研究方法与结果' },
+ ]
+diff --git a/frontend/src/pages/StockScreen.tsx b/frontend/src/pages/StockScreen.tsx
+new file mode 100644
+index 0000000..ebbfc40
+--- /dev/null
++++ b/frontend/src/pages/StockScreen.tsx
+@@ -0,0 +1,971 @@
++// 可解释选股 MVP（R1-SCREEN-1023，R1-C 工作台入口）
++//
++// 一件事：**选股票池 + 资料截止日 → 确认少量财务规则 → 看三态候选（带理由/缺口）→
++// 看对应公司证据 → 结果已冻结（run_id），可重开同一份原版**。
++// 边界：不做全市场回测、不给综合评分/上涨概率、不调用模型与搜索；
++// 点公司只打开**这一份结果**里的证据（绑 run_id + entity_id），不提交研究、不跳"最近任务"。
++// 视觉：纸白底 + 金色主色（bg-surface / text-brand），沿用全局 token，不新增散写样式。
++
++import { useEffect, useMemo, useState } from 'react'
++import {
++  Filter, RefreshCw, Play, Eye, ShieldCheck, AlertTriangle, CheckCircle2,
++  ChevronDown, ChevronRight, ExternalLink, FlaskConical, Loader2, Plus, X,
++} from 'lucide-react'
++import { Card, SectionTitle, Alert, EmptyState, StatCard } from '../components/ui'
++
++// ── 后端契约（与 screen_store / stock_screen 同形） ─────────────────────
++
++interface FieldSpec {
++  field_id: string; label: string; kind: 'amount' | 'pct'
++  unit: string; metric: string; numerator: string; denominator: string
++  needs_prev: boolean; note: string
++}
++interface FieldsPayload {
++  schema: string; impl_version: string; field_map_version: string
++  ops: string[]; amount_units: string[]; fields: FieldSpec[]
++}
++interface PoolEntity {
++  code: string; entity: string; rows: number; periods: string[]
++  first_available: string; last_available: string; pending_rows: number
++}
++interface SourceMeta {
++  label: string; sha256: string; row_count: number
++  synthetic: boolean; user_provided: boolean; origin?: string
++}
++interface Preset {
++  preset_id: string; name: string; note?: string; pool: string[]
++  as_of: string; rules: { field: string; op: string; value: number; unit?: string }[]
++  rules_hash: string; created_at: string; updated_at: string
++}
++interface ExcludedRow {
++  code: string; entity?: string; period: string
++  available_at?: string; reason: string
++}
++interface PendingRow { code: string; period?: string; reason: string }
++interface PreviewEntity {
++  entity: string; entity_id: string; periods: string[]; caliber: string
++  currency: string[]; units: string[]; available_at: string[]
++  observations: number; metrics: string[]; dataset_hash: string
++  gaps: string[]; conflicts: string[]; excluded_rows: number; pending_rows: number
++}
++interface PreviewPayload {
++  status: string; snapshot_id?: string; as_of?: string; pool?: string[]
++  source: SourceMeta; available_pool: PoolEntity[]; missing_pool_codes?: string[]
++  entities_ready?: number; entities_without_periods?: number
++  excluded?: ExcludedRow[]; pending?: PendingRow[]
++  rules?: any[]; rules_errors?: string[]; errors?: string[]
++  entities?: PreviewEntity[]
++}
++interface Reading {
++  field: string; label: string; status: string; value: number | null
++  unit: string; display: string; formula: string; reason: string
++  inputs: string[]; source_url: string
++}
++interface EvidenceInput {
++  fact_id: string; metric: string; metric_label: string; period: string
++  value: number | null; unit: string; currency: string; caliber: string
++  period_kind: string; period_start: string; period_end: string
++  as_of: string; state: string; source_url: string; source_hash: string
++  verify_state: string
++}
++interface Evidence {
++  schema: string; run_id: string; result_hash: string; snapshot_id: string
++  as_of: string; created_at: string; source: SourceMeta
++  entity: string; entity_id: string; verdict: string; eval_period: string
++  readings: { field: string; label: string; status: string; display: string
++    value: number | null; unit: string; formula: string; reason: string
++    inputs: EvidenceInput[]; unresolved_inputs: string[] }[]
++  source_urls: string[]; excluded?: ExcludedRow[]; pending_pit?: PendingRow[]
++  integrity: string
++}
++interface RunEntity {
++  entity: string; entity_id: string; dataset_hash: string; periods: string[]
++  caliber: string; gaps: string[]; conflicts: string[]
++  excluded: ExcludedRow[]; pending_pit: PendingRow[]; observations: any[]
++}
++interface ScreenRow {
++  entity: string; entity_id: string; verdict: 'pass' | 'fail' | 'insufficient'
++  eval_period: string; readings: Reading[]; reasons: string[]; dataset_hash: string
++}
++interface Run {
++  schema: string; impl_version: string; field_map_version: string
++  run_id: string; created_at: string; as_of: string; pool: string[]
++  rules: any[]; rules_hash: string; snapshot_id: string; result_hash: string
++  period_pin: string; counts: { pass: number; fail: number; insufficient: number; total: number }
++  notes: string[]; source: SourceMeta; entities: RunEntity[]
++  excluded?: ExcludedRow[]; rows: { pass: ScreenRow[]; fail: ScreenRow[]; insufficient: ScreenRow[] }
++  reused?: boolean
++}
++interface RunSummary {
++  run_id: string; created_at: string; as_of: string; counts: Run['counts']
++  source: SourceMeta; integrity?: string; reused?: boolean
++  rules_count?: number; pool?: string[]
++}
++type RuleDraft = { field: string; op: string; value: string; unit: string }
++
++// ── 状态徽章（纸白/金色基调，三态候选用绿/琥珀/灰；不直接显示英文枚举） ──
++
++const VERDICT_LABEL: Record<ScreenRow['verdict'], string> = {
++  pass: '通过', fail: '未通过', insufficient: '资料不足',
++}
++const VERDICT_CLASS: Record<ScreenRow['verdict'], string> = {
++  pass: 'bg-emerald-500/15 text-emerald-700 border border-emerald-500/25',
++  fail: 'bg-amber-500/15 text-amber-700 border border-amber-500/25',
++  insufficient: 'bg-line-strong/20 text-ink-muted border border-line-strong/40',
++}
++const verdictBadge = (v: ScreenRow['verdict']) => (
++  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${VERDICT_CLASS[v]}`}>
++    {VERDICT_LABEL[v]}
++  </span>
++)
++const READING_STATUS: Record<string, { label: string; cls: string }> = {
++  ok: { label: '有值', cls: 'text-state-success' },
++  missing: { label: '缺失', cls: 'text-ink-faint' },
++  conflicting: { label: '冲突', cls: 'text-state-failure' },
++  not_applicable: { label: '不适用', cls: 'text-ink-faint' },
++  pending_pit: { label: '待核验', cls: 'text-state-issue' },
++}
++const readingStatus = (s: string) => READING_STATUS[s] || { label: s, cls: 'text-ink-faint' }
++
++const short12 = (s?: string) => (s ? String(s).slice(0, 12) : '—')
++const fmtTime = (iso?: string) => {
++  if (!iso) return '—'
++  const d = new Date(iso)
++  return isNaN(d.getTime()) ? iso : d.toLocaleString('zh-CN', { hour12: false })
++}
++const todayISO = () => {
++  const d = new Date()
++  const p = (n: number) => String(n).padStart(2, '0')
++  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
++}
++const OP_LABEL: Record<string, string> = { '>=': '≥', '<=': '≤', '>': '>', '<': '<' }
++
++// ── 页面 ─────────────────────────────────────────────────────────────
++
++export default function StockScreen() {
++  const [fields, setFields] = useState<FieldsPayload | null>(null)
++  const [pool, setPool] = useState<PoolEntity[]>([])
++  const [source, setSource] = useState<SourceMeta | null>(null)
++  const [poolError, setPoolError] = useState('')
++  const [selected, setSelected] = useState<string[]>([])
++  const [manualCode, setManualCode] = useState('')
++  const [extraCodes, setExtraCodes] = useState<string[]>([])
++  const [asOf, setAsOf] = useState(todayISO())
++  const [rules, setRules] = useState<RuleDraft[]>([
++    { field: 'revenue_growth', op: '>=', value: '0', unit: '%' },
++    { field: 'gross_margin', op: '>=', value: '20', unit: '%' },
++    { field: 'debt_ratio', op: '<=', value: '60', unit: '%' },
++  ])
++  const [preview, setPreview] = useState<PreviewPayload | null>(null)
++  const [run, setRun] = useState<Run | null>(null)
++  const [viewingOriginal, setViewingOriginal] = useState(false)
++  const [runs, setRuns] = useState<RunSummary[]>([])
++  const [openEvidence, setOpenEvidence] = useState('')
++  const [evidence, setEvidence] = useState<Evidence | null>(null)
++  const [evLoading, setEvLoading] = useState(false)
++  const [evError, setEvError] = useState('')
++  const [busy, setBusy] = useState('')
++  const [err, setErr] = useState('')
++  const [notice, setNotice] = useState('')
++  const [histOpen, setHistOpen] = useState(false)
++  const [presets, setPresets] = useState<Preset[]>([])
++  const [presetSel, setPresetSel] = useState('')
++  const [presetName, setPresetName] = useState('')
++  const [presetBusy, setPresetBusy] = useState('')
++  const [presetMsg, setPresetMsg] = useState('')
++
++  const fieldById = useMemo(
++    () => new Map((fields?.fields ?? []).map(f => [f.field_id, f])), [fields])
++
++  const loadPool = async () => {
++    try {
++      const d = await (await fetch('/api/screen/pool')).json()
++      setPool(d.available_pool ?? [])
++      setSource(d.source ?? null)
++      setPoolError('')
++    } catch (e: any) { setPoolError(`股票池目录加载失败：${e?.message ?? e}`) }
++  }
++  const loadFields = async () => {
++    try {
++      const d = await (await fetch('/api/screen/fields')).json()
++      setFields(d)
++    } catch { /* 读不到就保持空（选择器会显示为空，不编字段） */ }
++  }
++  const loadRuns = async () => {
++    try {
++      const d = await (await fetch('/api/screen/runs?limit=20')).json()
++      setRuns(d.runs ?? [])
++    } catch { /* 保持上一次列表，不编 */ }
++  }
++  const loadPresets = async () => {
++    try {
++      const d = await (await fetch('/api/screen/presets?limit=100')).json()
++      setPresets(d.presets ?? [])
++    } catch { /* 读不到就保持空列表，不编预设 */ }
++  }
++  useEffect(() => { loadPool(); loadFields(); loadRuns(); loadPresets() }, [])
++
++  const post = async (path: string, body: any) => {
++    const res = await fetch(path, {
++      method: 'POST', headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify(body),
++    })
++    const d = await res.json().catch(() => ({}))
++    return { ok: res.ok, status: res.status, d }
++  }
++
++  // 第 1 步：股票池（目录勾选 + 手输代码）与资料截止日
++  const toggleCode = (code: string) => setSelected(prev =>
++    prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code])
++  const addManual = () => {
++    const code = manualCode.trim().toUpperCase()
++    if (!code) return
++    if (!selected.includes(code) && !extraCodes.includes(code)) setExtraCodes(prev => [...prev, code])
++    setManualCode('')
++  }
++  const effectivePool = useMemo(
++    () => [...new Set([...selected, ...extraCodes])], [selected, extraCodes])
++  const inCatalog = (code: string) => pool.some(p => p.code === code)
++
++  // 预设：保存/载入/删除（预设只是偏好，永不改动已冻结结果）
++  const applyPreset = async (pid: string) => {
++    setPresetSel(pid); setPresetMsg('')
++    if (!pid) return
++    setPresetBusy('load')
++    try {
++      const d = await (await fetch(`/api/screen/preset?id=${encodeURIComponent(pid)}`)).json()
++      if (d.error) throw new Error(d.error)
++      const p = d.preset as Preset
++      const codes = p.pool ?? []
++      setSelected(codes.filter(inCatalog))
++      setExtraCodes(codes.filter(c => !inCatalog(c)))
++      if (p.as_of) setAsOf(p.as_of)
++      setRules((p.rules ?? []).map(r => ({
++        field: r.field, op: r.op, value: String(r.value),
++        unit: r.unit || (fieldById.get(r.field)?.kind === 'amount' ? '元' : ''),
++      })))
++      setPresetName(p.name)
++      setPresetMsg(`已载入预设「${p.name}」：规则需你确认后才会执行（载入不等于执行）。`)
++    } catch (e: any) { setPresetMsg(`载入预设失败：${e?.message ?? e}`) } finally { setPresetBusy('') }
++  }
++  const savePreset = async () => {
++    const name = presetName.trim() || presets.find(p => p.preset_id === presetSel)?.name || ''
++    if (!name) { setPresetMsg('给预设起个名字再保存'); return }
++    if (!effectivePool.length) { setPresetMsg('股票池为空：先勾选或输入代码'); return }
++    setPresetBusy('save'); setPresetMsg('')
++    try {
++      const payloadRules = rulePayload().filter(r => r.field)
++      const body: any = { name, pool: effectivePool, rules: payloadRules, as_of: asOf }
++      if (presetSel) body.preset_id = presetSel
++      const { ok, d } = await post('/api/screen/preset', body)
++      if (!ok) throw new Error(d.error || '保存失败')
++      setPresetSel(d.preset.preset_id)
++      setPresetName(d.preset.name)
++      await loadPresets()
++      setPresetMsg(`已${presetSel ? '更新' : '保存'}预设「${d.preset.name}」：它只记住池与规则，不绑定任何结果。`)
++    } catch (e: any) { setPresetMsg(String(e?.message ?? e)) } finally { setPresetBusy('') }
++  }
++  const removePreset = async () => {
++    if (!presetSel) return
++    setPresetBusy('delete'); setPresetMsg('')
++    try {
++      const { ok, d } = await post('/api/screen/preset/delete', { preset_id: presetSel })
++      if (!ok) throw new Error(d.error || '删除失败')
++      setPresetSel(''); setPresetName('')
++      await loadPresets()
++      setPresetMsg('预设已删除（已冻结的结果不受影响）。')
++    } catch (e: any) { setPresetMsg(String(e?.message ?? e)) } finally { setPresetBusy('') }
++  }
++
++  // 「过期/不可重算」：实现版本或输入文件变了 → 原版只能查看，不能冒充现状
++  const staleReasons = useMemo(() => {
++    const out: string[] = []
++    if (!run) return out
++    if (fields?.impl_version && run.impl_version && fields.impl_version !== run.impl_version) {
++      out.push(`实现版本已变：这份由 ${run.impl_version} 生成，当前是 ${fields.impl_version}。旧结果不会按新实现重算，只能查看原版。`)
++    }
++    if (source?.sha256 && run.source?.sha256 && source.sha256 !== run.source.sha256) {
++      out.push(`输入文件已变：这份用的是 ${short12(run.source.sha256)}…，当前缓存是 ${short12(source.sha256)}…。要看新数据下的结果，请「用当前数据重新筛选」。`)
++    }
++    return out
++  }, [run, fields, source])
++
++  const doPreview = async () => {
++    if (!effectivePool.length) { setErr('请先勾选或输入至少一个股票代码'); return }
++    setBusy('preview'); setErr('')
++    try {
++      const { ok, d } = await post('/api/screen/preview',
++        { pool: effectivePool, as_of: asOf })
++      if (!ok) throw new Error(d.error || '预览失败')
++      setPreview(d)
++    } catch (e: any) { setErr(String(e?.message ?? e)); setPreview(null) } finally { setBusy('') }
++  }
++
++  // 第 2 步：规则（字段 + 比较符 + 阈值 + 单位；未知字段/比较符由后端拒绝，前端不猜）
++  const addRule = () => setRules(prev => [...prev, { field: '', op: '>=', value: '', unit: '' }])
++  const updateRule = (i: number, patch: Partial<RuleDraft>) => setRules(prev =>
++    prev.map((r, idx) => idx === i ? { ...r, ...patch } : r))
++  const removeRule = (i: number) => setRules(prev => prev.filter((_, idx) => idx !== i))
++  const rulePayload = () => rules.map(r => ({
++    field: r.field, op: r.op,
++    value: r.value === '' ? '' : Number(r.value),
++    unit: fieldById.get(r.field)?.kind === 'amount' ? (r.unit || '元') : undefined,
++  }))
++
++  // 第 3 步：执行（结果冻结 + 复用语义）
++  const doRun = async () => {
++    if (!effectivePool.length) { setErr('请先勾选或输入至少一个股票代码'); return }
++    if (!rules.length) { setErr('至少需要一条筛选条件'); return }
++    setBusy('run'); setErr(''); setEvidence(null); setOpenEvidence('')
++    try {
++      const { ok, d } = await post('/api/screen/run',
++        { pool: effectivePool, as_of: asOf, rules: rulePayload() })
++      if (!ok) throw new Error(d.error || '筛选失败')
++      const fresh = d.run as Run
++      const sameAsShown = run !== null && fresh.run_id === run.run_id
++      const reused = !!fresh.reused
++      setRun(fresh)
++      setViewingOriginal(false)
++      loadRuns()
++      setErr('')
++      if (reused && sameAsShown) setNotice('数据与规则都没变：复用当前这份已冻结结果，未重算。')
++      else if (reused) setNotice(`输入、规则、截止日都与历史某次完全相同（哈希一致）：直接打开那份原版（${fresh.run_id.slice(0, 8)}…），未重算。`)
++      else if (run !== null) setNotice('已生成新结果（旧结果原样保留，可在历史结果里重开）。')
++      else setNotice('')
++    } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy('') }
++  }
++
++  // 查看原版（GET，永不重算）与历史重开
++  const openRun = async (runId: string) => {
++    setBusy('original'); setErr(''); setEvidence(null); setOpenEvidence('')
++    try {
++      const d = await (await fetch(`/api/screen/run?id=${encodeURIComponent(runId)}`)).json()
++      if (d.error) throw new Error(d.error)
++      setRun(d.run as Run)
++      setViewingOriginal(true)
++      // 表单回填为原版参数：目录里有的回勾，目录里没有的落手输芯片——
++      // 这样「用当前数据重新筛选」发的是同一池子，差异只来自数据与规则。
++      const origPool: string[] = (d.run as Run).pool ?? []
++      setSelected(origPool.filter(c => pool.some(p => p.code === c)))
++      setExtraCodes(origPool.filter(c => !pool.some(p => p.code === c)))
++      setAsOf((d.run as Run).as_of)
++      setRules(((d.run as Run).rules ?? []).map((r: any) => ({
++        field: r.field, op: r.op, value: String(r.value ?? ''), unit: r.unit ?? '',
++      })))
++      setNotice('')
++      loadRuns()
++    } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy('') }
++  }
++
++  // 证据跳转：绑 (run_id, entity_id)，打开的是这一份结果里的证据
++  const toggleEvidence = async (row: ScreenRow) => {
++    if (!run) return
++    if (openEvidence === row.entity_id) { setOpenEvidence(''); setEvidence(null); return }
++    setOpenEvidence(row.entity_id); setEvLoading(true); setEvError('')
++    try {
++      const d = await (await fetch(
++        `/api/screen/evidence?run=${encodeURIComponent(run.run_id)}&entity=${encodeURIComponent(row.entity_id)}`)).json()
++      if (d.error) throw new Error(d.error)
++      setEvidence(d.evidence as Evidence)
++    } catch (e: any) { setEvError(String(e?.message ?? e)); setEvidence(null) } finally { setEvLoading(false) }
++  }
++
++  const sourceLine = (s: SourceMeta | null | undefined) => {
++    if (!s) return null
++    return (
++      <span className="text-xs text-ink-faint">
++        数据来源：{s.label || '未标'}｜{s.row_count} 行｜
++        {s.synthetic ? <span className="text-state-issue">合成演示数据（不进真实候选）</span>
++          : s.user_provided ? <span className="text-state-issue">用户提供，未独立核验</span>
++          : '真实披露缓存'}｜文件 sha256 {short12(s.sha256)}…
++      </span>
++    )
++  }
++
++  const stepDot = (n: number, done: boolean) => (
++    <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-semibold shrink-0
++      ${done ? 'bg-brand text-white' : 'bg-surface-raised text-ink-faint border border-line'}`}>{n}</span>
++  )
++
++  const renderRuleRow = (r: RuleDraft, i: number) => {
++    const spec = fieldById.get(r.field)
++    const isAmount = spec?.kind === 'amount'
++    return (
++      <div key={i} className="grid grid-cols-1 sm:grid-cols-[1.3fr_.55fr_.7fr_.6fr_auto] gap-2 items-start
++        border border-line rounded-lg p-2 bg-surface-sunken/60">
++        <label className="text-xs text-ink-faint block">
++          字段
++          <select value={r.field} onChange={e => {
++            const f = fieldById.get(e.target.value)
++            updateRule(i, { field: e.target.value, unit: f?.kind === 'amount' ? '元' : '' })
++          }}
++            className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink">
++            <option value="">选择字段…</option>
++            {(fields?.fields ?? []).map(f => <option key={f.field_id} value={f.field_id}>{f.label}</option>)}
++          </select>
++          {spec && <span className="mt-1 block leading-snug">{spec.note}</span>}
++        </label>
++        <label className="text-xs text-ink-faint block">
++          比较
++          <select value={r.op} onChange={e => updateRule(i, { op: e.target.value })}
++            className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink">
++            {(fields?.ops ?? ['>=', '<=', '>', '<']).map(op =>
++              <option key={op} value={op}>{OP_LABEL[op] || op}</option>)}
++          </select>
++        </label>
++        <label className="text-xs text-ink-faint block">
++          阈值
++          <input type="number" step="any" value={r.value}
++            onChange={e => updateRule(i, { value: e.target.value })}
++            placeholder="数字"
++            className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink tabular-nums" />
++        </label>
++        <label className="text-xs text-ink-faint block">
++          单位
++          <select value={isAmount ? (r.unit || '元') : (spec?.unit || '%')} disabled={!isAmount}
++            onChange={e => updateRule(i, { unit: e.target.value })}
++            className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink disabled:text-ink-faint disabled:bg-surface-raised/50">
++            {isAmount
++              ? (fields?.amount_units ?? ['元', '万', '亿']).map(u => <option key={u} value={u}>{u}</option>)
++              : <option value="%">%</option>}
++          </select>
++        </label>
++        <button type="button" onClick={() => removeRule(i)} aria-label={`删除条件 ${i + 1}`}
++          className="mt-5 p-1.5 rounded-lg text-ink-faint hover:text-red-700 hover:bg-red-500/10 transition-colors">
++          <X className="w-4 h-4" />
++        </button>
++      </div>
++    )
++  }
++
++  const renderRow = (row: ScreenRow) => {
++    const open = openEvidence === row.entity_id
++    return (
++      <div key={row.entity_id} className="border border-line rounded-xl overflow-hidden bg-surface">
++        <button type="button" onClick={() => toggleEvidence(row)} aria-expanded={open}
++          className="w-full flex flex-wrap items-center gap-2 px-4 py-3 text-left hover:bg-surface-raised/40 transition-colors">
++          {open ? <ChevronDown className="w-4 h-4 text-brand shrink-0" />
++            : <ChevronRight className="w-4 h-4 text-ink-faint shrink-0" />}
++          <span className="text-sm font-medium text-ink">{row.entity}</span>
++          <span className="text-xs text-ink-faint tabular-nums">{row.entity_id}</span>
++          {verdictBadge(row.verdict)}
++          <span className="text-xs text-ink-faint">评估期间 {row.eval_period || '—'}</span>
++          <span className="text-xs text-ink-faint ml-auto hidden sm:inline">底稿哈希 {short12(row.dataset_hash)}…</span>
++        </button>
++        <div className="px-4 pb-3">
++          <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
++            {row.readings.map(r => {
++              const st = readingStatus(r.status)
++              return (
++                <div key={r.field} className="border border-line rounded-lg px-3 py-2 bg-surface-sunken/60">
++                  <div className="flex items-center justify-between gap-2">
++                    <span className="text-xs text-ink-muted">{r.label}</span>
++                    <span className={`text-xs font-medium ${st.cls}`}>{st.label}</span>
++                  </div>
++                  <div className="text-sm text-ink tabular-nums mt-0.5" title={r.value != null ? String(r.value) : undefined}>
++                    {r.display || '—'}
++                  </div>
++                  {r.reason && <div className="text-xs text-ink-faint mt-1 leading-snug">{r.reason}</div>}
++                  {r.formula && <div className="text-xs text-ink-faint/80 mt-0.5 tabular-nums">{r.formula}</div>}
++                </div>
++              )
++            })}
++          </div>
++          {row.reasons.length > 0 && (
++            <ul className="mt-2 space-y-1">
++              {row.reasons.map((reason, i) => (
++                <li key={i} className="text-xs text-ink-muted flex gap-1.5 leading-snug">
++                  {row.verdict === 'pass'
++                    ? <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0 text-state-success" />
++                    : <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-state-issue" />}
++                  {reason}
++                </li>
++              ))}
++            </ul>
++          )}
++          {open && (
++            <div className="mt-3 border-t border-line pt-3" aria-live="polite">
++              {evLoading && <div className="flex items-center gap-2 text-xs text-ink-faint py-2">
++                <Loader2 className="w-4 h-4 animate-spin" /> 正在载入证据…</div>}
++              {evError && <Alert tone="danger" title="证据载入失败">{evError}</Alert>}
++              {evidence && evidence.entity_id === row.entity_id && <EvidencePanel ev={evidence} />}
++            </div>
++          )}
++        </div>
++      </div>
++    )
++  }
++
++  const rows = run?.rows
++  const noRun = !run
++
++  return (
++    <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-4" id="workspace-content">
++      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:gap-3">
++        <div>
++          <h1 className="text-xl font-semibold text-ink flex items-center gap-2">
++            <Filter className="w-5 h-5 text-brand" /> 可解释选股
++          </h1>
++          <p className="text-xs text-ink-faint mt-1 leading-relaxed">
++            选自己的股票池和资料截止日 → 确认少量财务规则 → 看带理由与缺口的候选 → 查看对应公司证据 → 结果冻结保存，可重开同一份原版。
++            不做回测，不给综合评分；筛选不调用模型。
++          </p>
++        </div>
++        <div className="sm:ml-auto">{sourceLine(source)}</div>
++      </div>
++
++      {poolError && <Alert tone="danger" title="股票池目录不可用" >{poolError}</Alert>}
++      {err && <Alert tone="danger" title="操作未完成">{err}</Alert>}
++      {notice && <Alert tone="info">{notice}</Alert>}
++
++      {/* ── 第 1 步：股票池 + 截止日 ── */}
++      <Card>
++        <SectionTitle icon={stepDot(1, effectivePool.length > 0 && !!preview)}
++          title="股票池与资料截止日"
++          extra="先预览输入里真实可用的资料，再确认规则" />
++        <div className="space-y-3">
++          <div>
++            <div className="text-xs text-ink-faint mb-1.5">
++              勾选公司（来自输入文件的目录；不在目录里的代码可手输，执行后计入「资料不足」，不编造读数）：
++            </div>
++            {pool.length === 0
++              ? <EmptyState title="输入文件里还没有可用主体"
++                  description="把披露缓存放到 data/screen_cache/official_disclosure_cache.json（或设置 WEAVEMIND_SCREEN_CACHE）后刷新。" />
++              : <div className="grid gap-2 sm:grid-cols-2">
++                  {pool.map(p => (
++                    <label key={p.code}
++                      className={`flex items-start gap-2.5 rounded-lg border px-3 py-2 cursor-pointer transition-colors
++                        ${selected.includes(p.code) ? 'border-brand bg-brand-soft/60' : 'border-line hover:bg-surface-raised/50'}`}>
++                      <input type="checkbox" checked={selected.includes(p.code)}
++                        onChange={() => toggleCode(p.code)} className="mt-0.5 accent-[#876728]" />
++                      <span className="min-w-0">
++                        <span className="text-sm text-ink">{p.entity}</span>
++                        <span className="text-xs text-ink-faint tabular-nums ml-1.5">{p.code}</span>
++                        <span className="block text-xs text-ink-faint mt-0.5 leading-snug">
++                          {p.rows} 行 · {p.periods.length} 个年度期间 · 可用时点 {p.first_available || '—'} ~ {p.last_available || '—'}
++                          {p.pending_rows > 0 && <span className="text-state-issue"> · {p.pending_rows} 行待核验</span>}
++                        </span>
++                      </span>
++                    </label>
++                  ))}
++                </div>}
++          </div>
++          <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
++            <label className="text-xs text-ink-faint">
++              手输代码（不在目录也允许）
++              <div className="flex gap-1.5 mt-1">
++                <input value={manualCode} onChange={e => setManualCode(e.target.value)}
++                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addManual() } }}
++                  placeholder="如 600519.SH"
++                  className="w-44 rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink tabular-nums" />
++                <button type="button" onClick={addManual}
++                  className="px-2.5 rounded-lg border border-line text-ink-muted hover:bg-surface-raised text-xs transition-colors">
++                  添加
++                </button>
++              </div>
++            </label>
++            <label className="text-xs text-ink-faint sm:ml-auto">
++              资料截止日
++              <input type="date" value={asOf} onChange={e => setAsOf(e.target.value)}
++                className="mt-1 block rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink tabular-nums" />
++              <span className="mt-1 block leading-snug">
++                只纳入「可用时点 ≤ 截止日」的资料；缺可用时点 → 待核验（不参与比较）。
++              </span>
++            </label>
++          </div>
++          <div className="border-t border-line pt-3 space-y-2">
++            <div className="text-xs text-ink-faint">
++              预设（股票池 + 规则）：保存后下次直接载入；预设只是偏好，不改变任何已冻结结果。
++            </div>
++            <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
++              <label className="text-xs text-ink-faint">
++                已存预设
++                <select value={presetSel} onChange={e => applyPreset(e.target.value)}
++                  disabled={presetBusy !== ''}
++                  className="mt-1 block w-64 rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink">
++                  <option value="">（不载入）</option>
++                  {presets.map(p => (
++                    <option key={p.preset_id} value={p.preset_id}>
++                      {p.name} · {p.pool.length} 只 · {p.rules.length} 条
++                    </option>
++                  ))}
++                </select>
++              </label>
++              <label className="text-xs text-ink-faint">
++                预设名称
++                <input value={presetName} onChange={e => setPresetName(e.target.value)}
++                  placeholder="如 高毛利低负债"
++                  className="mt-1 block w-48 rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink" />
++              </label>
++              <div className="flex gap-1.5">
++                <button type="button" onClick={savePreset} disabled={presetBusy !== ''}
++                  className="px-2.5 py-1.5 rounded-lg border border-brand/40 text-brand-strong hover:bg-brand-soft
++                    text-xs transition-colors disabled:opacity-50">
++                  {presetBusy === 'save' ? '保存中…' : presetSel ? '更新预设' : '保存为预设'}
++                </button>
++                {presetSel && (
++                  <button type="button" onClick={removePreset} disabled={presetBusy !== ''}
++                    className="px-2.5 py-1.5 rounded-lg border border-line text-ink-muted hover:text-red-700
++                      text-xs transition-colors disabled:opacity-50">
++                    删除预设
++                  </button>
++                )}
++              </div>
++            </div>
++            {presetMsg && <div className="text-xs text-ink-muted">{presetMsg}</div>}
++          </div>
++          {extraCodes.length > 0 && (
++            <div className="flex flex-wrap gap-1.5">
++              {extraCodes.map(code => (
++                <span key={code} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border
++                  ${inCatalog(code) ? 'border-brand/40 text-brand bg-brand-soft/60'
++                    : 'border-amber-500/30 text-amber-700 bg-amber-500/10'}`}>
++                  {code}
++                  {inCatalog(code) ? '' : <span className="text-ink-faint">（目录里没有）</span>}
++                  <button type="button" onClick={() => setExtraCodes(prev => prev.filter(c => c !== code))}
++                    aria-label={`移除 ${code}`} className="ml-0.5 hover:text-red-700"><X className="w-3 h-3" /></button>
++                </span>
++              ))}
++            </div>
++          )}
++          <div className="flex flex-wrap items-center gap-2">
++            <button type="button" onClick={doPreview} disabled={busy === 'preview'}
++              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-brand/40 text-brand-strong
++                hover:bg-brand-soft text-sm transition-colors disabled:opacity-50">
++              {busy === 'preview' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
++              预览输入
++            </button>
++            {preview && <span className="text-xs text-ink-faint">
++              快照 {short12(preview.snapshot_id)} · 可用主体 {preview.entities_ready ?? 0} · PIT 排除 {(preview.excluded ?? []).length} 行 · 待核验 {(preview.pending ?? []).length} 行
++            </span>}
++          </div>
++          {preview && <PreviewPanel p={preview} />}
++        </div>
++      </Card>
++
++      {/* ── 第 2 步：规则 ── */}
++      <Card>
++        <SectionTitle icon={stepDot(2, rules.length > 0 && rules.every(r => r.field && r.value !== ''))}
++          title="筛选规则（少量、可解释）"
++          extra="未知字段/比较符会被直接拒绝，不自动替换为相近字段" />
++        <div className="space-y-2">
++          {rules.map(renderRuleRow)}
++          <button type="button" onClick={addRule}
++            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-dashed border-line-strong
++              text-ink-muted hover:text-brand hover:border-brand/40 text-xs transition-colors">
++            <Plus className="w-3.5 h-3.5" /> 添加条件
++          </button>
++          <div className="flex flex-wrap items-center gap-2 pt-1">
++            <button type="button" onClick={doRun} disabled={busy === 'run'}
++              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand text-white hover:bg-brand-strong
++                text-sm font-medium transition-colors disabled:opacity-50">
++              {busy === 'run' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
++              执行筛选
++            </button>
++            <span className="text-xs text-ink-faint">
++              执行会生成一份冻结结果（run_id + 结果哈希）；同一输入/规则重复执行会复用，不重算。
++            </span>
++          </div>
++        </div>
++      </Card>
++
++      {/* ── 第 3 步：结果 ── */}
++      <Card>
++        <SectionTitle icon={stepDot(3, !!run)}
++          title="筛选结果（三态候选，带理由与缺口）"
++          extra={run ? `截止日 ${run.as_of} · run_id ${run.run_id} · ${fmtTime(run.created_at)}` : '执行后显示'} />
++        {noRun ? (
++          <EmptyState icon={<FlaskConical className="w-5 h-5" />}
++            title="还没有筛选结果"
++            description="确认股票池与规则后点「执行筛选」。结果会冻结保存，可随时重开同一份原版。" />
++        ) : (
++          <div className="space-y-4">
++            {viewingOriginal && (
++              <Alert tone="info" title="正在查看原版结果">
++                这份结果冻结于 {fmtTime(run.created_at)}，与其输入/规则/实现哈希绑定，永不重算。
++                要看当前数据下的最新筛选，请回第 2 步点「执行筛选」（会生成新结果，不覆盖这一份）。
++              </Alert>
++            )}
++            {staleReasons.length > 0 && (
++              <Alert tone="warn" title="这份原版与当前实现/输入不一致（只能查看，不冒充现状）">
++                <ul className="list-disc pl-4 space-y-0.5">
++                  {staleReasons.map((x, i) => <li key={i}>{x}</li>)}
++                </ul>
++              </Alert>
++            )}
++            {run.source?.synthetic && (
++              <Alert tone="warn" title="本次结果基于合成演示数据">
++                不进入真实候选、不进入交付与验收证据；真实结果请使用真实披露缓存。
++              </Alert>
++            )}
++            {run.source?.user_provided && (
++              <Alert tone="warn" title="本次结果包含用户提供的数据">
++                用户提供数据按「未独立核验」处理；证据面板会标注 verify_state。
++              </Alert>
++            )}
++            {run.notes.filter(n => !n.startsWith('数据来源')).map((n, i) => (
++              <Alert key={i} tone={n.includes('冲突') || n.includes('混合') ? 'warn' : 'info'}>{n}</Alert>
++            ))}
++            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
++              <StatCard label="通过" value={String(run.counts.pass)} tone="success"
++                hint="全部规则满足" />
++              <StatCard label="未通过" value={String(run.counts.fail)} tone="issue"
++                hint="有读数但不满足规则" />
++              <StatCard label="资料不足" value={String(run.counts.insufficient)} tone="default"
++                hint="缺读数/冲突/待核验，不计入未通过" />
++              <StatCard label="合计" value={String(run.counts.total)} />
++            </div>
++            {(['pass', 'fail', 'insufficient'] as const).map(group => (
++              <div key={group}>
++                <div className="flex items-center gap-2 mb-2">
++                  {verdictBadge(group)}
++                  <span className="text-xs text-ink-faint">
++                    {group === 'pass' ? '全部规则满足的公司' : group === 'fail' ? '有明确读数、但不满足规则' : '缺读数或冲突，不猜结论'}
++                  </span>
++                  <span className="text-xs text-ink-faint ml-auto tabular-nums">{(rows?.[group] ?? []).length} 家</span>
++                </div>
++                {(rows?.[group] ?? []).length === 0 ? (
++                  <div className="border border-dashed border-line rounded-xl px-4 py-4 text-xs text-ink-faint">
++                    {group === 'pass' && '本次条件下没有通过的公司。这是筛选结果，不是「暂无数据」——见下方未通过与资料不足的明细。'}
++                    {group === 'fail' && '没有因规则不满足而落选的公司。'}
++                    {group === 'insufficient' && '没有资料不足的公司：每家都有满足比较所需的读数。'}
++                  </div>
++                ) : (
++                  <div className="space-y-2">{(rows?.[group] ?? []).map(renderRow)}</div>
++                )}
++              </div>
++            ))}
++            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
++              <span className="text-xs text-ink-faint mr-auto">
++                结果已冻结：run_id {run.run_id} · 结果哈希 {short12(run.result_hash)}… · 快照 {short12(run.snapshot_id)}…
++              </span>
++              <button type="button" onClick={() => openRun(run.run_id)} disabled={busy === 'original'}
++                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-line text-ink-muted
++                  hover:bg-surface-raised text-xs transition-colors disabled:opacity-50">
++                <ShieldCheck className="w-3.5 h-3.5" /> 查看原版
++              </button>
++              <button type="button" onClick={doRun} disabled={busy === 'run'}
++                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-brand/40 text-brand-strong
++                  hover:bg-brand-soft text-xs transition-colors disabled:opacity-50">
++                <RefreshCw className={`w-3.5 h-3.5 ${busy === 'run' ? 'animate-spin' : ''}`} />
++                用当前数据重新筛选
++              </button>
++            </div>
++          </div>
++        )}
++      </Card>
++
++      {/* ── 历史结果（保存并重开同一份） ── */}
++      <Card>
++        <SectionTitle icon={<RefreshCw className="w-4 h-4 text-brand" />}
++          title="历史结果（原版只读）"
++          extra={runs.length ? `${runs.length} 份` : undefined} />
++        {!histOpen ? (
++          <button type="button" onClick={() => setHistOpen(true)}
++            className="text-xs text-brand hover:underline inline-flex items-center gap-1 py-2">
++            <ChevronRight className="w-3.5 h-3.5" /> 展开历史结果列表
++          </button>
++        ) : runs.length === 0 ? (
++          <EmptyState title="还没有已保存的结果" description="执行一次筛选后，结果会按 run_id 冻结保存。" />
++        ) : (
++          <div className="overflow-x-auto">
++            <table className="w-full text-sm">
++              <thead>
++                <tr className="text-left text-xs text-ink-faint border-b border-line">
++                  <th className="py-2 pr-3 font-medium">生成时间</th>
++                  <th className="py-2 pr-3 font-medium">run_id</th>
++                  <th className="py-2 pr-3 font-medium">截止日</th>
++                  <th className="py-2 pr-3 font-medium">通过/未通过/不足</th>
++                  <th className="py-2 pr-3 font-medium">数据来源</th>
++                  <th className="py-2 font-medium">操作</th>
++                </tr>
++              </thead>
++              <tbody>
++                {runs.map(r => (
++                  <tr key={r.run_id} className="border-b border-line/60 last:border-0">
++                    <td className="py-2 pr-3 text-xs text-ink-muted tabular-nums whitespace-nowrap">{fmtTime(r.created_at)}</td>
++                    <td className="py-2 pr-3 text-xs text-ink-faint tabular-nums">{short12(r.run_id)}…</td>
++                    <td className="py-2 pr-3 text-xs text-ink-muted tabular-nums">{r.as_of}</td>
++                    <td className="py-2 pr-3 text-xs tabular-nums">
++                      <span className="text-state-success">{r.counts?.pass ?? 0}</span>
++                      <span className="text-ink-faint"> / </span>
++                      <span className="text-state-issue">{r.counts?.fail ?? 0}</span>
++                      <span className="text-ink-faint"> / </span>
++                      <span className="text-ink-muted">{r.counts?.insufficient ?? 0}</span>
++                    </td>
++                    <td className="py-2 pr-3 text-xs text-ink-faint">
++                      {r.source?.synthetic ? '合成演示' : r.source?.user_provided ? '用户提供' : '真实披露缓存'}
++                      {r.integrity && r.integrity !== 'ok' && <span className="text-state-failure">（{r.integrity === 'hash_mismatch' ? '哈希不一致' : '清单缺失'}）</span>}
++                    </td>
++                    <td className="py-2">
++                      <button type="button" onClick={() => openRun(r.run_id)} disabled={busy === 'original'}
++                        className="text-xs text-brand hover:underline disabled:opacity-50">打开原版</button>
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        )}
++      </Card>
++    </div>
++  )
++}
++
++// ── 子面板 ─────────────────────────────────────────────────────────────
++
++function PreviewPanel({ p }: { p: PreviewPayload }) {
++  const excluded = p.excluded ?? []
++  const pending = p.pending ?? []
++  return (
++    <div className="border border-line rounded-xl overflow-hidden">
++      <div className="px-4 py-2.5 bg-surface-raised/50 text-xs text-ink-muted">
++        输入预览 · 截至 {p.as_of || '—'}
++        {p.snapshot_id ? ` · 快照 ${short12(p.snapshot_id)}` : ''}
++        {typeof p.entities_without_periods === 'number' && p.entities_without_periods > 0
++          ? ` · ${p.entities_without_periods} 家主体在截止日前无可用年度期间` : ''}
++      </div>
++      <div className="p-4 space-y-3 text-xs text-ink-muted">
++        {(p.entities ?? []).map(pe => (
++          <div key={pe.entity_id} className="border border-line rounded-lg px-3 py-2 bg-surface-sunken/60">
++            <div className="flex flex-wrap items-center gap-2">
++              <span className="text-sm text-ink">{pe.entity}</span>
++              <span className="tabular-nums text-ink-faint">{pe.entity_id}</span>
++              <span>{pe.observations} 条观察</span>
++              <span className="ml-auto">可用时点 {(pe.available_at ?? []).join('、') || '—'}</span>
++            </div>
++            <div className="mt-1 text-ink-faint">
++              年度期间：{(pe.periods ?? []).join('、') || '—'}
++              {(pe.units ?? []).length > 0 && ` · 单位 ${pe.units.join('/')}`}
++              {pe.caliber && ` · 口径 ${pe.caliber}`}
++            </div>
++            {(pe.conflicts ?? []).length > 0 && (
++              <div className="mt-1 text-state-failure">冲突：{(pe.conflicts ?? []).join('；')}</div>
++            )}
++            {(pe.gaps ?? []).length > 0 && (
++              <div className="mt-1 text-ink-faint">缺口：{(pe.gaps ?? []).join('；')}</div>
++            )}
++          </div>
++        ))}
++        {(p.missing_pool_codes ?? []).length > 0 && (
++          <Alert tone="warn" title={`目录里没有：${(p.missing_pool_codes ?? []).join('、')}`}>
++            执行后这些代码会计入「资料不足」（不编造读数、不顶替）。若整池都不在输入里，执行会被直接拒绝。
++          </Alert>
++        )}
++        {excluded.length > 0 && (
++          <div>
++            <div className="mb-1 text-ink-muted">按截止日排除（不纳入，不倒灌 {excluded.length} 行）：</div>
++            <ul className="space-y-0.5">
++              {excluded.map((x, i) => (
++                <li key={i} className="text-ink-faint leading-snug">{x.reason}</li>
++              ))}
++            </ul>
++          </div>
++        )}
++        {pending.length > 0 && (
++          <Alert tone="warn" title={`${pending.length} 行待核验（缺可用时点，不参与比较）`}>
++            <ul className="space-y-0.5">
++              {pending.map((x, i) => (
++                <li key={i} className="leading-snug">{x.reason}</li>
++              ))}
++            </ul>
++          </Alert>
++        )}
++      </div>
++    </div>
++  )
++}
++
++function EvidencePanel({ ev }: { ev: Evidence }) {
++  return (
++    <div className="space-y-3">
++      <div className="flex flex-wrap items-center gap-2 text-xs text-ink-faint">
++        <CheckCircle2 className="w-3.5 h-3.5 text-brand" />
++        <span className="text-ink-muted">证据绑定这一份冻结结果：run_id {short12(ev.run_id)}… · 结果哈希 {short12(ev.result_hash)}…</span>
++        {ev.integrity !== 'ok' && <span className="text-state-failure">完整性：{ev.integrity === 'hash_mismatch' ? '哈希不一致' : '清单缺失'}</span>}
++      </div>
++      {ev.readings.map(r => (
++        <div key={r.field} className="border border-line rounded-lg px-3 py-2.5 bg-surface-sunken/60">
++          <div className="flex flex-wrap items-center gap-2">
++            <span className="text-sm text-ink">{r.label}</span>
++            <span className="text-sm text-ink tabular-nums">{r.display || '—'}</span>
++            {r.formula && <span className="text-xs text-ink-faint tabular-nums">{r.formula}</span>}
++          </div>
++          {r.inputs.length > 0 && (
++            <div className="mt-2 overflow-x-auto">
++              <table className="w-full text-xs">
++                <thead>
++                  <tr className="text-left text-ink-faint border-b border-line/70">
++                    <th className="py-1 pr-3 font-medium">输入科目</th>
++                    <th className="py-1 pr-3 font-medium">期间</th>
++                    <th className="py-1 pr-3 font-medium">数值</th>
++                    <th className="py-1 pr-3 font-medium">口径</th>
++                    <th className="py-1 pr-3 font-medium">可用时点</th>
++                    <th className="py-1 font-medium">来源</th>
++                  </tr>
++                </thead>
++                <tbody>
++                  {r.inputs.map(inp => (
++                    <tr key={inp.fact_id} className="border-b border-line/40 last:border-0">
++                      <td className="py-1 pr-3 text-ink-muted">{inp.metric_label || inp.metric}</td>
++                      <td className="py-1 pr-3 tabular-nums text-ink-muted">{inp.period}</td>
++                      <td className="py-1 pr-3 tabular-nums text-ink">
++                        {inp.value != null ? `${inp.value.toLocaleString('zh-CN')} ${inp.unit}` : '—'}
++                        <span className="text-ink-faint">（{inp.caliber}）</span>
++                      </td>
++                      <td className="py-1 pr-3 text-ink-faint">{inp.caliber}</td>
++                      <td className="py-1 pr-3 tabular-nums text-ink-faint">{inp.as_of || '—'}</td>
++                      <td className="py-1">
++                        {inp.source_url
++                          ? <a href={inp.source_url} target="_blank" rel="noreferrer"
++                              className="text-brand hover:underline inline-flex items-center gap-0.5">
++                              核对 <ExternalLink className="w-3 h-3" /></a>
++                          : <span className="text-ink-faint">—</span>}
++                      </td>
++                    </tr>
++                  ))}
++                </tbody>
++              </table>
++            </div>
++          )}
++          {r.unresolved_inputs.length > 0 && (
++            <div className="mt-1.5 text-xs text-state-issue">
++              有 {r.unresolved_inputs.length} 条引用的观察不在本结果里（fact_id：{r.unresolved_inputs.join('、')}）——不回填。
++            </div>
++          )}
++          {r.reason && <div className="mt-1.5 text-xs text-ink-muted leading-snug">{r.reason}</div>}
++        </div>
++      ))}
++      {(ev.excluded ?? []).length > 0 && (
++        <div className="text-xs text-ink-muted">
++          <div className="mb-1">被截止日规则排除的行（不纳入，不倒灌）：</div>
++          <ul className="space-y-0.5">
++            {(ev.excluded ?? []).map((o, i) => (
++              <li key={i} className="text-ink-faint leading-snug">
++                {o.period} · {o.reason}
++              </li>
++            ))}
++          </ul>
++        </div>
++      )}
++      {(ev.pending_pit ?? []).length > 0 && (
++        <Alert tone="warn" title={`有 ${(ev.pending_pit ?? []).length} 行待核验`}>
++          <ul className="space-y-0.5">
++            {(ev.pending_pit ?? []).map((o, i) => <li key={i} className="leading-snug">{o.reason}</li>)}
++          </ul>
++        </Alert>
++      )}
++      {ev.source_urls.length > 0 && (
++        <div className="text-xs text-ink-faint">
++          来源文档（{ev.source_urls.length} 份，均为官方披露页）：
++          <ul className="mt-1 space-y-0.5">
++            {ev.source_urls.map(u => (
++              <li key={u}><a href={u} target="_blank" rel="noreferrer"
++                className="text-brand hover:underline break-all">{u}</a></li>
++            ))}
++          </ul>
++        </div>
++      )}
++    </div>
++  )
++}

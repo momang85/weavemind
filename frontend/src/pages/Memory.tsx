@@ -3,7 +3,9 @@ import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCi
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
 import { apiOutcome, readApiOutcome } from '../lib/apiResult'
-import { formatLocalTime } from '../lib/format'
+import { formatLocalTimeLabel, formatLocalTimeShort } from '../lib/timeText'
+import { auditMemorySummary } from '../lib/memorySummary'
+import { localizeEvolutionSummary, scoreMapText } from '../lib/evolutionText'
 
 interface MemoryHealth {
   injections: number
@@ -177,122 +179,152 @@ export default function Memory() {
   // 降级口径：embedding 不可用时命中率改按关键词兜底统计，避免误读成"没有经验"
   const mode: 'vector' | 'literal' | 'unavailable' = health.retrieval_mode ?? 'unavailable'
 
+  // S3：自述由 LLM 生成、数字措辞不稳定（实机把 464 条对话写成「464 项任务」）。
+  // 这里把自述里的数字主张与本页**实取**口径逐个对照，把结论写在自述下方；
+  // 不修改自述正文（那是模型输出，前端改写等于篡改来源）。
+  const summaryAudit = auditMemorySummary(summary, {
+    conversations: stats.conversations || health.conversation_count || 0,
+    strategies: stats.strategies || health.strategy_count || 0,
+  })
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-slate-200 font-semibold text-lg">记忆与进化</h2>
+        <h2 className="text-ink font-semibold text-lg">记忆与进化</h2>
         {notice && (
           <div className={`text-xs rounded-lg px-3 py-2 border ${
             noticeTone === 'warn'
-              ? 'text-amber-300 bg-amber-500/10 border-amber-500/30'
-              : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'
+              ? 'text-amber-700 bg-amber-500/10 border-amber-500/30'
+              : 'text-brand bg-brand/10 border-brand/20'
           }`}>{notice}</div>
         )}
-        <button onClick={load} aria-label="刷新记忆数据" className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
+        <button onClick={load} aria-label="刷新记忆数据" className="text-xs text-brand hover:text-brand">刷新</button>
       </div>
 
       {/* 记忆健康度（P2 可观测：命中率 / 集合规模 / 过期清理） */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+      <div className="bg-surface border border-line rounded-xl p-5">
         <div className="flex items-center gap-2 mb-4">
-          <Activity className="w-5 h-5 text-emerald-400" />
-          <h3 className="text-slate-200 font-semibold text-sm">记忆健康度</h3>
-          <span className="text-slate-600 text-xs">
+          <Activity className="w-5 h-5 text-emerald-700" />
+          <h3 className="text-ink font-semibold text-sm">记忆健康度</h3>
+          <span className="text-ink-faint text-xs">
             {mode === 'literal'
               ? '向量检索不可用（Embedding 欠费/故障）：当前按关键词兜底检索，命中率分母是兜底检索次数'
               : '命中率 = 检索到相关记忆的注入次数 / 注入总次数（进程内统计）'}
           </span>
         </div>
         {mode === 'literal' && (
-          <div className="mb-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+          <div className="mb-3 text-xs text-amber-700 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
             Embedding 接口不可用，历史经验的语义检索已降级为关键词匹配：仍能复用经验，但召回不如向量检索。
             {(health.pending_writes ?? 0) > 0 && ` 另有 ${health.pending_writes} 条新经验排队待补录，接口恢复后会自动写入。`}
           </div>
         )}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-            <div className={`font-bold text-lg ${mode === 'literal' ? 'text-amber-400' : 'text-emerald-400'}`}>
+          <div className="bg-surface-raised/40 border border-line rounded-lg p-3">
+            <div className={`font-bold text-lg ${mode === 'literal' ? 'text-amber-700' : 'text-emerald-700'}`}>
               {mode === 'unavailable'
                 ? '不可用'
                 : `${((mode === 'literal' ? (health.degraded_hit_rate ?? 0) : health.hit_rate) * 100).toFixed(1)}%`}
             </div>
-            <div className="text-slate-500 text-xs mt-0.5">
+            <div className="text-ink-faint text-xs mt-0.5">
               {mode === 'literal' ? `关键词命中率（命中 ${health.degraded_hits ?? 0}）` : '记忆命中率'}
             </div>
           </div>
-          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-            <div className="text-cyan-400 font-bold text-lg">{health.injections}</div>
-            <div className="text-slate-500 text-xs mt-0.5">注入次数（命中 {health.hits}）</div>
+          <div className="bg-surface-raised/40 border border-line rounded-lg p-3">
+            <div className="text-brand font-bold text-lg">{health.injections}</div>
+            <div className="text-ink-faint text-xs mt-0.5">注入次数（命中 {health.hits}）</div>
           </div>
-          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-            <div className="text-violet-400 font-bold text-lg">{health.strategy_count}</div>
-            <div className="text-slate-500 text-xs mt-0.5">策略条数</div>
+          <div className="bg-surface-raised/40 border border-line rounded-lg p-3">
+            <div className="text-violet-700 font-bold text-lg">{health.strategy_count}</div>
+            <div className="text-ink-faint text-xs mt-0.5">策略条数</div>
+            <div className="text-ink-faint text-xs mt-0.5">记忆库策略集合条数（/api/memory），与下方「策略」chip 同源</div>
           </div>
-          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-            <div className="text-amber-400 font-bold text-lg">{health.conversation_count}</div>
-            <div className="text-slate-500 text-xs mt-0.5">对话条数</div>
+          <div className="bg-surface-raised/40 border border-line rounded-lg p-3">
+            <div className="text-amber-700 font-bold text-lg">{health.conversation_count}</div>
+            <div className="text-ink-faint text-xs mt-0.5">对话条数</div>
+            <div className="text-ink-faint text-xs mt-0.5">记忆库对话集合条数（/api/memory）；不是任务数——任务总数见「指标看板」</div>
           </div>
-          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-            <div className="text-slate-200 font-bold text-lg">{health.expired_purged}</div>
-            <div className="text-slate-500 text-xs mt-0.5">过期策略已清理</div>
+          <div className="bg-surface-raised/40 border border-line rounded-lg p-3">
+            <div className="text-ink font-bold text-lg">{health.expired_purged}</div>
+            <div className="text-ink-faint text-xs mt-0.5">过期策略已清理</div>
           </div>
         </div>
       </div>
 
       {/* 系统自述 */}
-      <div className="bg-gradient-to-br from-violet-500/10 via-slate-900 to-cyan-500/10 border border-violet-500/20 rounded-xl p-5">
+      <div className="bg-gradient-to-br from-violet-500/10 via-surface to-brand/10 border border-violet-500/20 rounded-xl p-5">
         <div className="flex items-center gap-2 mb-3">
-          <Sparkles className="w-5 h-5 text-violet-400" />
-          <h3 className="text-slate-200 font-semibold text-sm">系统自述 · 它眼中的自己</h3>
+          <Sparkles className="w-5 h-5 text-violet-700" />
+          <h3 className="text-ink font-semibold text-sm">系统自述 · 它眼中的自己</h3>
           <div className="ml-auto flex gap-2">
             <button onClick={() => loadSummary(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-xs">
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-700 text-xs">
               <RefreshCw className="w-3 h-3" /> {summaryLoading ? '生成中...' : '重新生成'}
             </button>
             <button onClick={copySummary}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-raised hover:bg-line text-ink text-xs">
               <Copy className="w-3 h-3" /> 复制
             </button>
           </div>
         </div>
-        <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+        <p className="text-ink text-sm leading-relaxed whitespace-pre-wrap">
           {summaryLoading && !summary ? '正在让 LLM 阅读记忆库并生成自述...' : (summary || '暂无自述，点击「重新生成」。')}
         </p>
         {summaryError && (
-          <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
             {summaryError}
           </p>
         )}
-        <p className="text-xs text-slate-600 mt-2">基于真实记忆数据生成，可直接用于发布到社交媒体。</p>
+        {summaryAudit.warnings.length > 0 && (
+          <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 space-y-1">
+            <div className="font-medium">自述数字核对：发现 {summaryAudit.warnings.length} 处对不上（自述由 LLM 生成，数字不被本页背书）</div>
+            {summaryAudit.warnings.map((w, i) => <div key={i}>· {w}</div>)}
+          </div>
+        )}
+        {summaryAudit.warnings.length === 0 && summaryAudit.confirmations.length > 0 && (
+          <div className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700 space-y-1">
+            {summaryAudit.confirmations.map((c, i) => <div key={i}>· {c}</div>)}
+          </div>
+        )}
+        <p className="text-xs text-ink-faint mt-2">{summaryAudit.authorityNote}</p>
+        <p className={`text-xs mt-1 ${summaryAudit.warnings.length > 0 ? 'text-amber-700/90' : 'text-ink-faint'}`}>
+          {summaryAudit.publishNote}
+        </p>
       </div>
 
       {/* 记忆库 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+      <div className="bg-surface border border-line rounded-xl p-5">
         <div className="flex items-center gap-2 mb-4">
-          <Brain className="w-5 h-5 text-amber-400" />
-          <h3 className="text-slate-200 font-semibold text-sm">记忆库 · 它记得什么</h3>
+          <Brain className="w-5 h-5 text-amber-700" />
+          <h3 className="text-ink font-semibold text-sm">记忆库 · 它记得什么</h3>
           <div className="ml-auto flex gap-2">
-            {chip(`${stats.conversations} 对话`, 'bg-amber-500/15 text-amber-400')}
-            {chip(`${stats.strategies} 策略`, 'bg-violet-500/15 text-violet-400')}
+            {chip(`${stats.conversations} 对话`, 'bg-amber-500/15 text-amber-700')}
+            {chip(`${stats.strategies} 策略`, 'bg-violet-500/15 text-violet-700')}
           </div>
         </div>
 
-        {loading ? <div className="text-slate-600 text-xs py-6">加载中...</div> : (
+        {loading ? <div className="text-ink-faint text-xs py-6">加载中...</div> : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             <div>
-              <div className="text-xs text-slate-500 mb-2">最近对话（任务目标）</div>
+              <div className="text-xs text-ink-faint mb-2">最近对话（任务目标）</div>
               <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                {convs.length === 0 && <div className="text-slate-600 text-xs">暂无</div>}
+                {convs.length === 0 && <div className="text-ink-faint text-xs">暂无</div>}
                 {convs.map((c, i) => (
-                  <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-amber-400/80 text-xs">目标</span>
-                      <span className="text-slate-300 text-xs truncate flex-1">{c.metadata.goal || (c.content || '').slice(0, 60)}</span>
-                      {c.metadata.timestamp && <span className="text-slate-600 text-xs">{String(c.metadata.timestamp).slice(0, 16)}</span>}
+                  <div key={i} className="bg-surface-raised/40 border border-line rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <span className="text-amber-700/80 text-xs shrink-0">目标</span>
+                      <span className="text-ink text-xs flex-1 break-words whitespace-pre-wrap">
+                        {c.metadata.goal || c.content || '未记录目标'}
+                      </span>
+                      {c.metadata.timestamp && (
+                        <span className="text-ink-faint text-xs shrink-0 whitespace-nowrap">
+                          {formatLocalTimeShort(c.metadata.timestamp)}
+                        </span>
+                      )}
                       {c.id && (
                         <button onClick={() => del('conversations', [c.id!])}
                           disabled={!!busyAction || demoMode}
                           title={demoMode ? '演示模式下已停用（会真实删除记忆）' : '删除该条记忆'}
-                          className="text-slate-600 hover:text-red-400 text-xs px-1 disabled:opacity-40">删除</button>
+                          className="text-ink-faint hover:text-red-700 text-xs px-1 disabled:opacity-40">删除</button>
                       )}
                     </div>
                   </div>
@@ -301,25 +333,27 @@ export default function Memory() {
             </div>
 
             <div>
-              <div className="text-xs text-slate-500 mb-2">成功策略（可复用的解决路径）</div>
+              <div className="text-xs text-ink-faint mb-2">成功策略（可复用的解决路径）</div>
               <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                {strats.length === 0 && <div className="text-slate-600 text-xs">暂无</div>}
+                {strats.length === 0 && <div className="text-ink-faint text-xs">暂无</div>}
                 {strats.map((s, i) => (
-                  <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg overflow-hidden">
+                  <div key={i} className="bg-surface-raised/40 border border-line rounded-lg overflow-hidden">
                     <button onClick={() => toggle('s' + i)}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-800/60">
-                      {expanded['s' + i] ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
-                      <span className="text-violet-300 text-xs truncate flex-1">{String(s.metadata.goal_keywords || '').slice(0, 60) || '策略'}</span>
-                      {s.metadata.step_count && chip(`${s.metadata.step_count} 步`, 'bg-slate-700/50 text-slate-400')}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface-raised/60">
+                      {expanded['s' + i] ? <ChevronDown className="w-3.5 h-3.5 text-ink-faint" /> : <ChevronRight className="w-3.5 h-3.5 text-ink-faint" />}
+                      <span className="text-violet-700 text-xs flex-1 break-words">
+                        {String(s.metadata.goal_keywords || '').trim() || '未记录关键词'}
+                      </span>
+                      {s.metadata.step_count && chip(`${s.metadata.step_count} 步`, 'bg-line/50 text-ink-muted')}
                       {s.id && (
                         <button onClick={() => del('strategies', [s.id!])}
                           disabled={!!busyAction || demoMode}
                           title={demoMode ? '演示模式下已停用（会真实删除策略）' : '删除该策略'}
-                          className="text-slate-600 hover:text-red-400 text-xs px-1 disabled:opacity-40">删除</button>
+                          className="text-ink-faint hover:text-red-700 text-xs px-1 disabled:opacity-40">删除</button>
                       )}
                     </button>
                     {expanded['s' + i] && (
-                      <pre className="px-3 pb-3 text-slate-400 text-xs whitespace-pre-wrap font-sans max-h-48 overflow-y-auto">
+                      <pre className="px-3 pb-3 text-ink-muted text-xs whitespace-pre-wrap font-sans max-h-48 overflow-y-auto">
                         {s.content}
                       </pre>
                     )}
@@ -332,46 +366,46 @@ export default function Memory() {
       </div>
 
       {/* 进化部署审批 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+      <div className="bg-surface border border-line rounded-xl p-5">
         <div className="flex items-center gap-2 mb-4">
-          <ShieldCheck className="w-5 h-5 text-cyan-400" />
-          <h3 className="text-slate-200 font-semibold text-sm">进化部署审批</h3>
-          <span className="text-slate-500 text-xs">人工确认后，胜出策略将实际作用于对应 Worker</span>
+          <ShieldCheck className="w-5 h-5 text-brand" />
+          <h3 className="text-ink font-semibold text-sm">进化部署审批</h3>
+          <span className="text-ink-faint text-xs">人工确认后，胜出策略将实际作用于对应 Worker</span>
         </div>
         {pendingList.length === 0 ? (
-          <div className="text-slate-600 text-xs py-4 text-center">
+          <div className="text-ink-faint text-xs py-4 text-center">
             暂无待审批的策略部署请求。触发进化并产生稳定胜者后，会出现在这里等你审批。
           </div>
         ) : (
           <div className="space-y-3">
             {pendingList.map((p, i) => (
-              <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-4">
+              <div key={i} className="bg-surface-raised/40 border border-line rounded-lg p-4">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-cyan-400 text-xs font-semibold">{p.strategy_id}</span>
-                  {chip(p.agent_type || 'search_agent', 'bg-slate-700/50 text-slate-400')}
-                  {p.temperature != null && chip('温度 ' + p.temperature, 'bg-slate-700/50 text-slate-400')}
-                  {p.max_sources != null && chip('源数 ' + p.max_sources, 'bg-slate-700/50 text-slate-400')}
-                  {p.timestamp && <span className="text-slate-600 text-xs ml-auto">{formatLocalTime(p.timestamp)}</span>}
+                  <span className="text-brand text-xs font-semibold">{p.strategy_id}</span>
+                  {chip(p.agent_type || 'search_agent', 'bg-line/50 text-ink-muted')}
+                  {p.temperature != null && chip('温度 ' + p.temperature, 'bg-line/50 text-ink-muted')}
+                  {p.max_sources != null && chip('源数 ' + p.max_sources, 'bg-line/50 text-ink-muted')}
+                  {p.timestamp && <span className="text-ink-faint text-xs ml-auto">{formatLocalTimeLabel(p.timestamp)}</span>}
                 </div>
-                <div className="mt-2 text-xs text-slate-400">
-                  摘要提示：<span className="text-slate-300">{p.summarization_prompt || '—'}</span>
+                <div className="mt-2 text-xs text-ink-muted">
+                  摘要提示：<span className="text-ink">{p.summarization_prompt || '—'}</span>
                 </div>
                 {(p.filter_rules || []).length > 0 && (
-                  <div className="mt-1 text-xs text-slate-400">
-                    过滤规则：<span className="text-slate-300">{String(p.filter_rules.join('；'))}</span>
+                  <div className="mt-1 text-xs text-ink-muted">
+                    过滤规则：<span className="text-ink">{String(p.filter_rules.join('；'))}</span>
                   </div>
                 )}
                 <div className="mt-3 flex gap-2">
                   <button onClick={() => approveStrategy(p.strategy_id, true)}
                     disabled={!!busyAction || demoMode}
                     title={demoMode ? '演示模式下已停用（会真实部署策略）' : '批准并部署该策略'}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs disabled:opacity-40">
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 text-xs disabled:opacity-40">
                     <CheckCircle2 className="w-3.5 h-3.5" /> 批准部署
                   </button>
                   <button onClick={() => approveStrategy(p.strategy_id, false)}
                     disabled={!!busyAction || demoMode}
                     title={demoMode ? '演示模式下已停用' : '驳回该部署请求'}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs disabled:opacity-40">
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-raised hover:bg-line text-ink text-xs disabled:opacity-40">
                     <XCircle className="w-3.5 h-3.5" /> 驳回
                   </button>
                 </div>
@@ -382,57 +416,86 @@ export default function Memory() {
       </div>
 
       {/* 进化锦标赛回放 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+      <div className="bg-surface border border-line rounded-xl p-5">
         <div className="flex items-center gap-2 mb-4">
-          <FlaskConical className="w-5 h-5 text-violet-400" />
-          <h3 className="text-slate-200 font-semibold text-sm">进化锦标赛回放</h3>
+          <FlaskConical className="w-5 h-5 text-violet-700" />
+          <h3 className="text-ink font-semibold text-sm">进化锦标赛回放</h3>
           <button onClick={triggerEvolution} disabled={demoMode}
             title={demoMode ? '演示模式下已停用（进化会真实烧 token 并跑后台任务）' : '触发一轮策略进化（后台约 3-5 分钟）'}
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-xs disabled:opacity-40">
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-700 text-xs disabled:opacity-40">
             <Play className="w-3 h-3" /> 触发新一轮进化
           </button>
         </div>
 
         {rounds.length === 0 ? (
-          <div className="text-slate-600 text-xs py-6 text-center">
+          <div className="text-ink-faint text-xs py-6 text-center">
             暂无进化记录。点击「触发新一轮进化」开始；进化在后台运行约 3-5 分钟。
           </div>
         ) : (
           <div className="space-y-3">
             {rounds.map((r, i) => (
-              <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg overflow-hidden">
+              <div key={i} className="bg-surface-raised/40 border border-line rounded-lg overflow-hidden">
                 <button onClick={() => toggle('r' + i)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-800/60">
-                  <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
+                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-surface-raised/60">
+                  <ChevronDown className="w-4 h-4 text-ink-faint shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="text-slate-300 text-xs font-medium truncate">{r.summary || '进化轮次'}</div>
-                    {r.timestamp && <div className="text-slate-600 text-xs">{formatLocalTime(r.timestamp)}</div>}
+                    <div className="text-ink text-xs font-medium break-words">
+                      {localizeEvolutionSummary(r.summary) || '进化轮次（后端未回传摘要）'}
+                    </div>
+                    {r.timestamp && (
+                      <div className="text-ink-faint text-xs">{formatLocalTimeLabel(r.timestamp)}</div>
+                    )}
                   </div>
-                  {r.stable ? chip('稳定', 'bg-emerald-500/15 text-emerald-400') : chip('不稳定', 'bg-amber-500/15 text-amber-400')}
-                  {r.deployed ? chip('已部署', 'bg-cyan-500/15 text-cyan-400') : chip('未部署', 'bg-slate-700/50 text-slate-400')}
-                  {r.winner && chip('胜者 ' + String(r.winner.strategy_id || ''), 'bg-violet-500/15 text-violet-400')}
+                  {r.stable ? chip('稳定', 'bg-emerald-500/15 text-emerald-700') : chip('不稳定', 'bg-amber-500/15 text-amber-700')}
+                  {r.deployed ? chip('已部署', 'bg-brand/15 text-brand') : chip('未部署', 'bg-line/50 text-ink-muted')}
+                  {r.winner && chip('胜者 ' + String(r.winner.strategy_id || ''), 'bg-violet-500/15 text-violet-700')}
                 </button>
 
                 {expanded['r' + i] && (
-                  <div className="px-4 pb-4 border-t border-slate-800">
+                  <div className="px-4 pb-4 border-t border-line">
                     {(r.scoreboard && Object.keys(r.scoreboard).length > 0) && (
-                      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-                        {Object.entries(r.scoreboard).map(([k, v]) => (
-                          <div key={k} className="bg-slate-800/60 rounded-lg p-2 text-center">
-                            <div className="text-cyan-400 font-bold text-sm">{v}</div>
-                            <div className="text-slate-500 text-xs truncate">{k}</div>
-                          </div>
-                        ))}
+                      <div className="mt-3">
+                        <div className="text-xs text-ink-faint mb-1">
+                          各策略累计得分（取自 /api/evolution 的 scoreboard；评分口径由后端进化竞技场给出，本页不解释分值含义）
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          {Object.entries(r.scoreboard).map(([k, v]) => (
+                            <div key={k} className="bg-surface-raised/60 rounded-lg p-2 text-center">
+                              <div className="text-brand font-bold text-sm">{v}</div>
+                              <div className="text-ink-faint text-xs break-words">{k}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(r.win_counts && Object.keys(r.win_counts).length > 0) && (
+                      <div className="mt-2 text-xs text-ink-faint">
+                        取胜次数：{scoreMapText(r.win_counts) || '未取得'}
                       </div>
                     )}
                     <div className="mt-3 space-y-1.5">
                       {(r.rankings || []).map((rk, j) => (
-                        <div key={j} className="flex items-center gap-2 text-xs bg-slate-800/40 rounded-lg px-3 py-1.5">
-                          {rk.winner ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-slate-600 shrink-0" />}
-                          <span className="text-slate-400 truncate flex-1">{(rk.task || '').slice(0, 60)}</span>
-                          <span className="text-violet-400 shrink-0">{(rk.ranking || []).slice(0, 3).join(' → ') || rk.winner}</span>
+                        <div key={j} className="text-xs bg-surface-raised/40 rounded-lg px-3 py-2">
+                          <div className="flex items-start gap-2">
+                            {rk.winner
+                              ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0 mt-0.5" />
+                              : <XCircle className="w-3.5 h-3.5 text-ink-faint shrink-0 mt-0.5" />}
+                            <span className="text-ink flex-1 break-words">
+                              任务：{rk.task || '未记录任务'}
+                            </span>
+                          </div>
+                          <div className="mt-1 pl-5 text-ink-muted break-words">
+                            排名：{(rk.ranking || []).join(' → ') || rk.winner || '未取得'}
+                          </div>
                           {rk.scores && Object.keys(rk.scores).length > 0 && (
-                            <span className="text-slate-600 shrink-0">{JSON.stringify(rk.scores)}</span>
+                            <div className="mt-1 pl-5 text-ink-faint break-words">
+                              各方案得分：{scoreMapText(rk.scores)}
+                            </div>
+                          )}
+                          {rk.reason && (
+                            <div className="mt-1 pl-5 text-ink-faint break-words">
+                              评审理由：{rk.reason}
+                            </div>
                           )}
                         </div>
                       ))}

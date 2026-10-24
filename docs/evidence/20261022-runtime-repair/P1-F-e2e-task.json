@@ -1,0 +1,18 @@
+{
+  "task_id": "ui-2bcfcbc06d",
+  "submitted_at": 1792685965.9291368,
+  "research_intent": {
+    "intent": "company_research",
+    "status": "in_scope",
+    "source": "stored"
+  },
+  "goal": "研究伊利股份（600887.SH）2023/2024 年报：营业收入、归母净利润、经营活动现金流净额，给出可复算底稿与来源定位",
+  "final_status": "SUCCESS_WITH_ISSUES",
+  "completed_at_db": "2026-10-22 16:45:33",
+  "acceptance_overall": "fail",
+  "delivery_zip": "deliverables_20261023_004504.zip",
+  "manifest_members": 9,
+  "manifest_hash_mismatches": 0,
+  "search_ledger_used": 6,
+  "evidence_note": "机制逐项核验与本轮修复见同目录 P1-F-e2e.md；账号 momang（role=admin），会话仅经 HttpOnly Cookie"
+}

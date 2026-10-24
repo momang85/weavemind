@@ -11,7 +11,9 @@
 
 所有服务 PID 写入 .weavemind/pids.json（同一目录还存放自动获取的 Redis 与下载缓存），
 stop 时按 PID 精确结束，不再使用 taskkill /IM python.exe 之类的全杀方案。
-start 时若环境变量 WEAVEMIND_SUPERVISE=1 同样进入守护模式（start.bat 默认不开）。
+start 时**默认进入守护模式**（任务21：编排器/评审进程崩溃自动重启）；
+WEAVEMIND_SUPERVISE=0（off/false/no 同义）可关闭，恢复"只拉起不巡检"。
+start.bat 的 `up` 流程把守护循环拉成独立后台进程（见 _maybe_start_supervisor）。
 启动前会跑依赖自检（缺失的 pip 包自动补装、Redis 缺失按平台自动获取），
 SKIP_DEP_CHECK=1 可跳过自检。
 输出编码：自动适配 UTF-8（Windows 下尝试切到 65001 代码页）；老旧终端可设
@@ -53,6 +55,13 @@ logger = logging.getLogger(__name__)
 SUPERVISE_INTERVAL_DEFAULT = 30.0
 SUPERVISE_MAX_RESTARTS = 3
 SUPERVISE_QUARANTINE_SECONDS = 300
+# 任务21：守护模式默认开启（task20 真机演练暴露 orchestrator/critic 崩溃后无人
+# 重启，只能手动恢复）。WEAVEMIND_SUPERVISE=0（off/false/no 同义）显式关闭恢复旧行为；
+# SUPERVISE_KEY_SERVICES 是"关键进程"清单——被守护拉起时额外写审计并发布告警，
+# pid 记入 pids.json 的 SUPERVISOR_PID_KEY 键（stop 时先收掉它，避免"停止"与
+# "守护"打架）。
+SUPERVISE_KEY_SERVICES = ("orchestrator", "critic")
+SUPERVISOR_PID_KEY = "supervisor"
 
 # 织光服务已知脚本名（兜底清理时仅匹配本项目 BASE_DIR 下的这些脚本，避免误杀其他 Python 项目）
 _RESIDUAL_SCRIPT_NAMES = {
@@ -596,6 +605,12 @@ def stop_services(stop_portable_redis: bool = True) -> list[str]:
     services = pids.get("services", {})
     known_pids = set(p for p in services.values() if p)
     stopped: list[str] = []
+    # 任务21：守护默认开启后，stop 必须**先**收掉独立守护进程——否则它在下一轮
+    # 巡检里把刚停掉的服务全部复活，"停止"与"守护"打架。守护进程命令行是
+    # launcher.py supervise，不在残留扫描的已知脚本名里，只能按登记的 pid 处理。
+    sup_pid = pids.get(SUPERVISOR_PID_KEY)
+    if sup_pid and _kill_pid(sup_pid):
+        stopped.append(SUPERVISOR_PID_KEY)
     for name, pid in services.items():
         if _kill_pid(pid):
             stopped.append(name)
@@ -1270,6 +1285,85 @@ def _supervise_interval() -> float:
     return SUPERVISE_INTERVAL_DEFAULT
 
 
+def _supervise_enabled() -> bool:
+    """任务21：守护模式默认开启；WEAVEMIND_SUPERVISE=0（off/false/no 同义）显式关闭。
+
+    =1 仍表示显式开启（容器 compose 与既有脚本都这么写）。未设置时默认开启——
+    task20 真机演练证实编排器/critic 崩溃后无人重启，兜底必须成为默认。
+    """
+    raw = (os.environ.get("WEAVEMIND_SUPERVISE") or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+def _notify_key_restart(name: str, old_pid: int | None, new_pid: int,
+                        attempt: int) -> None:
+    """任务21：关键进程（orchestrator/critic）被守护拉起时留痕并告警。
+
+    - 落地兜底：logger.error 一定写（Redis 挂了也只有它可靠）；
+    - 审计：audit_logger 落 JSONL，事后可核验；
+    - 告警：向 guardian._alert 使用的同一通道 orchestrator:alert 发布
+      process_restarted。Redis 不可用时告警通道本身发不出去（已知限制，
+      设计文档已声明），这里只吞异常，不影响巡检循环。
+    """
+    detail = (f"supervise 重启 {name}：旧 pid={old_pid} 新 pid={new_pid}"
+              f"（连续第 {attempt} 次）")
+    logger.error("supervise: 关键进程 %s 已被守护重启（%s）", name, detail)
+    try:
+        import audit_logger
+        audit_logger.audit_log(
+            "supervise", "local", "process_restarted",
+            target=name, result="ok", detail=detail,
+        )
+    except Exception as exc:
+        logger.warning("supervise: process_restarted 审计写入失败：%s", str(exc)[:120])
+    try:
+        _publish_restart_alert(name, old_pid, new_pid, attempt)
+    except Exception as exc:
+        logger.warning("supervise: process_restarted 告警发布失败：%s", str(exc)[:120])
+
+
+def _publish_restart_alert(name: str, old_pid: int | None, new_pid: int,
+                           attempt: int) -> None:
+    """向 orchestrator:alert 发布 process_restarted（与 guardian._alert 同通道）。
+
+    自建短超时裸客户端并显式传 retry=（全仓守卫：不带 retry 的 redis.Redis 在
+    Redis 不可达时会从 1 秒失败退化成挂死数十秒，巡检线程不能这样卡）；
+    一次性失败即放弃，告警缺失由 logger.error 与审计兜底。测试可 patch 本函数。
+    """
+    import redis  # 延迟导入：保持 launcher 顶层仅依赖 stdlib + logging_setup
+    from redis.backoff import NoBackoff as _NoBackoff
+    from redis.retry import Retry as _Retry
+
+    cfg = _load_config().get("redis", {}) or {}
+    host = os.environ.get("REDIS_HOST") or cfg.get("host") or "127.0.0.1"
+    try:
+        port = int(os.environ.get("REDIS_PORT") or cfg.get("port") or 6379)
+    except (TypeError, ValueError):
+        port = 6379
+    client = redis.Redis(
+        host=host, port=port,
+        socket_connect_timeout=1.0, socket_timeout=1.0,
+        retry=_Retry(_NoBackoff(), 0),
+    )
+    payload = {
+        "type": "process_restarted",
+        "message": (f"supervise 重启关键进程 {name}"
+                    f"（旧 pid={old_pid} 新 pid={new_pid}，连续第 {attempt} 次）"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": "launcher",
+        "target": name,
+        "old_pid": old_pid,
+        "new_pid": new_pid,
+    }
+    # 缺陷A（真机 E2E 复现）：redis-py 只接受 bytes/str/memoryview，直接丢 dict 会
+    # TypeError("Invalid input of type: 'dict'")，告警一条都发不出去（审计与
+    # logger.error 仍在，所以缺陷静默）。序列化口径与 `common.Messaging._serialize` /
+    # guardian._alert 一致：JSON 字符串，中文不转义。
+    client.publish("orchestrator:alert", json.dumps(payload, ensure_ascii=False))
+
+
 def _supervise_once(
     pids: dict,
     services: list[tuple[str, list[str], Path | None, Path | None]],
@@ -1335,6 +1429,9 @@ def _supervise_once(
                 "supervise: 重启服务 %s pid=%s（连续第 %d 次）",
                 name, new_pid, fail_count + 1,
             )
+            if name in SUPERVISE_KEY_SERVICES:
+                # 任务21：关键进程重启必须可追溯（审计 + 告警）
+                _notify_key_restart(name, pid, new_pid, fail_count + 1)
         else:
             logger.error(
                 "supervise: 重启服务 %s 失败（连续第 %d 次）",
@@ -1348,7 +1445,27 @@ def supervise_services() -> None:
     logging_setup.setup_logging("launcher")
     logger = logging.getLogger(__name__)
     logger.info("supervise: 守护模式启动（WEAVEMIND_SUPERVISE=1）")
+    # 任务21：守护默认由 `up` 以分离进程拉起，这里做单例守卫——已有存活守护
+    # （pids.json supervisor 键）时本进程退出，避免双守护同时重启同一服务。
+    old = _read_pids().get(SUPERVISOR_PID_KEY)
+    if old and old != os.getpid() and _is_alive(old):
+        logger.warning("supervise: 已有守护进程 pid=%s 在运行，本实例退出（单例）", old)
+        return
+
+    def _release_supervisor_claim() -> None:
+        """退出时抹掉自己的 supervisor pid；pids 已被 stop 重写/删除时静默放过。"""
+        try:
+            cur = _read_pids()
+            if cur.get(SUPERVISOR_PID_KEY) == os.getpid():
+                cur.pop(SUPERVISOR_PID_KEY, None)
+                _write_pids(cur)
+        except Exception:
+            pass
+
     start_services()
+    pids = _read_pids()
+    pids[SUPERVISOR_PID_KEY] = os.getpid()
+    _write_pids(pids)
     cfg = _load_config()
     services = build_services(cfg)
     interval = _supervise_interval()
@@ -1358,18 +1475,57 @@ def supervise_services() -> None:
         interval, SUPERVISE_MAX_RESTARTS, SUPERVISE_QUARANTINE_SECONDS,
     )
     try:
+        # 任务21：先巡检再休眠——启动后立即有一轮检查，服务若在启动后几秒内
+        # 崩溃（task20 真机场景），重启落在首个 WM_START_VERIFY_WAIT 内，
+        # 而不是等满一个巡检间隔。
         while True:
-            time.sleep(interval)
             pids = _read_pids()
             if not pids.get("services"):
-                # pids.json 无服务记录（可能已被 stop 清理），守护退出避免与 stop 冲突
+                # pids.json 无服务记录（可能已被 stop 清理），守护退出避免与 stop 冲突。
+                # 此处不回写 pids（文件可能刚被 stop 删除，回写会复活一个空文件）。
                 logger.warning("supervise: pids.json 无服务记录（可能已 stop），守护退出")
                 return
             pids, changed = _supervise_once(pids, services, state)
             if changed:
                 _write_pids(pids)
+            time.sleep(interval)
     except KeyboardInterrupt:
         logger.info("supervise: 收到中断，退出守护模式（已启动的服务保持运行）")
+        _release_supervisor_claim()
+
+
+def _maybe_start_supervisor() -> int | None:
+    """任务21：`up`/`restart` 收尾时把守护循环拉成**独立后台进程**（默认开启）。
+
+    start.bat 走 `launcher.py up`：启动控制器是"启动→就绪→打印 URL→退出"的
+    一次性流程，守护循环不能占住它（浏览器还等着打开）。这里以分离进程启动
+    `launcher.py supervise`，pid 记入 pids.json 的 supervisor 键：
+    - 已有存活守护 → 复用，不重复拉起；
+    - stop 会先收掉守护（见 stop_services），避免停止之后服务被复活；
+    - WEAVEMIND_SUPERVISE=0 显式关闭，返回 None（服务照常运行，无自动重启）。
+    """
+    if not _supervise_enabled():
+        return None
+    old = _read_pids().get(SUPERVISOR_PID_KEY)
+    if old and old != os.getpid() and _is_alive(old):
+        logger.info("supervise: 守护进程已在运行 pid=%s，复用不重复拉起", old)
+        return int(old)
+    pid = _spawn_service(
+        "supervisor",
+        [sys.executable, str(BASE_DIR / "launcher.py"), "supervise"],
+        BASE_DIR, None,
+    )
+    if pid:
+        pids = _read_pids()
+        pids[SUPERVISOR_PID_KEY] = pid
+        _write_pids(pids)
+        logger.info(
+            "supervise: 守护进程已启动 pid=%s（默认开启；WEAVEMIND_SUPERVISE=0 关闭）",
+            pid,
+        )
+    else:
+        logger.error("supervise: 守护进程启动失败（服务本身已起，崩溃后需手动处理）")
+    return pid
 
 
 def _redis_source() -> str:
@@ -1896,7 +2052,9 @@ def main() -> None:
         # direct 走已验 IP 通道（见 adapters/transport.py 与 net_policy）。
         _run_dependency_check(fix=True, fatal=True)
         _check_redis_or_exit()
-        if os.environ.get("WEAVEMIND_SUPERVISE", "0") == "1":
+        # 任务21：守护模式默认开启（WEAVEMIND_SUPERVISE=0 关闭）。容器 PID 1 场景
+        # 必须常驻，宿主上由 start.bat → up → _maybe_start_supervisor 走后台守护。
+        if _supervise_enabled():
             supervise_services()
         else:
             start_services()
@@ -1932,6 +2090,10 @@ def main() -> None:
         # 统一启动控制器：检查运行包 → 依赖 → 配置 → 服务 → 就绪（新人入口只调它）
         result = startup_controller()
         print(f"  URL: {result.get('url') or web_url()}")
+        # 任务21：up 收尾把守护循环拉成独立后台进程（默认开启）。failed 路径不拉起——
+        # 对起不来的环境反复 spawn 没有意义，先按上面的"下一步"处理。
+        if result.get("state") != "failed":
+            _maybe_start_supervisor()
         # awaiting_config 也是"打开页面继续"的正常状态：工作台已起、引导在页面里，
         # 不是失败——失败（failed）才让入口走诊断分支。
         sys.exit(0 if result.get("state") in ("research_ready", "limited_experience",
@@ -1957,6 +2119,8 @@ def main() -> None:
         _ensure_redis_available()
         time.sleep(2)
         start_services()
+        # 任务21：restart 同样回到"守护默认开启"（=0 时不拉起）
+        _maybe_start_supervisor()
     else:
         print(__doc__)
         sys.exit(1)

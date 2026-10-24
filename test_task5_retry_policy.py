@@ -186,9 +186,9 @@ class TestProcessTaskWiring(unittest.TestCase):
         w._task_permit = lambda task: object()
         w._permit_gate = lambda permit: None
         w._install_permit_guard = lambda permit: None
-        w._publish_result = lambda tid, status, result: None
+        w._publish_result = lambda tid, status, result, **_kw: None
         published = []
-        w._publish_failure = lambda tid, err: published.append((tid, err))
+        w._publish_failure = lambda tid, err, **_kw: published.append((tid, err))
         return w, published
 
     def test_ctx_error_marked_without_rerun(self):

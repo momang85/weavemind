@@ -3,7 +3,7 @@
 // 401 时清除本地会话并广播事件，App 据此回到登录页。
 export const USER_KEY = 'weavemind_user'
 
-export type AuthUser = { username: string; role: 'admin' | 'viewer' }
+export type AuthUser = { username: string; role: string }   // admin / viewer / researcher（自助研究）…
 
 // 这些接口不要求登录（或 401 属于正常业务返回），不应触发“回到登录页”
 const PUBLIC_API_PATHS = ['/api/login', '/api/setup-admin', '/api/health', '/api/auth/bootstrap']

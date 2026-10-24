@@ -338,7 +338,10 @@ class TestFinalizeAndCrashFallback(unittest.TestCase):
         """
         src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
         i = src.index("def run_and_finalize(orch, tid: str, goal: str, context: str = \"\", *,")
-        block = src[i:i + 2000]
+        # 取**整段函数体**（到下一个模块级 def 为止）：早先用固定 2000 字符窗口，
+        # 函数多写两行 docstring 就会把 except 分支的兜底落库挤出窗口、guard 变假失败
+        # （任务26 给签名加 resume 参数时实测）。
+        block = src[i:src.index("\ndef ", i)]
         self.assertIn("orch._finalize_task(", block)
         self.assertGreaterEqual(block.count("orch._finalize_task("), 2,
                                 "try 与 except 两条路径都要落库")

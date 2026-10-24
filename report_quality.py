@@ -19,7 +19,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # 未完成痕迹（占位/待补），越少越好
 _PLACEHOLDER_PATTERNS = (
@@ -64,28 +67,44 @@ def quality_snapshot(text: str, acceptance: dict | None = None) -> dict:
     }
 
 
-def disclaimer_clause(has_external: bool, has_user_material: bool) -> str:
+def disclaimer_clause(has_external: bool, has_user_material: bool, *,
+                      external_desc: str = "", search_degraded: str = "") -> str:
     """按**真实来源**生成免责声明（V1：固定写"数据来源于公开渠道"会与事实冲突）。
 
     - 只用用户材料与派生计算：不能说"公开渠道"，要说清材料真实性未经独立核实；
-    - 引用外部检索：保留"公开渠道，可能存在延迟或误差"；
-    - 两者都有：分别说明，别把用户材料混进"公开渠道"。
+    - 引用外部来源：写明**实际采用的来源类别**（`external_desc`；缺省退回"公开渠道"）；
+    - 两者都有：分别说明，别把用户材料混进"公开渠道"；
+    - `search_degraded`（检索降级原因，如"检索零命中"）：作为**附加事实**注明检索没跑成/
+      没命中——但检索零结果**不等于**没有引用材料，来源措辞仍按实际采用的材料/外部来源走
+      （U90-R4：声明以实际采用的事实与来源为准，不以检索步为准）；
+    - 完全没有来源：如实写"未引用外部数据源"，不冒充公开渠道。
     """
     head = "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
     tail = "据此操作风险自担。"
+    desc = str(external_desc or "").strip()
     if has_external and has_user_material:
-        return (head + "数据同时来自用户提供的材料（其真实性未经独立核实）与公开渠道检索结果"
-                      "（可能存在延迟或误差）；" + tail)
-    if has_user_material:
-        return (head + "数据来自用户提供的材料及据此进行的计算（材料真实性未经独立核实，"
-                      "计算过程可复核）；" + tail)
-    if has_external:
-        return head + "数据来源于公开渠道，可能存在延迟或误差；" + tail
-    return head + "本报告未引用外部数据源，结论仅为模型知识，未经检索验证；" + tail
+        ext_part = (f"{desc}（可能存在延迟或误差）" if desc
+                    else "公开渠道检索结果（可能存在延迟或误差）")
+        text = (head + f"数据同时来自用户提供的材料（其真实性未经独立核实）与{ext_part}；"
+                + tail)
+    elif has_user_material:
+        text = (head + "数据来自用户提供的材料及据此进行的计算（材料真实性未经独立核实，"
+                       "计算过程可复核）；" + tail)
+    elif has_external:
+        text = head + f"数据来自{desc or '公开渠道'}，可能存在延迟或误差；" + tail
+    else:
+        text = head + "本报告未引用外部数据源，结论仅为模型知识，未经检索验证；" + tail
+    if search_degraded:
+        # 如实说明检索本身的状态；不因为"没查到"就改写来源措辞（材料/披露照样是来源）
+        note = (f"本次外部检索降级运行（{search_degraded}），"
+                + ("已采用的公开来源可能不完整；" if "公开渠道" in text
+                   else "报告来源以实际采用的来源清单为准，公开信息可能不完整；"))
+        text = text[: -len(tail)] + note + tail
+    return text
 
 
 def disclaimer_instruction() -> str:
-    """注入报告步骤的免责声明要求：给出三种措辞与选择规则，禁止一律写「公开渠道」。"""
+    """注入报告步骤的免责声明要求：给出措辞与选择规则，禁止一律写「公开渠道」。"""
     return (
         "3. 免责声明（按**真实来源**选择措辞，不得一律照抄）：报告结尾必须包含 "
         "'免责声明' 小节，并按下列对应关系选择：\n"
@@ -94,6 +113,8 @@ def disclaimer_instruction() -> str:
         f"   ③ 两者都有 → 「{disclaimer_clause(True, True)}」\n"
         "   没有外部检索结果时禁止写「数据来源于公开渠道」；用户材料必须写明"
         "「真实性未经独立核实」，不得改称模型知识，也不得伪造来源。\n"
+        "   检索零命中/检索降级时，来源措辞仍按**实际采用的来源**（用户材料、发行人"
+        "披露、第三方平台）写，不得因此声称「未引用任何来源」。\n"
     )
 
 
@@ -386,3 +407,86 @@ def compare_versions(cur_text: str, cand_text: str, *,
     return False, (f"硬约束无差异（验收 {cur['overall'] or '未知'}、缺口 {cur['gaps']}、"
                    f"占位 {cur['placeholders']}）{_vec}，保持当前版本；长度差异"
                    f"（{cur['length']} → {cand['length']} 字符）不作为改进依据")
+
+
+# ── 任务22：主文/附录分层与字数约束 ─────────────────────────────────────
+# README 路线图第1优先级"4–6页主文"：格式+内容要求共 13 条、没有字数约束时，
+# 模型自然输出 180-210 行（≈11 页）。这里给出**主文上限**与**分割点**的唯一定义，
+# 报告步骤（报告落盘/交付打包/PDF 渲染）都用同一份口径，不各写一套。
+#
+# 附录级标题：来源清单、数据来源摘要（task19）、核查细节。取**最靠前**的一个作分割点；
+# 主文 = 分割点之前的全部内容（标题/数据时效/执行摘要/关键数字表/分析/风险结论）。
+APPENDIX_HEADING_RE = re.compile(r"^#{2}\s*(附录|参考来源|数据来源|核查细节)(?:[：:].*)?\s*$", re.M)
+
+# 主文字数上限（字符数）：1800 中文字 × 2 字符/字的**估算起点**，按实机报告调优。
+# 只警告不阻断（设计文档约束：阈值这一版是起点）。
+BODY_CHAR_LIMIT = 3600
+
+
+def split_report_appendix(report: str) -> tuple[str, str]:
+    """报告 → `(主文, 附录)`；没有附录级标题时返回 `(整篇, "")`。
+
+    只按标题切分，不改动任何正文（不重排、不删除），因此两段拼回**逐字节**等于原文。
+    缺陷B（真机 E2E 复现）：此前主文末尾做 `rstrip()`，拼回会丢一个换行，交付侧
+    因此无法用"两段拼回 = 完整版"校验同源；现按原样切分，写入方据此保证三件同源。
+    """
+    text = str(report or "")
+    m = APPENDIX_HEADING_RE.search(text)
+    if not m:
+        return text, ""
+    return text[: m.start()], text[m.start():]
+
+
+def body_length_warning(body: str, *, limit: int = BODY_CHAR_LIMIT) -> dict | None:
+    """主文超限 → 可入库的告警字典；未超限 → `None`（键缺席 = 没有这项事实）。"""
+    chars = len(str(body or ""))
+    if chars <= int(limit):
+        return None
+    return {"chars": chars, "limit": int(limit),
+            "note": f"主文 {chars} 字符，超过目标上限 {int(limit)}（只提示，不影响验收结论）"}
+
+
+def write_report_files(report_dir, report: str) -> dict:
+    """报告正文 → 三件同源落盘（缺陷B 修复 / 任务22）：唯一权威写入口。
+
+    - `report.md`：完整版（正文原样写出，不改动）；
+    - `report_body.md` / `report_appendix.md`：**同一份正文**经 `split_report_appendix`
+      得到的两段，只在有附录级标题时写（完整版即主文时不写重复副本）。
+
+    缺陷B（真机 E2E 复现）：报告 worker 的落盘、交付管线冻结/重打包各写一份，口径分叉，
+    包内 `report.md` 与拆分件错版（16:17 成稿的 body/appendix + 16:56 重打包的 report.md）。
+    收敛到本函数后，任何写入方拿到的三件都来自同一份文本，`body + appendix == report.md`
+    恒成立。
+
+    返回 `{chars, body_chars, appendix_chars[, length_warning]}`（字段与任务22一致）；
+    主文超限只 `logger.warning`，不阻断落盘与验收。
+    """
+    from pathlib import Path as _P
+
+    out_dir = _P(report_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    text = str(report or "")
+    body, appendix = split_report_appendix(text)
+    # 一律 write_bytes：`write_text` 在 Windows 会把 \n 翻成 \r\n（平台相关），
+    # 交付侧按字节记 hash（清单/自检/快照 drift），翻译过的字节会与冻结正文不一致。
+    (out_dir / "report.md").write_bytes(text.encode("utf-8"))
+    out = {"chars": len(text), "body_chars": len(body),
+           "appendix_chars": len(appendix)}
+    if appendix.strip():
+        (out_dir / "report_body.md").write_bytes(body.encode("utf-8"))
+        (out_dir / "report_appendix.md").write_bytes(appendix.encode("utf-8"))
+    else:
+        # 无附录级标题：完整版即主文。同名陈旧拆分件必须清掉——否则上一版的主文/
+        # 附录会被交付侧当成"本次拆分结果"打包（缺陷B 的错版正是这么进包的）。
+        for stale in ("report_body.md", "report_appendix.md"):
+            try:
+                (out_dir / stale).unlink(missing_ok=True)
+            except OSError as exc:               # noqa: BLE001 - 删不掉不阻断落盘
+                logger.warning("清理陈旧拆分件失败 %s：%s", stale, str(exc)[:80])
+    warning = body_length_warning(body)
+    if warning:
+        logger.warning("主文超字数限制：%d 字符（目标≤%d）",
+                       warning["chars"], warning["limit"])
+        out["length_warning"] = warning
+    return out
+

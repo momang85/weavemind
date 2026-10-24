@@ -1,0 +1,133 @@
+{
+  "checked_at": 1792683225.6425817,
+  "cached": false,
+  "state": "unavailable",
+  "summary": "全部 5 个已探测公网目标被保留段/解析失败挡住——这是出口问题，不是密钥或数据源问题",
+  "probed": 5,
+  "counts": {
+    "reserved_address": 5
+  },
+  "targets": [
+    {
+      "host": "www.cninfo.com.cn",
+      "category": "reserved_address",
+      "addresses": [
+        {
+          "ip": "198.18.0.31",
+          "address_class": "benchmark_198_18",
+          "label": "测试保留段 198.18.0.0/15（fake-IP 特征）",
+          "public": false
+        },
+        {
+          "ip": "2001:2::1f",
+          "address_class": "benchmark_2001_2",
+          "label": "测试保留段 2001:2::/48（fake-IP 特征）",
+          "public": false
+        }
+      ],
+      "detail": "解析到非公网地址：198.18.0.31,2001:2::1f",
+      "advice": [
+        "解析到测试保留段：最常见解释是本机 DNS 被代理/TUN 类工具替换为 fake-IP 映射（也可能有其它原因，需人工核对）。应用按 SSRF 防线拒绝该地址，不会放行；要恢复取数，需把 DNS 恢复为真实解析或为应用提供真实出口——这是主机侧的人工调整，应用不会自行修改。"
+      ]
+    },
+    {
+      "host": "static.cninfo.com.cn",
+      "category": "reserved_address",
+      "addresses": [
+        {
+          "ip": "198.18.0.25",
+          "address_class": "benchmark_198_18",
+          "label": "测试保留段 198.18.0.0/15（fake-IP 特征）",
+          "public": false
+        },
+        {
+          "ip": "2001:2::19",
+          "address_class": "benchmark_2001_2",
+          "label": "测试保留段 2001:2::/48（fake-IP 特征）",
+          "public": false
+        }
+      ],
+      "detail": "解析到非公网地址：198.18.0.25,2001:2::19",
+      "advice": [
+        "解析到测试保留段：最常见解释是本机 DNS 被代理/TUN 类工具替换为 fake-IP 映射（也可能有其它原因，需人工核对）。应用按 SSRF 防线拒绝该地址，不会放行；要恢复取数，需把 DNS 恢复为真实解析或为应用提供真实出口——这是主机侧的人工调整，应用不会自行修改。"
+      ]
+    },
+    {
+      "host": "www.bing.com",
+      "category": "reserved_address",
+      "addresses": [
+        {
+          "ip": "198.18.0.32",
+          "address_class": "benchmark_198_18",
+          "label": "测试保留段 198.18.0.0/15（fake-IP 特征）",
+          "public": false
+        },
+        {
+          "ip": "2001:2::20",
+          "address_class": "benchmark_2001_2",
+          "label": "测试保留段 2001:2::/48（fake-IP 特征）",
+          "public": false
+        }
+      ],
+      "detail": "解析到非公网地址：198.18.0.32,2001:2::20",
+      "advice": [
+        "解析到测试保留段：最常见解释是本机 DNS 被代理/TUN 类工具替换为 fake-IP 映射（也可能有其它原因，需人工核对）。应用按 SSRF 防线拒绝该地址，不会放行；要恢复取数，需把 DNS 恢复为真实解析或为应用提供真实出口——这是主机侧的人工调整，应用不会自行修改。"
+      ]
+    },
+    {
+      "host": "datacenter-web.eastmoney.com",
+      "category": "reserved_address",
+      "addresses": [
+        {
+          "ip": "198.18.0.22",
+          "address_class": "benchmark_198_18",
+          "label": "测试保留段 198.18.0.0/15（fake-IP 特征）",
+          "public": false
+        },
+        {
+          "ip": "2001:2::16",
+          "address_class": "benchmark_2001_2",
+          "label": "测试保留段 2001:2::/48（fake-IP 特征）",
+          "public": false
+        }
+      ],
+      "detail": "解析到非公网地址：198.18.0.22,2001:2::16",
+      "advice": [
+        "解析到测试保留段：最常见解释是本机 DNS 被代理/TUN 类工具替换为 fake-IP 映射（也可能有其它原因，需人工核对）。应用按 SSRF 防线拒绝该地址，不会放行；要恢复取数，需把 DNS 恢复为真实解析或为应用提供真实出口——这是主机侧的人工调整，应用不会自行修改。"
+      ]
+    },
+    {
+      "host": "push2.eastmoney.com",
+      "category": "reserved_address",
+      "addresses": [
+        {
+          "ip": "198.18.0.33",
+          "address_class": "benchmark_198_18",
+          "label": "测试保留段 198.18.0.0/15（fake-IP 特征）",
+          "public": false
+        },
+        {
+          "ip": "2001:2::21",
+          "address_class": "benchmark_2001_2",
+          "label": "测试保留段 2001:2::/48（fake-IP 特征）",
+          "public": false
+        }
+      ],
+      "detail": "解析到非公网地址：198.18.0.33,2001:2::21",
+      "advice": [
+        "解析到测试保留段：最常见解释是本机 DNS 被代理/TUN 类工具替换为 fake-IP 映射（也可能有其它原因，需人工核对）。应用按 SSRF 防线拒绝该地址，不会放行；要恢复取数，需把 DNS 恢复为真实解析或为应用提供真实出口——这是主机侧的人工调整，应用不会自行修改。"
+      ]
+    }
+  ],
+  "advice": [
+    "解析到测试保留段：最常见解释是本机 DNS 被代理/TUN 类工具替换为 fake-IP 映射（也可能有其它原因，需人工核对）。应用按 SSRF 防线拒绝该地址，不会放行；要恢复取数，需把 DNS 恢复为真实解析或为应用提供真实出口——这是主机侧的人工调整，应用不会自行修改。"
+  ],
+  "egress_mode": {
+    "mode": "inherit",
+    "proxy_configured": false,
+    "proxy_hosts": [],
+    "proxy_egress_supported": false
+  },
+  "note": "本机 DNS 再次进入 fake-IP 段（198.18.0.0/15 / 2001:2::/16），与 20261022 诊断快照一致；属透明代理/VPN 接管，不做任何系统配置修改，仅供对照 test_delivery_chain 联网用例失败原因。",
+  "captured_at": "2026-10-22T23:33:45"
+}

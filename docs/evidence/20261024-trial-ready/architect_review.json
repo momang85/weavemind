@@ -1,0 +1,228 @@
+{
+  "date": "2026-10-24",
+  "runtime": "3.14.3",
+  "method": "offline synthetic data; mocked transport; isolated temporary paths",
+  "fingerprints": {
+    "stock_screen.py": "4fbc9ef22af631e262b146c7ef27d2678bda316cbf83d9d029e63413a6d4c14b",
+    "screen_prepare.py": "667e8aaa54ba1e5dceb5ba23589da196d26579e402c0502da62a6b0d77ffdb45",
+    "screen_store.py": "dfc2a1d24464e6e331e51b0e464b47e4e2dd5dc4e64724eaed3c8a1233c59adf",
+    "research_materials.py": "eced3d1271b6da3ac768993e498a0809ce95df5131e07749883056157953f236",
+    "adapters/eastmoney.py": "9ea8a928ca7575b7c8830a5fdf0f8ac3e9706dbf68800102e0f9f38ad8392ff8",
+    "frontend/src/pages/StockScreen.tsx": "03b378bb505c2cf388968f459ebd3dded5398dbd204e3c17a34b0f76267875b8",
+    "tools/build_rc2_package.py": "190199dad88f5e75dae3cf5ed0b032374dc6f7c6af91fc4af00e9caecff6c5db"
+  },
+  "findings": [
+    {
+      "id": "G1",
+      "name": "non_adjacent_years_reported_as_yoy",
+      "reproduced": true,
+      "input": {
+        "2023": "missing",
+        "2022_revenue": 100,
+        "2024_revenue": 150
+      },
+      "observed": {
+        "pass": [
+          {
+            "entity": "合成复核公司（非真实财务数据）",
+            "entity_id": "600031.SH",
+            "verdict": "pass",
+            "eval_period": "2024年",
+            "readings": [
+              {
+                "field": "revenue_growth",
+                "label": "营业收入同比增速",
+                "status": "ok",
+                "value": 50,
+                "unit": "%",
+                "display": "50.00%",
+                "formula": "(150.0元 − 100.0元) / 100.0元 × 100",
+                "reason": "",
+                "inputs": [
+                  "fact-38542c9315eadfde",
+                  "fact-765fe61cbb4cb178"
+                ],
+                "source_url": "https://example.invalid/synthetic-review"
+              }
+            ],
+            "reasons": [
+              "营业收入同比增速 50.00% > 40%：满足全部条件"
+            ],
+            "dataset_hash": "a18230ee44aced9b17af1a671a46eab6f8eaff6ad2963f4c1a8af59b28fabd7b"
+          }
+        ],
+        "fail": [],
+        "insufficient": []
+      },
+      "expected": "2023 missing must not produce 2024 year-on-year growth"
+    },
+    {
+      "id": "G2",
+      "name": "coverage_ignores_noncomputable_denominator",
+      "reproduced": true,
+      "observed": {
+        "preview_status": "covered",
+        "debt_field": {
+          "status": "ok"
+        },
+        "actual_counts": {
+          "pass": 0,
+          "fail": 0,
+          "insufficient": 1,
+          "total": 1
+        }
+      },
+      "expected": "zero denominator must not be previewed as computable"
+    },
+    {
+      "id": "G3",
+      "name": "coverage_combines_separate_datasets",
+      "reproduced": true,
+      "observed": {
+        "preview_growth": {
+          "status": "ok",
+          "previous_period": "2023-12-31"
+        },
+        "selected_dataset_periods": [
+          "2024-12-31"
+        ],
+        "actual_counts": {
+          "pass": 0,
+          "fail": 0,
+          "insufficient": 1,
+          "total": 1
+        }
+      },
+      "expected": "a separate dataset must not silently supply the previous year"
+    },
+    {
+      "id": "G4",
+      "name": "source_currency_missing_defaults_upstream",
+      "reproduced": true,
+      "observed": {
+        "raw_currency_present": false,
+        "stored_currency": "CNY"
+      },
+      "expected": "unknown or explicit source-contract evidence, not a silent default"
+    },
+    {
+      "id": "G5",
+      "name": "research_provenance_flags_disagree",
+      "reproduced": true,
+      "observed": {
+        "dataset_user_provided": false,
+        "provenance_user_provided": true,
+        "kind": "user_provided"
+      },
+      "expected": "canonical research-origin identity across storage, snapshot and UI"
+    },
+    {
+      "id": "G6",
+      "name": "other_users_recent_tasks_hide_owned_materials",
+      "reproduced": true,
+      "observed": {
+        "owned_tasks_in_database": 1,
+        "returned_owned_tasks": 0,
+        "scanned": 800
+      },
+      "expected": "filter ownership before pagination so other users cannot hide owned materials"
+    }
+  ],
+  "reproduced_count": 6,
+  "scope": "Repository review and isolated regression only; no production startup, network acquisition, real-user trial or browser control.",
+  "previous_rc2": {
+    "task": "DATA-RC2-1024",
+    "delivery_observed": [
+      "A-data-contract.md",
+      "A3-research-materials.md",
+      "B-integrity-metering.md",
+      "C-package-hygiene.md",
+      "D-user-acceptance.md",
+      "release-gates.md"
+    ],
+    "independently_rerun": {
+      "script": "docs/evidence/20261024-data-rc2/rc2_after_probe.py",
+      "exit_code": 0,
+      "probes": 7,
+      "all_fixed": true,
+      "runtime": "3.14.3"
+    },
+    "package": {
+      "path": "tmp/rc2-package-final/weavemind-rc2-20261024T052644Z-2fa79a83.zip",
+      "sha256": "d7aef5162b6166c72a0b8e96afd8010106e5b1fe59e7d867d0ed3864dec9979d",
+      "verifier_exit_code": 0,
+      "entries": 359,
+      "default_frontend_included": true,
+      "data_entries": [
+        "weavemind/data/samples/synthetic_5_companies.json"
+      ],
+      "archive_matches_current_files": [
+        "stock_screen.py",
+        "screen_prepare.py",
+        "screen_store.py",
+        "research_materials.py",
+        "adapters/eastmoney.py",
+        "web_ui.py",
+        "frontend/dist/index.html"
+      ],
+      "limitation": "File integrity and selected code hashes verified; not independent launch/Python 3.11/full-stack/secret-content certification."
+    },
+    "reported_not_independently_accepted": [
+      "Four real companies passed a manually transcribed CSV path; not the in-app adapter acquisition path or a full original-document audit.",
+      "Browser watch-note version conflict has follow-up evidence; keyboard/native upload/download/real narrow viewport remain unverified.",
+      "Reports say archive hygiene and isolated startup/restart/rollback succeeded; full-stack launcher and Python 3.11 are unverified."
+    ]
+  },
+  "source_findings": [
+    {
+      "id": "S1",
+      "files": [
+        "frontend/src/pages/StockScreen.tsx:1312",
+        "research_materials.py:651"
+      ],
+      "finding": "Research materials are only shown as task count; no frontend fact selection or research-collect call. A3 report confirms UI workflow absent."
+    },
+    {
+      "id": "S2",
+      "files": [
+        "screen_prepare.py:421",
+        "screen_prepare.py:671",
+        "adapters/eastmoney.py:328"
+      ],
+      "finding": "Adapter has raw response text, but collection persists normalized rows, URLs and retrieval timestamp, not a raw response snapshot/hash reference. Old notice date is still used as availability for current returned values; synthetic restatement test alone does not prove historical PIT."
+    },
+    {
+      "id": "S3",
+      "files": [
+        "frontend/src/pages/StockScreen.tsx:227",
+        "frontend/src/pages/StockScreen.tsx:1244",
+        "frontend/src/pages/StockScreen.tsx:2381"
+      ],
+      "finding": "UI still says missing currency defaults CNY and all evidence links are official; research label checks research_material but producer emits user_provided. Current origin labels are not consistently evidence-driven."
+    },
+    {
+      "id": "S4",
+      "files": [
+        "frontend/src/pages/StockScreen.tsx:891",
+        "docs/evidence/20261024-data-rc2/D-user-acceptance.md"
+      ],
+      "finding": "409 conflict refreshes watchlist; preserve the unsaved local note separately rather than losing input. Report confirms refresh resets conditions without warning and current cancel means request disconnect, not server cancel."
+    },
+    {
+      "id": "S5",
+      "files": [
+        "docs/evidence/20261024-data-rc2/release-gates.md",
+        "docs/evidence/20261024-data-rc2/C-package-hygiene.md"
+      ],
+      "finding": "Release-gate header points to intermediate archive although final archive supersedes it. Grouped unverified counts and source-check pass claims should be replaced by per-test/channel/build evidence."
+    }
+  ],
+  "validation_note": "New probe first run failed only during temporary SQLite cleanup because the harness connection remained open; corrected harness to explicitly close the connection and reran successfully. No product code was edited.",
+  "dispatch": {
+    "task": "TRIAL-READY-1024",
+    "status": "prepared_not_sent",
+    "method": "manual_forward_per_user_preference",
+    "browser_control": "not_attempted",
+    "receipt": false
+  }
+}

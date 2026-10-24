@@ -2662,7 +2662,11 @@ class TestSearchFallbackDomainGate(unittest.TestCase):
         goal = "研究洋河股份（002304.SZ）2023/2024 年报：收入、利润与现金流"
         alt = o._generation_fallback_step(goal, step)
         self.assertEqual(alt.get("capability"), "content_summary", alt)
-        self.assertIn("外部检索/抓取失败", str(alt.get("instruction") or ""))
+        # P1-D：降级必须如实披露"没有取得可核验的联网来源"，不得掩盖检索失败
+        ins = str(alt.get("instruction") or "")
+        self.assertIn("没有取得可核验的联网来源", ins)
+        self.assertIn("未在本次检索中验证", ins)
+        self.assertNotIn("不要提及搜索", ins)
 
     def test_code_goal_keeps_code_fallback_when_sandbox_ready(self):
         o = self._orch()

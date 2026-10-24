@@ -439,6 +439,10 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "unsupported_claims": unsupported,
         "risks": risks,
         "citations": citations,
+        # U90-R4：材料准入状态进结构对象——声明/页面据此判断"是否真的用了用户材料"，
+        # 不靠 goal 文本关键词，也不靠有没有跑检索步
+        "materials_state": {k: v for k, v in (audit.get("materials_state") or {}).items()
+                            if k != "admitted"},
         "charts": charts,
         "appendix": _appendix(task_id, rows, derived, citations, evidence,
                               source_url=str(data.get("source_url") or ""),
@@ -2526,7 +2530,7 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     known_urls = tuple(_project_sources(task_id, ws_dir=ws_dir))
 
     def _add(url: str, title: str, kind: str, used_by: str, *, entry: str,
-             **extra) -> None:
+             admission: str = "", **extra) -> None:
         u = str(url or "").strip()
         if not u:
             return
@@ -2537,9 +2541,10 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
                     if c["url"] == u and used_by not in c["used_by"]:
                         c["used_by"].append(used_by)
             return
-        if entry == "structured":
+        if entry == "structured" or admission == "admitted":
             # 结构化财务来源是**本次研究取数本身**（chart_rows ok 即证据），
-            # 不按网页规则判 unknown
+            # 不按网页规则判 unknown；已由材料准入通道（material_intake）判过准入的
+            # 材料同样不再按网页规则重判（U90-R4：准入状态是权威，不靠 URL 猜）
             adm = "admitted"
         else:
             adm = _admission(u, evidence=evidence, known=known_urls)
@@ -2598,16 +2603,54 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     # ③ 正文实际引用的检索来源（按正文出现顺序编号）
     for url, title in _body_sources(body):
         _add(url, title, _source_type(url), "正文引用", entry="body")
-    # ④ 用户材料（goal 文本）
-    if str(goal or "").strip() and any(k in str(goal) for k in ("材料", "附件", "上传")):
+    # ④ 用户材料：按**材料准入状态**（material_intake 已准入清单）登记，不再只看
+    # goal 文本关键词——直供材料即使 goal 没写"材料/附件/上传"也真的被采用了，
+    # 声明不能因此掉进"未引用外部数据源，仅为模型知识"（U90-R4）。
+    mat_state = _materials_state(task_id, ws_dir=ws_dir)
+    for m in mat_state.get("admitted") or []:
+        m_url = str(m.get("url") or "").strip()
+        m_title = str(m.get("title") or "").strip() or "用户提供的材料"
+        if not m_url:
+            # 上传/本地文件没有公网 URL：用 `material://<mid>` 定位到材料登记，
+            # 验收器按此 scheme 放行（它不是网页来源，不该被判"非法 URL"）
+            m_url = f"material://{m.get('material_id') or 'unknown'}"
+        _add(m_url, m_title, "user_material", "用户材料", entry="material",
+             admission="admitted",
+             **({"provenance": m.get("provenance")}
+                if m.get("provenance") else {}))
+    if not mat_state.get("admitted") and str(goal or "").strip() \
+            and any(k in str(goal) for k in ("材料", "附件", "上传")):
+        # 兼容旧路径：材料清单里没有登记，但任务文本明说带了材料——仍按旧口径登记
+        # 一条合并条目（没有任何登记证据时不伪造"已采用"）。
         _add("user-material", "用户提供的材料", "user_material", "用户材料",
-             entry="material")
+             entry="material", admission="admitted")
     # 未被采用的候选（检索落盘里存在但正文没引用）→ 只留内部审计
     known = _project_sources(task_id, ws_dir=ws_dir)
     unused = [{"url": u, "title": _host(u)} for u in known if u not in seen]
     return adopted, {"unused_sources": unused[:20],
                      "rejected": rejected[:20],
+                     "materials_state": mat_state,
                      "note": "未采用/越界材料只留在内部审计，不进简报来源清单"}
+
+
+def _materials_state(task_id: str, *, ws_dir=None) -> dict:
+    """材料准入状态摘要（material_intake 的只读投影；失败按"无登记"处理）。
+
+    声明与来源清单以**实际采用的准入材料**为准：`admitted` 里是已通过准入的材料
+    （含官方发现与用户直供），检索零结果不影响它们作为来源的地位。
+    """
+    try:
+        import material_intake as mi
+        st = mi.status(task_id, ws_dir=ws_dir)
+        items = [i for i in (st.get("materials") or []) if isinstance(i, dict)]
+        admitted = [i for i in items
+                    if str(i.get("status") or "") == mi.STATE_ADMITTED]
+        return {"count": len(items), "admitted": admitted,
+                "admitted_n": len(admitted),
+                "pending_n": len(st.get("pending") or [])}
+    except Exception as exc:                     # noqa: BLE001 - 读不到按无登记
+        logger.warning("材料准入状态读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        return {"count": 0, "admitted": [], "admitted_n": 0, "pending_n": 0}
 
 
 def _admission(url: str, *, evidence: dict | None, known=()) -> str:
@@ -3538,7 +3581,7 @@ def render_brief_markdown(structure: dict, body: str = "",
                  "交付状态与验收结论见任务页与导出清单（未验收时按草稿处理）。")
     lines.append("")
     lines.append("### 免责声明")
-    lines.append(_disclaimer(structure))
+    lines.append(_disclaimer(structure, task_id=task_id))
     return "\n".join(lines).strip() + "\n"
 
 
@@ -3977,8 +4020,8 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
         # 与资产负债表余额变化是两个口径；读者要看到"是哪一项在缓冲"。
         out["wc_flow"] = _jd.wc_flow_of(ds, locators=prov)
     except Exception as exc:                       # noqa: BLE001 - 取不到就不生成该判断
-        logger.warning("直接法收支/营运资本补充资料读取失败（task=%s）：%s",
-                       task_id, str(exc)[:120])
+        logger.warning("直接法收支/营运资本补充资料读取失败（task=%s，%s）：%s",
+                       task_id, type(exc).__name__, str(exc)[:120])
         out["dataset"] = None
         out["direct_cash"] = {}
         out["wc_flow"] = {}
@@ -4472,17 +4515,307 @@ def analysis_coverage(analysis_text: str) -> dict:
             "ok": bool(observations >= 1 and has_meaning)}
 
 
-def _disclaimer(structure: dict) -> str:
+# 声明里"外部来源"的措辞：按**实际采用的来源类别**写，不一律写"公开渠道"
+_EXTERNAL_DESC = (
+    ("issuer_annual_report", "发行人公开披露（年报/公告原文）"),
+    ("third_party", "第三方平台/媒体公开信息"),
+)
+
+
+def _external_desc(citations: list[dict]) -> str:
+    """实际采用的**外部**来源类别 → 声明措辞（U90-R4：不以检索步为准）。
+
+    结构化取数/发行人披露/第三方来源都算外部数据源——只认 `third_party` 会让
+    "仅引用了发行人披露"的报告自称"未引用外部数据源"（实机反例：三一简报的
+    免责声明写着"仅为模型知识"，而采用清单里明明有一条已准入的发行人年报）。
+    """
+    types = {str(c.get("type") or "") for c in (citations or [])}
+    parts = [label for key, label in _EXTERNAL_DESC if key in types]
+    known = {k for k, _ in _EXTERNAL_DESC} | {"", "user_material"}
+    if types - known:
+        parts.append("公开渠道")          # 未知类型也如实当外部来源，不冒充/不隐瞒
+    if not parts:
+        return ""
+    return parts[0] if len(parts) == 1 else "与".join(parts)
+
+
+def _search_degraded_reason(task_id: str | None) -> str:
+    """本轮**外部检索本身**是否降级（代做/未跑成/零命中/Redis 不可用）。
+
+    口径与交付页"数据来源摘要"同一份（`search_coverage` + `task_state` 步骤投影）；
+    判不出来返回空串——声明不猜。检索零命中**不等于**没有引用材料（用户材料/
+    官方披露照样是来源），这里只描述检索状态，不改来源措辞。
+    """
+    if not task_id:
+        return ""
+    try:
+        import search_coverage as _sc
+        import task_state as _ts
+        steps = list((_ts.task_projection(task_id) or {}).get("steps") or [])
+        s = _sc.summarize_search_coverage(steps)
+    except Exception:                        # noqa: BLE001 - 判不出来不猜
+        return ""
+    if int(s.get("total_search_steps") or 0) <= 0 or int(s.get("ok_steps") or 0) > 0:
+        return ""
+    bits = []
+    if int(s.get("redis_degraded_steps") or 0):
+        bits.append("Redis 不可用，检索未真正执行")
+    if int(s.get("degraded_steps") or 0):
+        bits.append("检索步由非检索执行者代做")
+    if int(s.get("incomplete_steps") or 0):
+        bits.append("部分检索未跑成（超时/限流/预算）")
+    if int(s.get("zero_source_steps") or 0):
+        bits.append("检索零命中")
+    return "；".join(bits) or "无有效检索结果"
+
+
+def _disclaimer(structure: dict, task_id: str | None = None) -> str:
+    """免责声明：按**实际采用的来源**（citations）与**材料准入状态**生成。
+
+    判据不是"有没有跑检索步"：采用清单里是发行人披露/第三方来源就是外部来源；
+    用户直供材料按材料措辞（material_intake 已准入即算，goal 关键词只是旧兼容）；
+    检索降级只作为附加事实注明，不因此改写来源措辞（U90-R4）。
+    """
     try:
         import report_quality as _rq
-        has_external = any(c.get("type") == "third_party"
-                           for c in (structure.get("citations") or []))
-        has_user = any(c.get("type") == "user_material"
-                       for c in (structure.get("citations") or []))
-        return _rq.disclaimer_clause(has_external, has_user)
+        cits = [c for c in (structure.get("citations") or [])
+                if isinstance(c, dict)]
+        ext_cits = [c for c in cits if str(c.get("type") or "") != "user_material"]
+        mats = structure.get("materials_state") or {}
+        has_user = any(str(c.get("type") or "") == "user_material" for c in cits) \
+            or int(mats.get("admitted_n") or 0) > 0
+        return _rq.disclaimer_clause(
+            bool(ext_cits), has_user,
+            external_desc=_external_desc(ext_cits),
+            search_degraded=_search_degraded_reason(task_id))
     except Exception:
         return ("本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
                 "据此操作风险自担。")
+
+
+# ── 正文完整性：截断闸门（P0-1 / P0-2b）────────────────────────────────────
+#
+# 背景（2026-10-21 实机 `ui-8b28c95ab1`）：报告生成步的模型输出被长度上限截断——
+# 正文停在半句「…不得以「经营活动现金流入小计」或「」，§1.4 承诺的"第五章…第十章 +
+# 文末附录/参考来源/免责声明"全都没写。`report_quality.compare_versions` 只按"验收缺口
+# 更少"比较（半截稿 2 个缺口 vs 完整稿 3 个），把半截稿采纳为 selected：页面/下载/包内
+# 从此是三份不同的正文，且**没有任何一处**标注"这份正文被截断"。
+#
+# 判据（都可核对，不靠猜；`finish_reason` 只在拿得到时才作为证据）：
+#   ① `finish_reason == "length"`——调用方拿得到就传。workers 拿不到（`_call_llm`
+#      只回文本），所以②③④必须能独立成立；
+#   ② 结构承诺未兑现：声明"第二章至第十章"却只写到第四章；声明文末设
+#      「附录/参考来源/免责声明」却一处都没有；
+#   ③ 正文主体末尾悬空：最后一行内容停在未闭合的「『（《【" 或 `**`/`` ` ``，或停在
+#      连接词/顿号上（或、及、与、和、不得以…）；
+#   ④ 正文主体分隔符整体不配对（「」『』（）【】 或 `**` 数为奇）。
+#
+# 判定：①单独成立即截断；②单独成立即截断；③与④同时成立即截断。三者都不成立才算完整。
+# 短正文（< `TRUNCATION_MIN_CHARS`）不跑启发式，避免误伤摘要/测试夹具。
+
+TRUNCATION_MIN_CHARS = 400
+_APPENDIX_HEAD_RE = re.compile(
+    r"(?m)^#{1,4}\s*(?:数据来源(?:摘要)?|参考来源|来源清单|参考资料|来源附录|"
+    r"附录[^\n]{0,24}|免责声明|核查细节|风险提示)\s*$")
+_IMAGE_ONLY_RE = re.compile(r"^\s*!\[[^\]]*\]\([^)]*\)\s*$")
+_HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+# 本模块自己盖的截断标注（`truncation_note`）：判据必须先把它切掉，否则
+# 「标注写在截断点之后」会把截断证据补成完整——闸门自证失效。
+_NOTE_MARK_RE = re.compile(r"(?m)^>\s*⚠️\s*\*\*正文")
+_HEADING_RE = re.compile(r"(?m)^#{1,4}[ \t]+(.+?)[ \t]*$")
+_CHAPTER_RE = re.compile(r"第\s*([一二三四五六七八九十]{1,3})\s*章")
+_CHAPTER_HEADING_RE = re.compile(
+    r"(?m)^#{1,4}[ \t]+(?:第\s*)?([一二三四五六七八九十]{1,3})\s*[、.．章节]")
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7,
+           "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+# 承诺句的上下文词：只有"在讲结构/目录/文末"的句子里数承诺，避免把正文里的
+# "第三章的做法"当成章节承诺。
+_PROMISE_CTX = ("结构", "章节", "目录", "文末", "全文", "依次", "分别")
+# 末尾悬空的连接词/停顿符（中文写句不会停在这里）
+_DANGLING_TAIL = ("或", "及", "与", "和", "、", "，", ",", "：", ":", "；", ";",
+                  "的", "是", "为", "以", "对", "把", "在", "从", "由", "据", "如",
+                  "按", "含", "包括", "以及", "不得以", "例如", "即", "则", "且",
+                  "但", "而", "比如", "系", "应", "需", "将", "若", "当", "被")
+_UNCLOSED_TAIL = ("「", "『", "（", "(", "【", "《", "“", "**", "`", "|")
+
+
+def _main_body(text: str) -> str:
+    """正文主体：切掉**自动追加**的附录级章节（数据来源/参考来源/附录/免责声明…）。
+
+    必须切：生成器会在截断点**之后**再追加 `## 数据来源` 与图表行，只按整篇末尾判
+    "是否悬空"会把截断判成完整（实测样本正是这样）。
+    也要切掉**本模块自己盖的截断标注**（`truncation_note`）：标注落在截断点之后，
+    不切掉会把"末尾悬空"补成完整，闸门自己把自己的证据抹了。
+    """
+    s = str(text or "")
+    cut = len(s)
+    m = _APPENDIX_HEAD_RE.search(s)
+    if m:
+        cut = min(cut, m.start())
+    n = _NOTE_MARK_RE.search(s)
+    if n:
+        cut = min(cut, n.start())
+    return s[:cut]
+
+
+def _last_content_line(main: str) -> str:
+    """正文主体的最后一行**实质内容**（跳过空行/图片行/分隔线/纯图表引用）。"""
+    for ln in reversed(str(main or "").splitlines()):
+        s = ln.strip()
+        if not s or _IMAGE_ONLY_RE.match(s) or _HR_RE.match(s):
+            continue
+        return s
+    return ""
+
+
+def _last_heading_label(main: str) -> str:
+    """正文主体最后一个标题的编号（`4.1`、`四`…）；取不到就用标题文本。"""
+    heads = _HEADING_RE.findall(str(main or ""))
+    if not heads:
+        return ""
+    last = str(heads[-1]).strip()
+    m = re.match(r"^(?:第\s*)?([0-9]+(?:\.[0-9]+)*|[一二三四五六七八九十]{1,3})\s*[、.．章节]?", last)
+    if m:
+        return m.group(1)
+    return last[:24]
+
+
+def _delimiter_imbalance(main: str) -> dict:
+    """正文主体分隔符配对情况（差值为 0 才配对；`**`/反引号按奇偶）。"""
+    t = str(main or "")
+    pairs = {"「": "」", "『": "』", "（": "）", "【": "】", "《": "》"}
+    out: dict = {}
+    for op, cl in pairs.items():
+        diff = t.count(op) - t.count(cl)
+        if diff:
+            out[f"{op}{cl}"] = diff
+    if t.count("**") % 2:
+        out["**"] = t.count("**")
+    if t.count("`") % 2:
+        out["`"] = t.count("`")
+    return out
+
+
+def _promise_gap(main: str, text: str) -> dict:
+    """结构承诺 vs 实际标题：声明到第 N 章却只写到第 M 章、承诺的章节一处没有。"""
+    heads_text = str(text or "")
+    declared: set[int] = set()
+    promised_sections: set[str] = set()
+    for ln in str(main or "").splitlines():
+        if not any(c in ln for c in _PROMISE_CTX):
+            continue
+        for rom in _CHAPTER_RE.findall(ln):
+            if rom in _CN_NUM:
+                declared.add(_CN_NUM[rom])
+        if "文末" in ln or "附录" in ln or "声明" in ln or "参考来源" in ln:
+            for name in ("附录", "参考来源", "免责声明", "关键数据一览表"):
+                if name in ln:
+                    promised_sections.add(name)
+    actual = {_CN_NUM[r] for r in _CHAPTER_HEADING_RE.findall(heads_text)
+              if r in _CN_NUM}
+    head_names = "｜".join(_HEADING_RE.findall(heads_text))
+    missing = sorted(n for n in promised_sections if n not in head_names)
+    declared_max = max(declared) if declared else 0
+    actual_max = max(actual) if actual else 0
+    return {"declared_chapters": sorted(declared), "actual_chapters": sorted(actual),
+            "declared_max": declared_max, "actual_max": actual_max,
+            "chapter_gap": (declared_max - actual_max) if declared_max else 0,
+            "promised_sections": sorted(promised_sections), "missing_sections": missing}
+
+
+def detect_body_truncation(text: str, *, finish_reason: str = "") -> dict:
+    """判这份正文是不是**被截断**的（不完整）。返回证据字典，绝不改正文。
+
+    返回：`{"truncated", "reason", "section", "signals", "evidence"}`。
+    调用方（装配/版本登记/worker）据此：不得静默采纳、必须标注、必须降级为草稿。
+    """
+    body = str(text or "")
+    fr = str(finish_reason or "")
+    signals: list[str] = []
+    if fr == "length":
+        signals.append("finish_reason=length")
+    main = _main_body(body)
+    tail = _last_content_line(main)
+    imbalance = _delimiter_imbalance(main)
+    gap = _promise_gap(main, body)
+    section = _last_heading_label(main)
+    evidence: dict = {"body_chars": len(body), "main_chars": len(main),
+                      "finish_reason": fr, "tail": tail[-120:],
+                      "imbalance": imbalance, "section": section, **gap}
+    if len(body) >= TRUNCATION_MIN_CHARS:
+        if gap["chapter_gap"] >= 2:
+            signals.append(f"结构承诺未兑现：声明到第 {gap['declared_max']} 章，"
+                           f"实际只到第 {gap['actual_max']} 章")
+        if len(gap["missing_sections"]) >= 2:
+            signals.append("承诺的文末章节缺失：" + "、".join(gap["missing_sections"]))
+        tail_dangling = bool(tail) and (
+            tail.endswith(_UNCLOSED_TAIL) or tail.endswith(_DANGLING_TAIL)
+            or bool(tail.count("**") % 2) or bool(tail.count("`") % 2))
+        if tail_dangling:
+            signals.append(f"正文主体末尾悬空：{tail[-40:]!r}")
+        if imbalance:
+            signals.append("分隔符不配对：" + "、".join(
+                f"{k}{v:+d}" for k, v in imbalance.items()))
+        # ③与④必须同时成立（只有末尾悬空或只有一处不配对都可能是文风，不算截断）
+        heuristic = bool(gap["chapter_gap"] >= 2
+                         or len(gap["missing_sections"]) >= 2
+                         or (tail_dangling and bool(imbalance)))
+    else:
+        heuristic = False
+    truncated = bool(fr == "length" or heuristic)
+    if truncated:
+        why = signals[0] if signals else "正文被截断"
+        reason = f"正文在第 {section} 节截断，内容不完整" if section else \
+            "正文被截断，内容不完整"
+        reason += f"（{why}）"
+    else:
+        reason = ""
+    return {"truncated": truncated, "reason": reason, "section": section,
+            "signals": signals, "evidence": evidence}
+
+
+def is_body_truncated(text: str, *, finish_reason: str = "") -> bool:
+    """便捷谓词（只关心真假时用）。"""
+    return bool(detect_body_truncation(text, finish_reason=finish_reason).get("truncated"))
+
+
+def truncation_sentence(info: dict) -> str:
+    """一句话结论（写进 `delivery.draft_reason` / 验收 / 日志）。"""
+    if not isinstance(info, dict) or not info.get("truncated"):
+        return ""
+    sec = str(info.get("section") or "")
+    return (f"正文在第 {sec} 节截断，内容不完整" if sec
+            else "正文被截断，内容不完整")
+
+
+def truncation_note(info: dict) -> str:
+    """页面与交付物上的**显式标注**（引用块，读者第一眼就能看见）。"""
+    if not isinstance(info, dict) or not info.get("truncated"):
+        return ""
+    why = "；".join(str(s) for s in (info.get("signals") or [])[:3])
+    return (f"> ⚠️ **{truncation_sentence(info)}**——{why or '正文未写完'}。\n"
+            "> 本版正文不完整，只能作未验收草稿交付；"
+            "请重跑报告生成（或人工补全）后重新验收，不得当作完整交付。")
+
+
+def stamp_delivery_projection(structure: dict, projection: dict) -> dict:
+    """把**本版交付正文身份**盖进结构对象（`report_structure.json`）。
+
+    为什么盖：结构与正文可能来自两次装配（修订/候选采纳），页面按结构展示、按 DB 投影
+    展示正文——两边只有认同一份身份，读者看到的才是同一版。身份 = 交付字节 sha256 +
+    字符数 + 研究正文 sha256 + 选中版本身份 + 主文相对路径。
+    """
+    if not isinstance(structure, dict) or not isinstance(projection, dict):
+        return structure
+    structure["delivery_projection"] = dict(projection)
+    return structure
+
+
+def read_delivery_projection(task_id: str, *, ws_dir=None) -> dict:
+    """读结构对象里记着的交付正文身份（没有就返回 `{}`，不编）。"""
+    st = read_structure(task_id, ws_dir=ws_dir)
+    proj = (st or {}).get("delivery_projection")
+    return dict(proj) if isinstance(proj, dict) else {}
 
 
 def write_structure(task_id: str, structure: dict, *, ws_dir=None) -> None:

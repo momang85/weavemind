@@ -1,0 +1,65 @@
+{
+ "task_id": "ui-91677c7767",
+ "deliverables_endpoint": {
+  "http": 200,
+  "keys": [
+   "files",
+   "delivery_identity"
+  ],
+  "current": {
+   "package": "deliverables_20261020_212027.zip",
+   "package_generated_at": "2026-10-20 21:20",
+   "package_stale": true,
+   "package_body_version_id": "9a861fd39fa4d1d25594017898c075066101b00b13c378b3958904d97fc43a6c",
+   "package_report_version_id": "3cb1f60d0c5918a4f54e9c5c649f4cc407ebb7451d812831d7a0be121b689fd7",
+   "current_body_version_id": "619159be16258bcc23a91d558cbecad276588a4c1635e36a5b0b3f5003e625ad",
+   "current_version_id": "6d5e46552523d134f350e56e9c5c64f14b593d11986e804e08976facff26a084",
+   "package_pdf_sha256": "",
+   "note": "该包不是当前采纳正文生成的版本（或清单身份为空无法证明同版），请重新导出后再对外交付"
+  }
+ },
+ "package_name": "deliverables_20261020_212027.zip",
+ "zip": {
+  "http": 200,
+  "bytes": 483290,
+  "sha256": "cedec8fb0af0263a6a2745c27b293ee0dad778b6545afaadeca8506be70acc2c",
+  "content_type": "application/x-zip-compressed",
+  "staleness_header": null,
+  "members": 17
+ },
+ "manifest": {
+  "schema": "weavemind.package/2",
+  "report_version_id": "3cb1f60d0c5918a4f54e9c5c649f4cc407ebb7451d812831d7a0be121b689fd7",
+  "research_body_sha256": "9a861fd39fa4d1d25594017898c075066101b00b13c378b3958904d97fc43a6c",
+  "delivered_md_sha256": "f11adbeceb4e77b785658b5263206e99808d669d85a84153850d2e41e2b23ecb",
+  "task_id": null,
+  "packaged_at": "2026-10-20T21:20:27"
+ },
+ "inner_md_sha256": "f11adbeceb4e77b785658b5263206e99808d669d85a84153850d2e41e2b23ecb",
+ "inner_md_sha256_matches_manifest": true,
+ "selection": null,
+ "md": {
+  "http": 200,
+  "bytes": 16241,
+  "sha256": "3a0a31636f009e38f5bdf0c52933727dcbf0abc4e8b0f338e912fcc45f982328",
+  "X-Report-Version-Id": "6d5e46552523d134f350e56e9c5c64f14b593d11986e804e08976facff26a084",
+  "X-Report-Research-Body-Sha256": "619159be16258bcc23a91d558cbecad276588a4c1635e36a5b0b3f5003e625ad",
+  "draft_header": "0",
+  "md_equals_manifest": false,
+  "has_disclaimer": true,
+  "has_ai_marker": true,
+  "disclaimer_says_no_external": false,
+  "cites_sources": true,
+  "chars": 6972
+ },
+ "pdf": {
+  "http": 200,
+  "bytes": 5472086,
+  "head": "%PDF-",
+  "pages": 7,
+  "sha256": "732c1cee0faf32ea8d20cb686f22ad48f4fb8c19ab7a0fae9f97e2c77d342078",
+  "has_subject": true,
+  "has_disclaimer": true,
+  "readable": true
+ }
+}

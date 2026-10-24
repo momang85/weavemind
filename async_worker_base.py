@@ -80,6 +80,42 @@ class AsyncWorkerBase(ABC):
         self, system="", prompt="", instruction="",
         max_attempts=3, max_tokens=2000,
     ) -> str:
+        # 任务23：LLM 端点熔断（docs/arch_phase4_task23_llm_failover.md）。
+        # 调用前把本进程 LLM_* 指向熔断器的当前活跃端点（未配备援 → 原样返回、
+        # 不写环境变量，零影响）；成功/失败回喂熔断器记连续失败计数。
+        # 备援期间同时取该备援的模型名：model_roles 优先于 LLM_MODEL，不传 override
+        # 就会把主端点模型名发给备援供应商（实机 404），切了等于没切。
+        model_override = None
+        try:
+            from llm_circuit_breaker import activate_for_call, active_model_override
+            activate_for_call(self.agent_id)
+            model_override = active_model_override()
+        except Exception:
+            pass  # 熔断器自身故障绝不拦调用
+        try:
+            result = await self._call_llm_transport(
+                system=system, prompt=prompt, instruction=instruction,
+                max_attempts=max_attempts, max_tokens=max_tokens,
+                model_override=model_override,
+            )
+        except Exception as exc:
+            try:
+                from llm_circuit_breaker import report_failure
+                report_failure(exc)
+            except Exception:
+                pass
+            raise
+        try:
+            from llm_circuit_breaker import report_success
+            report_success()
+        except Exception:
+            pass
+        return result
+
+    async def _call_llm_transport(
+        self, system="", prompt="", instruction="",
+        max_attempts=3, max_tokens=2000, model_override=None,
+    ) -> str:
         # 步骤级流式输出（O-21）：长生成过程逐块发布到 Redis，前端实时显示
         if os.environ.get("STREAM_OUTPUT", "1") != "0":
             try:
@@ -99,6 +135,8 @@ class AsyncWorkerBase(ABC):
                         max_tokens=max_tokens,
                         # B1：步骤执行为 exec 用途，按 llm.model_roles.exec 选模型
                         usage="exec",
+                        # 任务23：备援端点用自己的模型名（None=与改动前逐字节一致）
+                        model_override=model_override,
                     )),
                 )
             except Exception as exc:
@@ -116,6 +154,8 @@ class AsyncWorkerBase(ABC):
             max_tokens=max_tokens,
             # B1：步骤执行为 exec 用途
             usage="exec",
+            # 任务23：同上
+            model_override=model_override,
         )
         return result if isinstance(result, str) else str(result)
 
@@ -215,6 +255,7 @@ class AsyncWorkerBase(ABC):
     async def _handle(self, task: dict):
         tid = task.get("task_id","?"); instr = task.get("instruction","")
         ok = False; res = ""
+        _exc_retryable = None      # 任务16：失败异常的可重试性（仅失败时随结果上行）
         try:
             # L01：台账归属根任务（此前用派发 id，根任务台账读不到）；
             # 接收边界统一走 admit_dispatch（协议非法/银行缺身份/配置非法都拒绝）
@@ -232,6 +273,12 @@ class AsyncWorkerBase(ABC):
                 res = await self.execute(instr); self._failures = 0; ok = True
         except Exception as e:
             res = str(e); self._failures += 1
+            # 任务16（docs/arch_phase2_tasks15_16_17.md）：网络/Redis 连接类异常
+            # → 可重试（换时刻就可能好）；其余（逻辑/解析错误）→ 不可重试
+            # （与 worker_base.classify_step_retryable 同一规则；两套基类不互依，各自落地）
+            _exc_retryable = isinstance(e, (ConnectionError, TimeoutError,
+                                            redis.exceptions.ConnectionError,
+                                            redis.exceptions.TimeoutError))
             if self._failures >= self._max_failures:
                 await self._registry.register(self.agent_id, self.capabilities, "offline")
         finally:
@@ -243,6 +290,10 @@ class AsyncWorkerBase(ABC):
             self._active -= 1; await self._update()
             result_msg = {"task_id": tid, "agent_id": self.agent_id,
                           "status": "SUCCESS" if ok else "FAILED", "result": res}
+            # 任务16：可重试性作为**兄弟字段**上行（与 search_status 同一先例），
+            # 编排器 `_step_retryable` 读它决定是否重试；不带该字段=旧行为
+            if not ok and _exc_retryable is not None:
+                result_msg["retryable"] = bool(_exc_retryable)
             gaps = getattr(self, "_context_gaps", None) or []
             if gaps:
                 # 兼容缺口随结果回传（可观测），不只写在日志里

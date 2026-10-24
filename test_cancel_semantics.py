@@ -1055,9 +1055,9 @@ class TestWorkerPermitGate(unittest.TestCase):
         # 只替换"真正执行"与"真正发布"两处 I/O
         dbl = _WorkerDouble()
         w.execute = dbl.execute
-        w._publish_result = lambda tid, status, result: dbl.published.append(
+        w._publish_result = lambda tid, status, result, **_kw: dbl.published.append(
             {"task_id": tid, "status": status, "result": result})
-        w._publish_failure = lambda tid, err: dbl.published.append(
+        w._publish_failure = lambda tid, err, **_kw: dbl.published.append(
             {"task_id": tid, "status": "FAILED", "result": err})
         return w, dbl
 

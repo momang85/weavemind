@@ -52,3 +52,18 @@ export function actionableTone(state?: string): 'ok' | 'warn' | 'bad' | 'idle' {
       return 'idle'
   }
 }
+
+/** P0-6：分析接口已判定"这份交付现在做不了某某复核"时，返回**后端原文**供醒目提示。
+ *
+ *  实机反例：`/api/task/<id>/analysis` 返回
+ *  `ok:false, next_action:'material'`，reason 写明「该任务没有可复算输入（analysis/dataset.json），
+ *  且工作区没有本次任务的事实来源…无法离线补算。要么补一份披露材料（材料页→补材料），要么重跑研究…」，
+ *  但这行字此前只以小号灰字埋在分析工作台底部——“没有可复算输入”这件事被读成"界面没做"。
+ *  这里只做一件事：把后端 reason 原样取出来给页面显式展示（不改写、不翻译、不编）。
+ *  返回空串 = 没有需要醒目标注的阻塞原因。 */
+export function analysisBlockReason(
+  data?: { ok?: unknown; reason?: unknown } | null,
+): string {
+  if (!data || data.ok !== false) return ''
+  return String(data.reason ?? '').trim()
+}

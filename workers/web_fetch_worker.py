@@ -140,6 +140,28 @@ class WebFetchWorker(AsyncWorkerBase):
     _class_capabilities = ["web_fetch"]
     _needs_task = True          # 需要任务载荷（PDF 原始字节要落到任务工作区工件目录）
 
+    @staticmethod
+    def _fetch_exc_retryable(exc: BaseException) -> bool:
+        """任务16：抓取通道异常 → 本步是否值得重试（随失败 JSON 上行）。
+
+        net_policy 的拒绝分两类，语义相反，不能一刀切：
+        - `NetworkPolicyError`（URL 无法解析/协议不允许/非公网/出口拒签）：
+          **确定性结论**，重试只会再拿到同一句拒绝 → False；
+        - `FetchError`（连接失败/超时/截止用尽）与连接/超时类 OSError：**瞬时**
+          → True（换时刻就可能好）；
+        其余（导入/逻辑类异常）→ False（非网络类）。
+        """
+        try:
+            import net_policy
+        except Exception:                       # noqa: BLE001 - 策略层不可用按兜底判
+            net_policy = None
+        if net_policy is not None:
+            if isinstance(exc, net_policy.NetworkPolicyError):
+                return False
+            if isinstance(exc, net_policy.FetchError):
+                return True
+        return isinstance(exc, (ConnectionError, TimeoutError, OSError))
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         # X0（10-02 实测）：**优先消费显式选定的 URL**。派发步骤会写 `[URL: …]` 标记，
         # 而目标文本里往往还带着"参考 PDF 直链 + 中文尾句"——旧实现取整条指令里**第一个**
@@ -151,7 +173,9 @@ class WebFetchWorker(AsyncWorkerBase):
             urls = [u for u in urls if u]
             url = urls[0] if urls else ""
         if not url:
-            return json.dumps({"status": "failed", "error": "No URL found in instruction"}, ensure_ascii=False)
+            # 任务16：指令里没有 URL 是**载荷问题**，重发同样空 → 不可重试
+            return json.dumps({"status": "failed", "retryable": False,
+                               "error": "No URL found in instruction"}, ensure_ascii=False)
         # 批次3-2：抓取走**现有文档接入契约**（`net_policy.fetch_document`）——
         # 协议/主机/解析后 IP 边界校验、**连接使用已验 IP**（防 DNS rebinding）、
         # 不跟随重定向、字节上限与审计都在那一层；本 worker 不再自己发裸请求。
@@ -165,7 +189,10 @@ class WebFetchWorker(AsyncWorkerBase):
                                                  "download" if looks_like_pdf(url) else "text"),
                                              max_bytes=net_policy.MAX_BODY_BYTES)
         except Exception as exc:                 # noqa: BLE001 - 策略拒绝/抓取失败都如实报
-            return json.dumps({"status": "failed", "error": str(exc)[:300]},
+            # 任务16：策略拒绝（确定性）→ 不可重试；连接失败/超时（瞬时）→ 可重试
+            return json.dumps({"status": "failed",
+                               "retryable": self._fetch_exc_retryable(exc),
+                               "error": str(exc)[:300]},
                               ensure_ascii=False)
         raw = bytes(resp.get("raw") or b"")
         status = int(resp.get("status") or 0)
@@ -173,8 +200,11 @@ class WebFetchWorker(AsyncWorkerBase):
         # 正文（"页面不存在"）照样包装成 `status: success`，于是"抓到了"进快照、
         # 还触发第二次无效重抓。这里如实判失败并把状态码带出来（下游按缺口处理）。
         if status and not (200 <= status < 300):
+            # 任务16：4xx/3xx 是确定性结果（重试同样不可用/同样不跟跳转）→ 不可重试；
+            # 5xx 是服务端瞬时故障 → 可重试
             return json.dumps({
                 "status": "failed",
+                "retryable": bool(status >= 500),
                 "url": url,
                 "http_status": status,
                 "error": f"HTTP {status}：该地址不可用（按缺口处理，不当作抓取成功）",

@@ -93,6 +93,36 @@ def _to_yi(raw) -> float | None:
     return round(v / 1e8, 2)
 
 
+def _yuan_exact(raw):
+    """原始元值 → **全精度**数（整数优先；NaN/Infinity 拒收，不默认补值）。
+
+    RC2-F4：`_to_yi` 的亿元两位小数是**展示**契约；计算数据必须能回到原始元金额，
+    所以数值规范化保留全精度（123456789 元就是 123456789，不是 123000000）。"""
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    whole = int(value)
+    return whole if whole == value else value
+
+
+# 金额科目 → 原始 API 字段（单位：元）；`amounts_yuan` 用它做全精度提取
+_AMOUNT_FIELDS = {
+    "revenue": "TOTALOPERATEREVE",
+    "net_profit": "PARENTNETPROFIT",
+    "gross_profit": "MLR",
+    "operating_profit": "OPERATE_PROFIT_PK",
+    "total_assets": "TOTAL_ASSETS_PK",
+    "total_liabilities": "LIABILITY",
+    "operating_cashflow": "NETCASH_OPERATE_PK",
+    "rd_expense": "RDEXPEND",
+}
+
+
 def _declare_consolidated(rows: list, field: str, label: str) -> tuple[str, str]:
     """按**来源自身的结构证据**声明报表口径，返回 `(caliber, evidence)`。
 
@@ -188,17 +218,27 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12,
     latest = rows[0] if rows else {}
     _cal, _cal_ev = _declare_consolidated(annuals, "HOLDER_PROFIT",
                                           "股东应占溢利/归母净利润")
+    # G4（2026-10-24 复核）：源响应没有 CURRENCY 就**保持未知**，不默认 HKD——
+    # 此前缺币种时静默写成 HKD，观察层看起来像"已声明币种"，实际是适配器猜的；
+    # 消费方（facts/dataset）按既有规则把空币种记 unknown，才是"不编造"。
+    currency = str(latest.get("CURRENCY") or "").strip()
     metadata = {
         "source": "eastmoney_datacenter",
         "company": str(company or latest.get("SECURITY_NAME_ABBR") or ""),
         "stock_code": str(stock_code),
-        "currency": str(latest.get("CURRENCY") or "HKD"),
+        "currency": currency,
         "unit": "亿元",
         "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "annual_count": len(annuals),
         "period": str(period or "annual"),
         "latest_report": f"{str(latest.get('REPORT_DATE') or '')[:10]} {latest.get('REPORT_TYPE')}",
     }
+    if not currency:
+        metadata["currency_source"] = "unknown"
+        metadata["currency_note"] = ("源响应未声明 CURRENCY：币种保持未知，"
+                                     "不默认 HKD/CNY（不猜、不补默认）")
+    else:
+        metadata["currency_source"] = "source_CURRENCY"
     if _cal:
         metadata["caliber"] = _cal
         metadata["caliber_evidence"] = _cal_ev
@@ -234,12 +274,28 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
         year = int(str(r.get("REPORT_DATE") or "")[:4])
         revenue = _to_yi(r.get("TOTALOPERATEREVE"))
         gross = _to_yi(r.get("MLR"))
+        amounts_yuan = {}
+        for key, field in _AMOUNT_FIELDS.items():
+            exact = _yuan_exact(r.get(field))
+            if exact is not None:
+                amounts_yuan[key] = exact
         financials.append({
             "year": year,
             "report_date": str(r.get("REPORT_DATE") or "")[:10],
             "report_type": str(r.get("REPORT_TYPE") or ""),
             # 公告日期（NOTICE_DATE）：事实的"披露时间"证据，与报告期末区分开
             "disclosure_date": str(r.get("NOTICE_DATE") or "")[:10],
+            # RC2-F3：**源响应自身**的主体身份（SECUCODE/SECURITY_CODE），
+            # 消费方必须与请求代码核对一致才入库，不以请求参数替换源身份
+            "source_subject": {
+                "code": str(r.get("SECUCODE") or "").strip().upper(),
+                "security_code": str(r.get("SECURITY_CODE") or ""),
+                "name": str(r.get("SECURITY_NAME_ABBR") or ""),
+            },
+            # RC2-F4：全精度元金额（计算数据用这个；亿元值只作展示）
+            "amounts_yuan": amounts_yuan,
+            "normalization": {"version": "amount_yuan/1", "source_amount_unit": "元",
+                              "display_unit": "亿元", "display_round": 2},
             "revenue": revenue,
             "net_profit": _to_yi(r.get("PARENTNETPROFIT")),
             "gross_profit": gross,
@@ -258,17 +314,31 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
     latest = rows[0] if rows else {}
     _cal, _cal_ev = _declare_consolidated(annuals, "PARENTNETPROFIT",
                                           "归属于母公司股东的净利润")
+    # G4（2026-10-24 复核）：A 股表同样可能有行缺 CURRENCY；缺就是未知，
+    # 不默认 CNY——"看起来是人民币"不等于来源声明过币种。
+    currency = str(latest.get("CURRENCY") or "").strip()
     metadata = {
         "source": "eastmoney_ashare",
         "company": str(company or latest.get("SECURITY_NAME_ABBR") or ""),
         "stock_code": str(stock_code),
-        "currency": str(latest.get("CURRENCY") or "CNY"),
+        "currency": currency,
         "unit": "亿元",
         "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "annual_count": len(annuals),
         "period": str(period or "annual"),
         "latest_report": f"{str(latest.get('REPORT_DATE') or '')[:10]} {latest.get('REPORT_TYPE')}",
+        # RC2-F4：金额规范化的版本与单位声明（全精度元 + 亿元展示契约分开）——
+        # 与币种无关：`amounts_yuan` 全精度保留、`display_unit` 只描述展示单位（G4）。
+        "normalization_version": "amount_yuan/1",
+        "amount_unit": "元",
+        "display_unit": "亿元",
     }
+    if not currency:
+        metadata["currency_source"] = "unknown"
+        metadata["currency_note"] = ("源响应未声明 CURRENCY：币种保持未知，"
+                                     "不默认 CNY/HKD（不猜、不补默认）")
+    else:
+        metadata["currency_source"] = "source_CURRENCY"
     if _cal:
         metadata["caliber"] = _cal
         metadata["caliber_evidence"] = _cal_ev

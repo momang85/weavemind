@@ -1,0 +1,350 @@
+{
+ "task": "ui-cc853cf86b",
+ "conversation": "conv-4042f41a6f",
+ "date": "2026-10-20",
+ "materials_index": {
+  "items": 1
+ },
+ "selection": {
+  "schema": "weavemind.analysis_selection/1",
+  "updated_at": "2026-10-20T20:12:12",
+  "adopted_identity": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9",
+  "note": "分析工作台显式选择",
+  "entries": [
+   {
+    "model_id": "scenario_sensitivity",
+    "run_id": "a200c599638c33112b53dcb1d354f3f9ee148c62131756aa2edc59185fcfaf1e",
+    "dataset_hash": "ca98a4d287cd8636650b43f2d654e0eada3f91ea65fbd3f11b42e187ed403742",
+    "params_hash": "87873bb30fd2defc",
+    "params": {
+     "revenue_growth": 0.1
+    },
+    "rules_version": "validation/1.1.0",
+    "selected_at": "2026-10-20T20:11:32",
+    "output_ids": [
+     "a200c599638c-00-scenario_net_profit",
+     "a200c599638c-01-scenario_sensitivity",
+     "a200c599638c-02-collection_days_capital_per_day",
+     "a200c599638c-03-collection_days_sensitivity_10d",
+     "a200c599638c-04-margin_threshold_to_hold_base_profit",
+     "a200c599638c-05-margin_gap_to_threshold_pp",
+     "a200c599638c-06-revenue_growth_to_hold_target"
+    ]
+   }
+  ]
+ },
+ "dataset": {
+  "schema": "weavemind.analysis_inputs/1",
+  "dataset_hash": "ca98a4d287cd8636650b43f2d654e0eada3f91ea65fbd3f11b42e187ed403742",
+  "source": null,
+  "contract": null
+ },
+ "runs_on_disk": {
+  "file_present": false,
+  "count": 0
+ },
+ "api_analysis": {
+  "adopted_identity": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+  "current_package": "deliverables_20261020_204948_375af7.zip",
+  "can_freeze": false,
+  "next_action": "recompute",
+  "selection": {
+   "schema": "weavemind.analysis_selection/1",
+   "entries": [
+    {
+     "model_id": "scenario_sensitivity",
+     "run_id": "a200c599638c33112b53dcb1d354f3f9ee148c62131756aa2edc59185fcfaf1e",
+     "dataset_hash": "ca98a4d287cd8636650b43f2d654e0eada3f91ea65fbd3f11b42e187ed403742",
+     "params_hash": "87873bb30fd2defc",
+     "rules_version": "validation/1.1.0",
+     "selected_at": "2026-10-20T20:11:32",
+     "question": null,
+     "state": "ok",
+     "why": "",
+     "params": {
+      "revenue_growth": 0.1
+     },
+     "output_ids": [
+      "a200c599638c-00-scenario_net_profit",
+      "a200c599638c-01-scenario_sensitivity",
+      "a200c599638c-02-collection_days_capital_per_day",
+      "a200c599638c-03-collection_days_sensitivity_10d",
+      "a200c599638c-04-margin_threshold_to_hold_base_profit",
+      "a200c599638c-05-margin_gap_to_threshold_pp",
+      "a200c599638c-06-revenue_growth_to_hold_target"
+     ]
+    }
+   ],
+   "adopted_identity": "d290ab012e54f639ac84d089a873b22dcbe0d337ab9eeb4056ed562e9534dbd9",
+   "ok": true,
+   "stale": []
+  },
+  "models": [
+   {
+    "id": "profit_bridge",
+    "label": "本期归母净利润的变化由哪些金额项构成、各贡献多少、还有多少未解释",
+    "ran": true,
+    "allowed_params": {
+     "rounding": [
+      "yi_2",
+      "yuan_2"
+     ]
+    },
+    "default_params": {}
+   },
+   {
+    "id": "operating_drivers",
+    "label": "利润变化有多少来自收入规模、毛利率，多少来自费用/税项/非经营项目；分产品与分地区各自贡献多少；还有多少未解释",
+    "ran": true,
+    "allowed_params": {
+     "rounding": [
+      "yuan_2",
+      "yi_2"
+     ]
+    },
+    "default_params": {}
+   },
+   {
+    "id": "cash_reconciliation",
+    "label": "合并净利润到经营活动现金流之间，由哪些披露调节项支撑或拖累",
+    "ran": true,
+    "allowed_params": {
+     "rounding": [
+      "yuan_2",
+      "yi_2"
+     ]
+    },
+    "default_params": {}
+   },
+   {
+    "id": "cash_quality",
+    "label": "本期利润有没有转成现金、差额集中在哪里",
+    "ran": true,
+    "allowed_params": {
+     "rounding": [
+      "yi_2",
+      "yuan_2"
+     ]
+    },
+    "default_params": {}
+   },
+   {
+    "id": "working_capital",
+    "label": "占款增加在哪里、周转如何变化",
+    "ran": false,
+    "allowed_params": {
+     "days_in_year": [
+      365,
+      360
+     ],
+     "rounding": [
+      "yi_2",
+      "yuan_2"
+     ]
+    },
+    "default_params": {}
+   },
+   {
+    "id": "scenario_sensitivity",
+    "label": "在哪些假设下利润或现金承压、哪种假设最敏感",
+    "ran": true,
+    "allowed_params": {
+     "revenue_growth": [
+      -0.5,
+      0.5
+     ],
+     "gross_margin_delta": [
+      -0.3,
+      0.3
+     ],
+     "expense_change_ratio": [
+      -0.5,
+      0.5
+     ],
+     "rounding": [
+      "yi_2",
+      "yuan_2"
+     ],
+     "below_gross_mode": [
+      "fixed",
+      "detail"
+     ],
+     "tax_rate": [
+      0.0,
+      0.5
+     ],
+     "minority_share": [
+      0.0,
+      0.3
+     ],
+     "target_net_profit": [
+      0.0,
+      1000000000000000.0
+     ]
+    },
+    "default_params": {
+     "revenue_growth": 0.05,
+     "gross_margin_delta": 0.01,
+     "expense_change_ratio": 0.0
+    }
+   },
+   {
+    "id": "cash_pressure",
+    "label": "同一收入/毛利情景下，回款与库存天数变化会额外占用多少资金",
+    "ran": false,
+    "allowed_params": {
+     "revenue_growth": [
+      -0.5,
+      0.5
+     ],
+     "gross_margin_delta": [
+      -0.3,
+      0.3
+     ],
+     "collection_days_delta": [
+      -365.0,
+      365.0
+     ],
+     "inventory_days_delta": [
+      -365.0,
+      365.0
+     ],
+     "days_in_year": [
+      360,
+      365
+     ],
+     "rounding": [
+      "yi_2",
+      "yuan_2"
+     ]
+    },
+    "default_params": {
+     "revenue_growth": 0.0,
+     "gross_margin_delta": 0.0,
+     "collection_days_delta": 10,
+     "inventory_days_delta": 10
+    }
+   },
+   {
+    "id": "profit_to_cash",
+    "label": "本期利润增长是否转化为现金、哪些因素尚未解释",
+    "ran": true,
+    "allowed_params": {
+     "rounding": [
+      "yi_2",
+      "yuan_2"
+     ]
+    },
+    "default_params": {}
+   }
+  ]
+ },
+ "api_cards": [
+  {
+   "model_id": "profit_bridge",
+   "title": "归母净利润变化",
+   "status": null,
+   "run_id": "2cc5d284626e"
+  },
+  {
+   "model_id": "operating_drivers",
+   "title": "归母净利润变化",
+   "status": null,
+   "run_id": "dfb597b121b5"
+  },
+  {
+   "model_id": "cash_reconciliation",
+   "title": "净利润到经营现金流的调节（2024年）",
+   "status": null,
+   "run_id": "0cf7e4868321"
+  },
+  {
+   "model_id": "profit_to_cash",
+   "title": "两期归母净利润变化（= 毛利端变化 + 毛利线以下净额变化）",
+   "status": null,
+   "run_id": "315f12701938"
+  },
+  {
+   "model_id": "cash_quality",
+   "title": "经营现金流 − 归母净利润",
+   "status": null,
+   "run_id": "9a0e46cbabe9"
+  },
+  {
+   "model_id": "scenario_sensitivity",
+   "title": "情景归母净利润（假设成立时）",
+   "status": null,
+   "run_id": "a200c599638c"
+  }
+ ],
+ "candidate": {
+  "status": "candidate_ready",
+  "candidate_version_id": "0699a73bb88f4ae590c29968b346a614a34b21d606b05538e226af0a9999815a",
+  "candidate_identity_id": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+  "parent_version_id": "fd0514364e5b7df2f166caa856b174ea509fb79bacf4c22d3df5a7cc8986fa8c",
+  "candidate_bytes": 55761,
+  "adopted": false,
+  "requires_explicit_adoption": true,
+  "old_approval_inherited": false,
+  "material_fingerprint": "09b21df2cef24fd85b4efa625579138241ae1de4fa7ad4f2c9fcef0c694a0d1a",
+  "contract_fingerprint": "",
+  "generation": {
+   "mode": "deterministic_assembly",
+   "paid": false,
+   "model_called": false
+  },
+  "acceptance_overall": "pass"
+ },
+ "version_store": {
+  "selected": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+  "selected_at": 1792499609.1118793,
+  "versions": 6
+ },
+ "adopted_entries": [
+  {
+   "identity": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+   "version_id": "0699a73bb88f4ae590c29968b346a614a34b21d606b05538e226af0a9999815a",
+   "adopted": true,
+   "reason": "候选正文显式采纳（页面动作）",
+   "acceptance_overall": "pass"
+  }
+ ],
+ "acceptance_now": null,
+ "package": {
+  "name": "deliverables_20261020_204948_375af7.zip",
+  "bytes": 5717706,
+  "sha256": "c8005aaaa7ca1eaf657c37679ba9bab31b3e02e0edbc818a273f0ad485dfb8e9",
+  "members": 23,
+  "manifest": {
+   "schema": "weavemind.package/2",
+   "report_version_id": "23b61beeb37a719b4b13ffa3a55d8aa52d76b690f5eec149d590b6ade56a923b",
+   "delivered_md_sha256": "c3c2aa933f38f06313caf69ed99dc182c01d27266f965098539962a4e56f8858",
+   "research_body_sha256": "0699a73bb88f4ae590c29968b346a614a34b21d606b05538e226af0a9999815a",
+   "pdf_sha256": "bab6a95982d0b7581693e3ccba070a0809bc851fb68e6d3632f3ef7567815988",
+   "packaged_at": "2026-10-20T20:49:48",
+   "rules_version": "2026.10.16",
+   "drift": {
+    "evidence/citation_evidence.json": "missing_on_disk",
+    "analysis/analysis_runs.json": "changed_on_disk"
+   }
+  }
+ },
+ "md": {
+  "bytes": 56700,
+  "sha256": "c3c2aa933f38f06313caf69ed99dc182c01d27266f965098539962a4e56f8858",
+  "version_header": "23b61beeb37a719b (adopted identity)",
+  "research_body_sha256_16": "0699a73bb88f4ae5 (= candidate body)"
+ },
+ "pdf": {
+  "bytes": 5625071,
+  "sha256": "10501cb4264581cfec1ea6e40cb14a9a6fab06b6746c1d1087824a970a76ac35",
+  "pages": 20,
+  "readable": true,
+  "text_probe": {
+   "三一重工": true,
+   "情景": true,
+   "参考来源": true,
+   "免责声明": false
+  }
+ }
+}

@@ -3227,6 +3227,30 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertEqual(r["metadata_count"], len(metadata_numbers(report)))
         self.assertIn("定位元数据", r["details"])
 
+    def test_spec_examples_and_stock_code_not_financial_numbers(self):
+        """P1-3（20261021 复验）：写作规范示例与股票代码不进溯源分母。
+
+        真机反例（海天味业 2023–2024，2026-10-21）：数字溯源率 0%（0/6），
+        "不可溯源示例"是 603288（股票代码）、100%（公式常量）、288.76 亿元 与
+        2.88763（写作规范里的格式示例）——这些不是研究读数，把它们算进分母
+        制造了假缺口"报告未提供可溯源数值"。这里同时断言**真实读数不受影响**。
+        """
+        from acceptance_checker import extract_financial_numbers
+
+        text = (
+            "海天味业（603288）股票代码 603288。\n"
+            "同比变化的计算公式为（2024 年数值 − 2023 年数值）÷ 2023 年数值 × 100%。\n"
+            "所有金额统一以人民币亿元呈现，保留两位小数（例如「288.76 亿元」格式），"
+            "禁止使用科学计数法形式（如 2.88763e+10）。\n"
+            "2024 年营业收入 269.01 亿元，同比增长 9.98%。"
+        )
+        vals = [(n["value"], n["unit"]) for n in extract_financial_numbers(text)]
+        self.assertIn(("269.01", "亿元"), vals)   # 真实读数保留
+        self.assertIn(("9.98", "%"), vals)
+        self.assertNotIn(("603288", ""), vals)    # 股票代码（代码语境）
+        self.assertNotIn(("288.76", "亿元"), vals)  # 引号里的格式示例
+        self.assertNotIn(("100", "%"), vals)      # 公式常量（× 100%）
+
     def test_bare_number_keeps_boundary_after_thousands_separator(self):
         """无单位大数：来源写千分位且与相邻数字连排时仍要匹配，且不得跨值误配。
 
@@ -6004,7 +6028,10 @@ class TestLauncherSupervise(unittest.TestCase):
         )
 
     def test_start_respects_supervise_env(self):
-        """WEAVEMIND_SUPERVISE=1 时 start 进入守护模式，否则保持原状。"""
+        """任务21 起 WEAVEMIND_SUPERVISE 默认开启：未设置也进守护模式。
+
+        旧语义（=1 才守护）已翻转：task20 真机演练证实编排器/critic 崩溃后
+        无人重启；=0（off/false/no 同义）保留为显式关闭出口。"""
         launcher, tmp = self._setup()
         # 依赖自检与 Redis 预检走真实实现会拉起/探测本机 Redis —— 本用例只关心
         # supervise 分支，故一并隔离，保持测试无运行时副作用。
@@ -6018,6 +6045,7 @@ class TestLauncherSupervise(unittest.TestCase):
         sup.assert_called_once()
         start.assert_not_called()
 
+        # 未设置：任务21 起默认进守护模式
         env = dict(os.environ)
         env.pop("WEAVEMIND_SUPERVISE", None)
         with mock.patch.object(launcher, "_run_dependency_check"), \
@@ -6027,8 +6055,19 @@ class TestLauncherSupervise(unittest.TestCase):
                 mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
                 mock.patch.dict(os.environ, env, clear=True):
             launcher.main()
-        start2.assert_called_once()
-        sup2.assert_not_called()
+        sup2.assert_called_once()
+        start2.assert_not_called()
+
+        # WEAVEMIND_SUPERVISE=0：显式关闭，恢复一次性启动（CI/单测不需要守护）
+        with mock.patch.object(launcher, "_run_dependency_check"), \
+                mock.patch.object(launcher, "_check_redis_or_exit"), \
+                mock.patch.object(launcher, "supervise_services") as sup3, \
+                mock.patch.object(launcher, "start_services") as start3, \
+                mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
+                mock.patch.dict(os.environ, {"WEAVEMIND_SUPERVISE": "0"}, clear=False):
+            launcher.main()
+        start3.assert_called_once()
+        sup3.assert_not_called()
 
 
 class TestP0StatusHonesty(unittest.TestCase):

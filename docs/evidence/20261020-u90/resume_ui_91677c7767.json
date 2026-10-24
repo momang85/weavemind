@@ -1,0 +1,80 @@
+{
+ "task_id": "ui-91677c7767",
+ "status": "SUCCESS_WITH_ISSUES",
+ "created_at": "2026-10-18 06:27:29",
+ "updated_at": "2026-10-20 13:21:30",
+ "completed_at": "2026-10-20 13:21:30",
+ "phase": "完成",
+ "report_head": "> **研究状态：研究草稿／待补原始披露**——必答问题未完成（3/3）：收入变化的量价与结构依据、利润变化的分解、现金变化与利润覆盖的关系（其中部分覆盖 1 项：利润变化的分解[已取得部分构成]）；3 条肯定结论处于未证实状态（未支持/部分支持/待核查）（数字与格式的机器验收不因此改变；本条说的是**研究**是否就绪）\n\n---\n\n# 洋河股份 经营分析简报（[2024] 年度）\n\n**主体**：洋河股份（002304.SZ）　**期间**：[2024] 年度　**口径**：合并　**资料截止**：2025-04-30\n\n> 报表口径：合并；数据时效：截至 2025-04-30；单位：元。\n",
+ "steps": [
+  {
+   "step_id": "1",
+   "capability": "web_search",
+   "status": "SUCCESS",
+   "resumed": null
+  },
+  {
+   "step_id": "2",
+   "capability": "file_io",
+   "status": "SUCCESS",
+   "resumed": null
+  },
+  {
+   "step_id": "3",
+   "capability": "web_fetch",
+   "status": "FAILED",
+   "resumed": null
+  },
+  {
+   "step_id": "4",
+   "capability": "content_summary",
+   "status": "SUCCESS",
+   "resumed": null
+  },
+  {
+   "step_id": "5",
+   "capability": "report_generator",
+   "status": "SUCCESS",
+   "resumed": null
+  },
+  {
+   "step_id": "package-6",
+   "capability": "package",
+   "status": "SUCCESS",
+   "resumed": null
+  }
+ ],
+ "steps_total": 6,
+ "steps_success": 5,
+ "steps_resumed": 0,
+ "acceptance": {
+  "overall": "pass",
+  "score": null,
+  "gaps": [],
+  "checks_total": null
+ },
+ "orchestrator.log": [
+  "2026-10-20 21:21:21,776 [WARNING] report_brief: 直接法收支/营运资本补充资料读取失败（task=ui-91677c7767）：DatasetManifest.__init__() missing 2 required positional arguments: 'dataset_hash' and 'source_label'",
+  "2026-10-20 21:21:22,682 [INFO] delivery_pipeline: 研究简报装配（task=ui-91677c7767）：研究简报由代码装配（关键数据/来源/声明）；采用来源 2 条",
+  "2026-10-20 21:21:23,658 [WARNING] report_brief: 直接法收支/营运资本补充资料读取失败（task=ui-91677c7767）：DatasetManifest.__init__() missing 2 required positional arguments: 'dataset_hash' and 'source_label'",
+  "2026-10-20 21:21:24,551 [INFO] delivery_pipeline: 主文收束（task=ui-91677c7767）：移出 ## 业务背景、## 分析、### 字段位置与计算底稿、### 逐问题资料计划、### 完整指标表（其余指标）、### 比率适用条件、### 未解释变化的附注段落（原文）、### 其他核查项、### 待核查主张（未与底稿事实绑定）（3861 字符）",
+  "2026-10-20 21:21:24,552 [INFO] delivery_pipeline: 验收对象改为代码装配的候选稿（task=ui-91677c7767，10294→6620 字符）",
+  "2026-10-20 21:21:26,594 [INFO] delivery_pipeline: Acceptance(ui-91677c7767): overall=pass 验收通过",
+  "2026-10-20 21:21:27,488 [WARNING] report_brief: 直接法收支/营运资本补充资料读取失败（task=ui-91677c7767）：DatasetManifest.__init__() missing 2 required positional arguments: 'dataset_hash' and 'source_label'",
+  "2026-10-20 21:21:28,411 [INFO] delivery_pipeline: 结构投影按采纳正文重建（task=ui-91677c7767，来源 9a861fd39fa4→619159be1625）",
+  "2026-10-20 21:21:28,438 [INFO] delivery_pipeline: 交付装配（task=ui-91677c7767）：status=verified version=619159be1625",
+  "2026-10-20 21:21:28,488 [ERROR] __main__: Task ui-91677c7767 检索步降级（步骤 1）：终态按有缺口交付",
+  "2026-10-20 21:21:28,488 [INFO] __main__: 检索覆盖率（task=ui-91677c7767）：有效 0/1（0%），降级 1，零来源 0，未完成 0",
+  "2026-10-20 21:21:28,488 [ERROR] __main__: Task ui-91677c7767 completed with issues: acceptance=pass reflection_unavailable= llm_degraded={\"switches\": 0, \"reasons\": [\"unreachable\"], \"both_failed\": false, \"last_degradation_ts\": 1792501696.508, \"events\": [{\"ts\": 1792501696.5076015, \"reason\": \"unreachable\", \"both_failed\": false}]}",
+  "2026-10-20 21:21:28,491 [INFO] __main__: 准入结论（task=ui-91677c7767）：admitted=False verified=False 原因=['终态不是成功（SUCCESS_WITH_ISSUES）']",
+  "2026-10-20 21:21:29,549 [WARNING] __main__: Task ui-91677c7767 未通过经验准入，跳过策略沉淀：终态不是成功（SUCCESS_WITH_ISSUES）"
+ ],
+ "webui.log": [],
+ "workspace_packages": [
+  {
+   "name": "deliverables_20261020_212027.zip",
+   "bytes": 483290
+  }
+ ],
+ "workspace_files": 42
+}

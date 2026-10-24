@@ -850,6 +850,72 @@ def set_phase(task_id: str, phase: str, db_path: str | None = None) -> bool:
         return False
 
 
+def mark_resumed(task_id: str, db_path: str | None = None) -> bool:
+    """任务26（断点续跑）：把**可恢复终态 FAILED/CRASHED** 的任务原子翻回 RUNNING。
+
+    返回值 = 真实受影响行数 > 0：两个恢复入口（页面按钮/消息重放）竞争时，
+    只有翻成功的一方赢得重新接管权，另一方拿到 False 不得再起执行线程——
+    与 `mark_running` 同一条裁决语义。
+
+    CRASHED 不是状态机常态产出的状态（无对应常量），但恢复入口与既有的
+    stale-RUNNING 看护都可能写入它，恢复谓词与入口门槛保持一致（IN 查询）。
+    SUCCESS/SUCCESS_WITH_ISSUES/CANCELLED 是**不可逆终态**：用户明确拿到的
+    结论不得被静默改写。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            cur = con.execute(
+                "UPDATE task_history SET status=?, phase=?, completed_at=NULL,"
+                " updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=? AND status IN (?, 'CRASHED')",
+                (RUNNING, "恢复执行", task_id, FAILED),
+            )
+            won = int(cur.rowcount or 0) > 0
+            con.commit()
+            return won
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("任务 %s 恢复标记失败：%s", task_id, str(exc)[:200])
+        return False
+
+
+def mark_resume_undone(task_id: str, *, reason: str = "",
+                       db_path: str | None = None) -> bool:
+    """U90-R3：恢复**未能生效**时的回滚（RUNNING → FAILED），让用户能再点一次。
+
+    背景（架构师裁决 2026-10-20）：恢复入口先 CAS 翻 RUNNING 再发 `resume_task`；
+    发布失败时旧实现直接 503 而状态留在 RUNNING——用户重试拿到 409「只有失败的任务
+    可以恢复（当前 RUNNING）」，即**失败不可再次操作**，只能等看护线程按 stale
+    RUNNING 收口（分钟级）。这里把这次恢复的回滚做成一条 CAS：只回滚**本次恢复刚写
+    的标记**（`phase='恢复执行'`），编排器一旦接管（改了 phase / 状态）就不再回滚，
+    不覆盖任何真实进展。
+
+    返回 True = 真的回滚了（调用方才能如实告诉用户"可以再试"）。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            _reason = str(reason or "恢复未生效：通知编排器失败")[:200]
+            cur = con.execute(
+                "UPDATE task_history SET status=?, phase=?, completed_at=COALESCE("
+                "completed_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=? AND status=? AND phase=?",
+                (FAILED, "恢复未生效", task_id, RUNNING, "恢复执行"),
+            )
+            done = int(cur.rowcount or 0) > 0
+            con.commit()
+            if done:
+                logger.warning("任务 %s 恢复已回滚为 FAILED（%s）", task_id, _reason)
+            return done
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("任务 %s 恢复回滚失败：%s", task_id, str(exc)[:200])
+        return False
+
+
 def update_report(task_id: str, report: str, db_path: str | None = None) -> bool:
     """只改**交付正文**（人工复核修订用）：状态/步骤/日志/验收一律不动。
 
@@ -907,7 +973,8 @@ def update_delivery_projection(task_id: str, *, report: str = "",
         try:
             _add_missing_columns(con)
             row = con.execute(
-                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+                "SELECT status, acceptance_json FROM task_history WHERE task_id=?",
+                (task_id,)
             ).fetchone()
             cur_status = str(row[0] or "").upper() if row else ""
             _terminal = cur_status in (CANCELLED, FAILED)
@@ -917,8 +984,13 @@ def update_delivery_projection(task_id: str, *, report: str = "",
             sets = ["report=?", "updated_at=CURRENT_TIMESTAMP"]
             params: list = [str(report)]
             if acceptance is not None:
+                # 任务18：人工修订的摘要同样不得抹掉**同一份正文**的逐项证据
+                _prior_json = str(row["acceptance_json"] or "") if row is not None else ""
                 sets.append("acceptance_json=?")
-                params.append(json.dumps(acceptance, ensure_ascii=False))
+                params.append(json.dumps(
+                    _carry_acceptance_evidence(_prior_json, acceptance)
+                    if isinstance(acceptance, dict) else acceptance,
+                    ensure_ascii=False))
             if status and not _terminal:          # 终态任务**永不**改状态
                 sets.append("status=?")
                 params.append(str(status))
@@ -932,6 +1004,95 @@ def update_delivery_projection(task_id: str, *, report: str = "",
     except Exception as exc:
         logger.warning("任务 %s 交付投影写入失败：%s", task_id, str(exc)[:200])
         return False
+
+
+def save_acceptance_evidence(task_id: str, evidence: dict,
+                             db_path: str | None = None) -> bool:
+    """把**这一轮的验收证据**写进任务行（任务18）。
+
+    为什么还要一条单独的写入路径：验收发生在报告步骤里，`record_completion` 只在
+    **终态**写 `acceptance_json`，且写的是摘要（overall/gaps/rules_*）。任务若在验收
+    之后因别的步骤失败而没带验收摘要，或摘要本身不含逐项结论，事后就答不出
+    "当时哪条规则没过、按哪版规则判的"——失败任务恰恰最需要这份账。
+
+    纪律（设计文档硬约束）：
+    - 复用 `acceptance_json` / `rules_fingerprint` 两列，不新增列、不做迁移；
+    - 只 UPDATE：没有这一行（未入库的任务）就不写，返回 False，**不 INSERT**；
+    - 失败只 `logger.warning` 返回 False，绝不抛回流水线——验收证据是可见性，
+      不是交付的前置条件。
+    """
+    if not isinstance(evidence, dict) or not evidence:
+        return False
+    try:
+        blob = json.dumps(evidence, ensure_ascii=False)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 验收证据序列化失败：%s", task_id, str(exc)[:160])
+        return False
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            cur = con.execute(
+                "UPDATE task_history SET acceptance_json=?, rules_fingerprint=?,"
+                " updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
+                (blob, str(evidence.get("rules_fingerprint") or ""), task_id),
+            )
+            con.commit()
+            if not cur.rowcount:
+                logger.warning("任务 %s 验收证据未命中任务行（未落库）", task_id)
+                return False
+            return True
+        finally:
+            con.close()
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 验收证据写入失败：%s", task_id, str(exc)[:200])
+        return False
+
+
+def _carry_acceptance_evidence(prior_json: str, summary: dict) -> dict:
+    """终态摘要**不丢**已入库的逐项验收证据（任务18，配合 `record_completion`）。
+
+    只搬证据键（`checks` / `report_type` / `evaluated_at` / `score`），且必须是
+    **同一份正文**（`report_sha256` 相同）：正文换了（人工修订、换版重验）旧明细
+    就属于别的版本，不得冒充本版结论——与 `GET /api/task/<id>/acceptance` 里
+    `stale_file` 不返回旧 `checks` 的口径一致。
+    """
+    if not prior_json or not summary:
+        return summary
+    _keys = ("checks", "report_type", "evaluated_at", "score")
+    if any(k in summary for k in _keys):
+        return summary
+    try:
+        prior = json.loads(prior_json)
+    except Exception:                                 # noqa: BLE001 - 坏 JSON 当没有
+        return summary
+    if not isinstance(prior, dict) or not prior.get("checks"):
+        return summary
+    _sha = str(summary.get("report_sha256") or "")
+    if not _sha or str(prior.get("report_sha256") or "") != _sha:
+        return summary
+    out = dict(summary)
+    for k in _keys:
+        if k in prior:
+            out[k] = prior[k]
+    return out
+
+
+def _acceptance_write_columns(row, summary: dict) -> tuple[str, str]:
+    """终态要写进 `acceptance_json` / `rules_fingerprint` 的值（任务18）。
+
+    - 摘要是空的（FAILED 终态常不带验收）：**保留**库里已有的证据，不写空串——
+      此前空摘要会把列覆盖成 `''`，等于把"这份报告当时验收结论是什么"抹掉；
+    - 摘要非空：同一正文时把逐项证据并进摘要（见 `_carry_acceptance_evidence`）；
+    - 指纹：摘要没带就沿用库里已有的，不写空。
+    """
+    prior_json = str(row["acceptance_json"] or "") if row is not None else ""
+    prior_fp = str(row["rules_fingerprint"] or "") if row is not None else ""
+    if not summary:
+        return prior_json, prior_fp
+    merged = _carry_acceptance_evidence(prior_json, summary)
+    return (json.dumps(merged, ensure_ascii=False),
+            str(merged.get("rules_fingerprint") or prior_fp))
 
 
 def _attempt_is_current(task_id: str, attempt_id: str) -> bool:
@@ -985,8 +1146,10 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
             _add_missing_columns(con)
             # 取消是**可持久终态**（M0-c）：迟到的 SUCCESS/FAILED 不得把它覆盖回去
             # （用户主动停止后又被"结果回来了"改写成成功，等于把停止当没发生）
+            # 任务18：连带读出现在库里的验收证据/指纹——终态摘要不得把它们抹掉
             row = con.execute(
-                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+                "SELECT status, acceptance_json, rules_fingerprint"
+                " FROM task_history WHERE task_id=?", (task_id,)
             ).fetchone()
             if row and str(row[0] or "") == CANCELLED and str(status or "") != CANCELLED:
                 # 返回 True：终态已经落定（CANCELLED），没有"写失败"这回事——
@@ -996,6 +1159,7 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
                     task_id, status,
                 )
                 return True
+            _acc_blob, _acc_fp = _acceptance_write_columns(row, acceptance)
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,report,steps_json,logs_json,"
@@ -1009,8 +1173,8 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
                 (task_id, goal, str(status or SUCCESS), report,
                  json.dumps(steps or [], ensure_ascii=False),
                  json.dumps((logs or [])[-200:], ensure_ascii=False),
-                 json.dumps(acceptance, ensure_ascii=False) if acceptance else "",
-                 str(acceptance.get("rules_fingerprint") or ""), "完成"),
+                 _acc_blob,
+                 _acc_fp, "完成"),
             )
             con.commit()
             return True
@@ -1217,6 +1381,11 @@ def task_projection(task_id: str, db_path: str | None = None) -> dict:
             steps = parsed if isinstance(parsed, list) else []
         else:
             logs = parsed if isinstance(parsed, list) else []
+    _acc = row.get("acceptance") or None
+    # 任务18：`acceptance_evidence` = 入库的**逐项验收证据**（checks / report_type /
+    # evaluated_at / score 等）。列里只有终态摘要（旧任务、或这一版没跑过验收）时
+    # 为 None——调用方据"空"判"没有证据"，不编。`acceptance` 的既有语义（终态摘要）不动。
+    _evidence = _acc if isinstance(_acc, dict) and _acc.get("checks") else None
     return {
         "task_id": task_id,
         "status": row.get("status") or "PENDING",
@@ -1226,7 +1395,8 @@ def task_projection(task_id: str, db_path: str | None = None) -> dict:
         "logs": logs,
         "project": row.get("project") or "",
         "revision": bool(row.get("revision")) if "revision" in row else False,
-        "acceptance": row.get("acceptance") or None,
+        "acceptance": _acc,
+        "acceptance_evidence": _evidence,
         "llm_degraded": row.get("llm_degraded") if "llm_degraded" in row else None,
         "phase": row.get("phase") or "",
         "rules_fingerprint": row.get("rules_fingerprint") or "",

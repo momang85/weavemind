@@ -2,10 +2,11 @@ import { useState } from 'react'
 import type { TaskNode } from '../stores/types'
 import { X, ChevronDown, ChevronUp } from 'lucide-react'
 import { stepStatusMeta } from '../lib/statusMeta'
+import { gateSkipReason, isGateSkipDisplay, GATE_SKIP_LABEL } from '../lib/stepSkip'
 
 const roleColors: Record<string, string> = {
-  planner: '#38bdf8', critic: '#c084fc', worker: '#6ee7b7',
-  memory: '#fbbf24', replan: '#fb923c', error: '#fca5a5',
+  planner: '#92702e', critic: '#77618b', worker: '#27715a',
+  memory: '#936719', replan: '#a85a28', error: '#b14539',
 }
 
 /** 结果字段的中文名：字段名直接给用户看等于没翻译（此前整块 Result 都是英文 JSON）。 */
@@ -17,6 +18,8 @@ const RESULT_LABELS: Record<string, string> = {
   url: '链接', urls: '链接', duration_ms: '耗时（毫秒）', tokens: 'token 数',
   cost_usd: '成本（美元）', replanned: '已重规划', ok: '是否成功', stage: '阶段',
   notes: '备注', warnings: '告警', capabilities: '能力', agent_id: '执行体',
+  // S1 门禁跳过（资料缺口）的结果字段：此前会把 gate_skipped 原样当英文键名展示
+  gate_skipped: '资料缺口跳过', result: '结果说明', elapsed_sec: '耗时（秒）',
 }
 
 /** 本机路径脱敏：交付与排查都不需要暴露发件机器的目录结构。保留末两段（仍可定位文件）。 */
@@ -68,7 +71,7 @@ function CollapsibleText({ text, limit = 200, className = '' }: { text: string; 
       </div>
       {long && (
         <button onClick={() => setOpen(!open)}
-          className="mt-1 flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
+          className="mt-1 flex items-center gap-1 text-xs text-brand hover:text-brand">
           {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           {open ? '收起' : `展开（${text.length} 字符）`}
         </button>
@@ -99,45 +102,53 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
   }
 
   return (
-    <div className="fixed right-0 top-0 z-50 h-full w-full overflow-y-auto border-l border-gray-700 bg-gray-900 p-4 shadow-2xl sm:w-96">
+    <div className="fixed right-0 top-0 z-50 h-full w-full overflow-y-auto border-l border-line-strong bg-surface p-4 shadow-2xl sm:w-96">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-lg font-bold text-white">步骤详情</h3>
-        <button onClick={onClose} className="text-gray-400 hover:text-white" aria-label="关闭">
+        <h3 className="text-lg font-bold text-ink">步骤详情</h3>
+        <button onClick={onClose} className="text-ink-muted hover:text-ink" aria-label="关闭">
           <X className="w-5 h-5" />
         </button>
       </div>
 
       {meta.agent_hatched && (
-        <div className="mb-3 px-2 py-1 bg-amber-500/20 text-amber-400 text-xs rounded-full inline-block">新物种</div>
+        <div className="mb-3 px-2 py-1 bg-amber-500/20 text-amber-700 text-xs rounded-full inline-block">新物种</div>
       )}
 
       {/* 基本信息 */}
       <div className="mb-4 space-y-3 text-sm">
         {node.step_id && (
           <div>
-            <div className="text-gray-400">步骤 ID</div>
-            <div className="text-white font-mono text-xs break-all">{node.step_id}</div>
+            <div className="text-ink-muted">步骤 ID</div>
+            <div className="text-ink font-mono text-xs break-all">{node.step_id}</div>
           </div>
         )}
         <div>
-          <div className="text-gray-400">能力</div>
-          <div className="text-white font-mono text-sm">{node.capability || 'goal'}</div>
+          <div className="text-ink-muted">能力</div>
+          <div className="text-ink font-mono text-sm">{node.capability || 'goal'}</div>
         </div>
         {node.agent_id && (
           <div>
-            <div className="text-gray-400">执行体</div>
-            <div className="text-white font-mono text-sm">{node.agent_id}</div>
+            <div className="text-ink-muted">执行体</div>
+            <div className="text-ink font-mono text-sm">{node.agent_id}</div>
           </div>
         )}
         <div>
-          <div className="text-gray-400">状态</div>
-          <div className={`font-mono text-sm font-semibold ${statusColor(node.status)}`}>{stepStatusMeta(node.status).label}</div>
+          <div className="text-ink-muted">状态</div>
+          <div className={`font-mono text-sm font-semibold ${statusColor(node.status)}`}>
+            {isGateSkipDisplay(node.status, node) ? GATE_SKIP_LABEL : stepStatusMeta(node.status).label}
+          </div>
+          {/* 资料缺口的说明：与“上游失败”跳过区分开（后端：不派发、登记 optional、不判红） */}
+          {isGateSkipDisplay(node.status, node) && (
+            <div className="text-amber-700/90 text-xs mt-1 leading-relaxed">
+              {gateSkipReason(node)}
+            </div>
+          )}
         </div>
         {(node.instruction || (node.name && node.id !== 'root')) && (
           <div>
-            <div className="text-gray-400">指令</div>
+            <div className="text-ink-muted">指令</div>
             <CollapsibleText text={redactPaths(node.instruction || node.name || '')}
-              limit={200} className="text-gray-200 text-xs leading-relaxed" />
+              limit={200} className="text-ink text-xs leading-relaxed" />
           </div>
         )}
       </div>
@@ -145,48 +156,48 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
       {/* 执行结果：白名单字段 + 中文名；本机路径已脱敏 */}
       {resultText && (
         <div className="mb-4">
-          <div className="text-gray-400 text-sm mb-1">执行结果</div>
+          <div className="text-ink-muted text-sm mb-1">执行结果</div>
           {node.result && node.result.replanned && (
-            <div className="mb-2 px-2 py-1 bg-amber-500/10 text-amber-400 text-xs rounded">
+            <div className="mb-2 px-2 py-1 bg-amber-500/10 text-amber-700 text-xs rounded">
               已改用替代步骤重规划
             </div>
           )}
           {rows.length > 0 ? (
-            <div className="space-y-2 rounded-lg bg-gray-800 p-3">
+            <div className="space-y-2 rounded-lg bg-surface-raised p-3">
               {rows.map(({ label, value }) => {
                 const summary = summarizeValue(value)
                 if (summary === null) return null
                 const isText = typeof value === 'string' && value.length > 80
                 return (
                   <div key={label}>
-                    <div className="text-gray-400 text-xs">{label}</div>
+                    <div className="text-ink-muted text-xs">{label}</div>
                     {isText ? (
                       <CollapsibleText text={redactPaths(summary)} limit={200}
-                        className="text-emerald-300 text-xs leading-relaxed" />
+                        className="text-emerald-700 text-xs leading-relaxed" />
                     ) : (
-                      <div className="text-emerald-300 text-xs break-all">{redactPaths(summary)}</div>
+                      <div className="text-emerald-700 text-xs break-all">{redactPaths(summary)}</div>
                     )}
                   </div>
                 )
               })}
             </div>
           ) : (
-            <pre className="text-xs text-emerald-300 bg-gray-800 rounded-lg p-3 max-h-72 overflow-y-auto whitespace-pre-wrap break-all">
+            <pre className="text-xs text-emerald-700 bg-surface-raised rounded-lg p-3 max-h-72 overflow-y-auto whitespace-pre-wrap break-all">
               {resultText.slice(0, 500)}
             </pre>
           )}
           <button onClick={() => setRawOpen(!rawOpen)}
-            className="mt-2 flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
+            className="mt-2 flex items-center gap-1 text-xs text-brand hover:text-brand">
             {rawOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             {rawOpen ? '收起原始 JSON' : '查看原始 JSON'}
           </button>
           {rawOpen && (
             <>
-              <pre className="mt-2 text-xs text-slate-300 bg-gray-950 rounded-lg p-3 max-h-72 overflow-y-auto whitespace-pre-wrap break-all">
+              <pre className="mt-2 text-xs text-ink bg-surface-sunken rounded-lg p-3 max-h-72 overflow-y-auto whitespace-pre-wrap break-all">
                 {resultText.slice(0, 4000)}
               </pre>
               {resultText.length > 4000 && (
-                <div className="text-xs text-slate-500 mt-1">结果过长，已截断前 4000 字符（完整结果见日志）</div>
+                <div className="text-xs text-ink-faint mt-1">结果过长，已截断前 4000 字符（完整结果见日志）</div>
               )}
             </>
           )}
@@ -196,13 +207,13 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
       {/* 决策轨迹 */}
       {(meta.planner_reasoning || meta.memory_injected || meta.critic_score || node.replanHistory) && (
         <div className="mb-4">
-          <div className="text-gray-400 text-sm mb-2">决策轨迹</div>
+          <div className="text-ink-muted text-sm mb-2">决策轨迹</div>
           <div className="space-y-3">
             {meta.planner_reasoning && <Bubble role="planner" text={redactPaths(meta.planner_reasoning)} />}
             {meta.memory_injected && <Bubble role="memory" text={'记忆注入：' + redactPaths(meta.memory_injected)} />}
             {meta.critic_score && <Bubble role="critic" text={'评审评分：' + meta.critic_score} />}
             {node.replanHistory && node.replanHistory.length > 0 && (
-              <div className="text-xs text-gray-500">
+              <div className="text-xs text-ink-muted">
                 重规划次数：{node.replanHistory.length}
               </div>
             )}
@@ -215,11 +226,11 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
 }
 
 function Bubble({ role, text }: { role: string; text: string }) {
-  const color = roleColors[role] || '#94a3b8'
+  const color = roleColors[role] || '#626760'
   return (
     <div className="flex items-start gap-2">
       <div className="w-2 h-2 mt-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
-      <div className="text-sm text-gray-300 bg-gray-800 rounded-lg px-3 py-2 flex-1 break-all">{String(text).slice(0, 300)}</div>
+      <div className="text-sm text-ink bg-surface-raised rounded-lg px-3 py-2 flex-1 break-all">{String(text).slice(0, 300)}</div>
     </div>
   )
 }

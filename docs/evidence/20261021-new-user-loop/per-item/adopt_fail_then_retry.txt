@@ -1,0 +1,15 @@
+﻿# 采纳动作：页面可见的失败→修正→重试成功（逐字，含时间）
+# 记录时间：2026-10-21 15:12—15:21（本地）；任务 ui-d59152ebb9；账号 u90new21（管理员）；真实浏览器页 http://localhost:8080/?task=ui-d59152ebb9
+# 操作方式：页面按钮「采纳这版」的真实 DOM click（evaluate 里 el.click()，走 React onClick）
+
+[第 1 次点击 · ~15:12:02] 所选运行 = 519c5db160f8（分析卡运行，页面标注「分析卡（已验证运行）：未进正文」）
+  页面文案（逐字）：
+  采纳未成立：采纳正文里找不到所选运行 519c5db160f8（选了新运行，正文却还是旧稿）。已回滚选择并保留旧的有效稿
+  服务端：POST /api/task/ui-d59152ebb9/analysis/adopt → 409 code=adopt_not_bound（web_ui 回滚分支：restore_selection + 重新采纳旧有效稿）
+  落库结果：analysis/selection.json → adopted_identity="" entries=[]；/analysis adopted_identity 回到 ea96713eef6c…（旧有效稿）
+
+[第 2 次点击 · ~15:19:40] 所选运行 = f478645b6722（该运行 12 位标识确实出现在 analysis/analysis_detail.md 偏移 5233）
+  页面文案（逐字）：
+  已采纳：报告身份 9751ef20b489；可导出当前包
+  运行芯片文案（逐字）：f478645b6722｜validated｜进正文｜2026-10-21T06:43:09
+  落库结果：analysis/selection.json → adopted_identity=9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13，entries=1（model_id=operating_drivers，run_id=f478645b6722…，output_ids=8 条，selected_at=2026-10-21T15:19:45，updated_at=2026-10-21T15:20:09）

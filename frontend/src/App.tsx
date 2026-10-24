@@ -19,10 +19,12 @@ const MemoryPage = lazy(() => import('./pages/Memory'))
 const EvalsPage = lazy(() => import('./pages/Evals'))
 const SkillsPage = lazy(() => import('./pages/Skills'))
 const ResearchStudyPage = lazy(() => import('./pages/ResearchStudy'))
+const StockScreenPage = lazy(() => import('./pages/StockScreen'))
+const CompanyPage = lazy(() => import('./pages/CompanyPage'))
 
 function PageFallback() {
   return (
-    <div className="flex items-center justify-center py-20 text-slate-500 text-sm">
+    <div className="flex items-center justify-center py-20 text-ink-faint text-sm">
       <Loader2 className="w-4 h-4 animate-spin mr-2" /> 页面加载中…
     </div>
   )
@@ -49,18 +51,18 @@ class ErrorBoundary extends Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-8">
-          <div className="bg-slate-900 border border-red-500/20 rounded-2xl p-8 max-w-md text-center space-y-4">
+        <div className="min-h-screen bg-surface-sunken flex items-center justify-center p-8">
+          <div className="bg-surface border border-red-500/20 rounded-2xl p-8 max-w-md text-center space-y-4">
             <div className="w-16 h-16 rounded-full bg-red-500/10 flex items-center justify-center mx-auto">
-              <AlertTriangle className="w-8 h-8 text-red-400" />
+              <AlertTriangle className="w-8 h-8 text-red-700" />
             </div>
-            <h2 className="text-slate-200 text-lg font-semibold">出错了</h2>
-            <p className="text-slate-500 text-sm">
+            <h2 className="text-ink text-lg font-semibold">出错了</h2>
+            <p className="text-ink-faint text-sm">
               {this.state.error?.message || '发生渲染异常'}
             </p>
             <button
               onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload() }}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-surface-raised hover:bg-line text-ink rounded-lg text-sm transition-colors"
             >
               <RefreshCw className="w-4 h-4" /> 重新加载
             </button>
@@ -125,6 +127,8 @@ export default function App() {
             <Route path="/evals" element={<EvalsPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/research-study" element={<ResearchStudyPage />} />
+            <Route path="/screen" element={<StockScreenPage />} />
+            <Route path="/screen/company" element={<CompanyPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/metrics" element={<MetricsPage />} />

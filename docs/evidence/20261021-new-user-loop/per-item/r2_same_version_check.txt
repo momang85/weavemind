@@ -1,0 +1,30 @@
+manifest.report_version_id : 9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13
+selection_binding          : {"present": true, "changed": false, "consistent": true, "from": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13", "to": "9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13", "verified_by": "already_bound", "reason": ""}
+pkg selection.adopted_identity : '9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13' entries=1
+ws   selection.adopted_identity : '9751ef20b489546be76da463f86fdad0e151a6fb04ffeb2d89a40d6deea2bb13' entries=1
+OK 548624914363d4eb analysis/analysis_cards.md
+OK 0cc1a65b01de6396 analysis/analysis_detail.md
+OK 2c742e0dee6730a9 analysis/analysis_runs.json
+OK 0e8940b5d4681cee analysis/context.json
+OK 843534ad2124ea43 analysis/dataset.json
+OK 6b9b9b203c6324ef analysis/plan.json
+OK 1295b3c63479f172 analysis/resilience_card.md
+OK 9c8723f3db71d42c analysis/selection.json
+OK 1abb27da78fe4267 audit/model_report_full_0cbdbac51d27e9de.md
+OK 1756747566f08179 audit/model_report_full_1aaff960d25f82e7.md
+OK 9582e07e1f23e68d audit/model_report_full_29bccdce791de700.md
+OK e7c14c59cfaa124e audit/model_report_full_2db1f8bab307c970.md
+OK d3628caeb2ca70a2 audit/model_report_full_42dde06812ee2763.md
+OK 73f7b705b47aeab5 audit/model_report_full_7ddcdc6b8fa3e6b5.md
+OK 350d74b0bc7261c6 audit/model_report_full_978c6deb58dd7409.md
+OK b3b92639ade37b08 audit/model_report_full_bd4da079fcd87199.md
+OK 116a69392f630c7b charts/chart_1.png
+OK 9593a1e0f54126f7 charts/chart_2.png
+OK 1d0c9a914e46c421 charts/chart_3.png
+OK ff796b27aa9fe90a evidence/citation_evidence.json
+OK 034112ed306c9ea1 reports/report.md
+OK 35c66f8098339744 reports/report.pdf
+OK 1bcc3ab6d7c7bf41 reports/report_body.md
+OK 1ef22d5c1be338d8 working_paper.csv
+OK 4e7bf712bac1930c working_paper.json
+ALL_HASHES_MATCH: True | frozen members: 25

@@ -3,7 +3,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { BarChart3, RefreshCw } from 'lucide-react'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { Card, ErrorState, SectionTitle, Skeleton, StatCard } from '../components/ui'
-import { formatDuration, formatUsd } from '../lib/format'
+import { formatLocalTime, formatUsd } from '../lib/format'
+import { CAPABILITY_ZH } from '../lib/agentLabel'
+import { latencyCardView } from '../lib/metricsLatency'
 import {
   METRICS_UNAVAILABLE_MESSAGE, MetricsView,
   metricsFailure, metricsInitial, metricsStart, metricsSuccess,
@@ -31,10 +33,16 @@ interface MetricsSummary {
   failure_rate?: number | null
   avg_latency_sec?: number
   p95_latency_sec?: number
+  /** 耗时样本数 + 口径原文（后端口径：只统计本进程启动后收到 elapsed_sec 的主终态任务） */
+  latency_sample_size?: number
+  latency_scope?: string
   cost_usd_total?: number
+  cost_usd_scope?: string
   critic?: { pass: number; fail: number }
   replan?: { total: number; success: number }
   alerts?: number
+  /** critic / replan / alerts 是进程内计数，口径原文由后端给出 */
+  process_counters_scope?: string
   by_capability?: Record<string, { success_rate: number }>
   search_health?: Record<string, unknown>
   /** 后端同一快照、同一范围（task_history 全表）的分类计数——前端只展示，不推断。 */
@@ -66,21 +74,25 @@ export default function MetricsPage() {
   const terminal = t?.terminal ?? 0
   // 成功率/失败率以终态为分母；无终态或统计不可用 → 显示"未知"，绝不显示 0% 或 100%
   const rate = (v?: number | null) => (typeof v === 'number' ? `${v}%` : '未知')
+  // S5：耗时样本只来自本 metrics 进程启动后收到 elapsed_sec 的主终态任务，
+  // 与这里的 terminal（task_history 全表）不是同一范围——卡片必须把这个口径写出来，
+  // 并在样本过少（P95 与均值同值）时说明"P95 未独立计算"，不让用户读成"分布很集中"。
+  const latency = latencyCardView(m, terminal)
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center gap-2">
-        <BarChart3 className="w-5 h-5 text-cyan-400" />
-        <h1 className="text-lg font-semibold text-slate-200">指标看板</h1>
-        {m?.timestamp && <span className="text-xs text-slate-500">更新于 {m.timestamp.slice(0, 19).replace('T', ' ')}</span>}
-        <button onClick={load} aria-label="刷新指标" className="ml-auto p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors">
+        <BarChart3 className="w-5 h-5 text-brand" />
+        <h1 className="text-lg font-semibold text-ink">指标看板</h1>
+        {m?.timestamp && <span className="text-xs text-ink-faint">更新于 {formatLocalTime(m.timestamp)}（本地时间）</span>}
+        <button onClick={load} aria-label="刷新指标" className="ml-auto p-1.5 rounded-lg bg-surface-raised text-ink-muted hover:text-ink transition-colors">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
       {error && (
         <ErrorState title="指标不可用" onRetry={load}
           description={lastOkAt
-            ? `${error}（上次成功刷新：${lastOkAt.slice(0, 19).replace('T', ' ')}——该快照不作为当前值）`
+            ? `${error}（上次成功刷新：${formatLocalTime(lastOkAt)}——该快照不作为当前值）`
             : error} />
       )}
       {loading && !m && (
@@ -105,22 +117,30 @@ export default function MetricsPage() {
               tone={available && terminal > 0 && (m.failure_rate ?? 0) > 0 ? 'failure' : 'default'}
               sub={available && terminal > 0 ? `失败 ${t?.failed ?? 0}/${terminal}` : '无终态任务'}
               hint={t && t.unknown > 0 ? `另有 ${t.unknown} 条状态未登记，未计入成功或失败` : undefined} />
-            <StatCard label="累计成本" value={formatUsd(m.cost_usd_total)}
-              sub={available ? `含进行中 ${t?.running ?? 0} 个任务` : undefined} />
+            {/* 口径：后端 cost_usd_total 取的是 Redis llm_usage_month 月度台账（与设置页「本月已用」同本账），
+                不是历史总额——旧标签「累计成本」会被读成"有史以来一共花了多少"。 */}
+            <StatCard label="本月累计成本" value={formatUsd(m.cost_usd_total)}
+              sub={available ? `含进行中 ${t?.running ?? 0} 个任务` : undefined}
+              hint={m.cost_usd_scope} />
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-            <StatCard label="平均耗时" value={available && terminal > 0 ? formatDuration(m.avg_latency_sec) : '—'}
-              sub={available && terminal > 0 ? `P95 ${formatDuration(m.p95_latency_sec)}` : '无终态任务'} />
-            <StatCard label="Critic 评审" value={`${m.critic?.pass ?? 0} 通过`} sub={`${m.critic?.fail ?? 0} 未通过`} />
-            <StatCard label="重规划" value={String(m.replan?.total ?? 0)} sub={`${m.replan?.success ?? 0} 成功`} />
-            <StatCard label="告警" value={String(m.alerts ?? 0)} />
+            <StatCard label="平均耗时" value={available ? latency.value : '未知'}
+              sub={available ? latency.sub : '统计不可用，不能按 0 计'}
+              hint={available ? latency.hint : undefined} />
+            <StatCard label="Critic 评审" value={`${m.critic?.pass ?? 0} 通过`}
+              sub={`${m.critic?.fail ?? 0} 未通过`}
+              hint={m.process_counters_scope} />
+            <StatCard label="重规划" value={String(m.replan?.total ?? 0)}
+              sub={`${m.replan?.success ?? 0} 成功`}
+              hint={m.process_counters_scope} />
+            <StatCard label="告警" value={String(m.alerts ?? 0)} hint={m.process_counters_scope} />
             <StatCard label="搜索源" value={m.search_health && Object.keys(m.search_health).length > 0 ? '已接入' : '—'} />
           </div>
           <Card>
             <SectionTitle title="各能力成功率"
               extra={t?.scope ? `统计范围：${t.scope}` : undefined} />
             {Object.keys(m.by_capability || {}).length === 0 && (
-              <div className="text-xs text-slate-500 leading-relaxed">
+              <div className="text-xs text-ink-faint leading-relaxed">
                 暂无数据：需要至少一次任务结束才会按能力类型统计。当前
                 {terminal > 0 ? `已有 ${terminal} 个终态任务，统计将随下次汇总刷新` : `没有终态任务（进行中 ${t?.running ?? 0}）`}。
               </div>
@@ -128,7 +148,7 @@ export default function MetricsPage() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {Object.entries(m.by_capability || {}).map(([cap, v]) => (
                 <div key={cap} className="border border-line rounded-lg p-3">
-                  <div className="text-xs text-ink-muted truncate">{cap}</div>
+                  <div className="text-xs text-ink-muted truncate" title={`能力标识：${cap}`}>{CAPABILITY_ZH[cap] || cap}</div>
                   <div className={`text-lg font-semibold mt-1 tabular-nums ${
                     v.success_rate >= 80 ? 'text-state-success' : v.success_rate >= 50 ? 'text-state-issue' : 'text-state-failure'
                   }`}>

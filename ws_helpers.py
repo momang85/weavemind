@@ -48,6 +48,19 @@ def push_progress(messaging, task_id: str, update_type: str, payload: dict) -> N
         logger.warning("push_progress failed for %s: %s", task_id, exc)
 
 
+def _now_local_iso() -> str:
+    """阶段事件的本地墙钟时间戳（带时区偏移）。
+
+    这里原来用 `time.strftime(..., time.gmtime())`：输出**裸 UTC、无偏移**，
+    而控制台日志里其余条目走 `OrchestratorV2._now_iso`（本地墙钟 + 偏移）。
+    于是同一屏的反思「开始/进行中/完成」三条比其它条目早 8 小时，且不带偏移
+    无法被前端识别成 UTC，用户读到的是错的时刻（20261022 实机复验 (c)）。
+    """
+    import datetime
+    return (datetime.datetime.now(datetime.timezone.utc).astimezone()
+            .isoformat(timespec="seconds"))
+
+
 def _phase_event(messaging, task_id: str, phase: str, state: str,
                  detail: str = "", attempt=None, elapsed: float | None = None) -> None:
     payload = {
@@ -56,7 +69,7 @@ def _phase_event(messaging, task_id: str, phase: str, state: str,
         "phase": str(phase),
         "state": state,
         "message": detail,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+        "timestamp": _now_local_iso(),
     }
     if attempt is not None:
         payload["attempt"] = attempt

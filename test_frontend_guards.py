@@ -113,15 +113,32 @@ class TestNoDeadDeclarations(unittest.TestCase):
         self.assertEqual(unused, [], f"这些颜色令牌零引用（死令牌）：{unused}")
 
 
+# 允许的"统一实现"入口：statusMeta / StatusBadge 本体，或**经 statusMeta 派生**的
+# 域文案模块（settingsText 只补"已提交入队"这类本域取值，其余委托 resultLabel）。
+# 下面 test_shared_text_modules_derive_from_status_meta 保证这个白名单不是后门。
+SHARED_STATUS_IMPLS = ("statusMeta", "StatusBadge", "settingsText")
+
+
 class TestStatusSemanticsUnified(unittest.TestCase):
     def test_status_bearing_files_use_shared_implementation(self):
         missing = []
         for rel in STATUS_BEARING:
             text = (SRC / rel).read_text(encoding="utf-8")
-            if not any(k in text for k in ("statusMeta", "StatusBadge")):
+            if not any(k in text for k in SHARED_STATUS_IMPLS):
                 missing.append(rel)
         self.assertEqual(missing, [],
-                         f"这些文件展示任务状态但没走统一实现（statusMeta/StatusBadge）：{missing}")
+                         "这些文件展示任务状态但没走统一实现"
+                         "（" + "/".join(SHARED_STATUS_IMPLS) + "）：" + str(missing))
+
+    def test_shared_text_modules_derive_from_status_meta(self):
+        """白名单里的域文案模块必须真的派生自 statusMeta，不得自成第二套映射。"""
+        p = SRC / "lib" / "settingsText.ts"
+        self.assertTrue(p.is_file())
+        src = p.read_text(encoding="utf-8")
+        # 扩展名可带 `.ts`（ESM 测试解析需要），两种写法都算派生
+        self.assertRegex(src, r"from '\./statusMeta(\.ts)?'",
+                         "settingsText 必须复用 statusMeta 的映射，不能另写一套状态文案")
+        self.assertIn("resultLabel(", src)
 
     def test_no_raw_status_enum_rendered_in_jsx_text(self):
         """禁止在 JSX 文本位直接渲染后端英文枚举（如 >{m.status}<）。"""
@@ -150,10 +167,17 @@ class TestK3AnalysisWorkbenchWiring(unittest.TestCase):
         self.assertIn("<AnalysisWorkbenchPanel", viewer)
 
     def test_panel_calls_the_recompute_and_adopt_endpoints(self):
+        # 读分析状态的 fetch 已抽到 lib/analysisState.ts（模块级缓存，供面板与导出面板共用），
+        # 所以断言面 = 面板 + 该模块：接口仍被调用、面板仍依赖它。
         src = self.PANEL.read_text(encoding="utf-8")
-        self.assertIn("/analysis/recompute", src, "面板没有接确定性复算接口")
-        self.assertIn("/analysis/adopt", src, "面板没有接显式采纳接口")
-        self.assertIn("/analysis`", src, "面板没有读分析状态（可用模型与允许改的假设）")
+        state_src = (SRC / "lib" / "analysisState.ts")
+        combined = src + "\n" + (state_src.read_text(encoding="utf-8")
+                                  if state_src.is_file() else "")
+        self.assertIn("/analysis/recompute", combined, "面板没有接确定性复算接口")
+        self.assertIn("/analysis/adopt", combined, "面板没有接显式采纳接口")
+        self.assertIn("/analysis`", combined, "面板没有读分析状态（可用模型与允许改的假设）")
+        self.assertIn("useAnalysisPanel", src,
+                      "面板必须通过共用的状态模块读分析（否则又会出现两套状态）")
 
     def test_panel_states_the_three_disciplines(self):
         src = self.PANEL.read_text(encoding="utf-8")
@@ -166,6 +190,75 @@ class TestK3AnalysisWorkbenchWiring(unittest.TestCase):
         src = self.PANEL.read_text(encoding="utf-8")
         self.assertIn("current_package", src,
                       "导出必须用「与采纳稿同版」的当前包（不得取最新 zip）")
+
+
+class TestU90RecoveryAndCompensateWiring(unittest.TestCase):
+    """U90-B/C（2026-10-20）：恢复入口与补算入口必须真的接到用户可见的组件上。
+
+    源文本闸门（必要不充分）：行为由 `test_task26_checkpointer`（恢复链路）、
+    `test_review_edit_api.TestAnalysisWorkbenchEndpoints`（补算接口）与真实浏览器
+    操作覆盖；这里挡"按钮又被摘掉"的回退。
+    """
+
+    CONSOLE = SRC / "components" / "console" / "ConsoleSideTabs.tsx"
+    PAGE = SRC / "pages" / "TaskConsole.tsx"
+    HISTORY = SRC / "pages" / "History.tsx"
+    PANEL = SRC / "components" / "AnalysisWorkbenchPanel.tsx"
+    RESUME_LIB = SRC / "lib" / "resume.ts"
+
+    def test_resume_entry_is_wired_on_console_and_history(self):
+        console = self.CONSOLE.read_text(encoding="utf-8")
+        self.assertIn("onResume", console, "控制台侧栏没有接恢复回调")
+        page = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn("requestResume", page, "任务页没有调用恢复请求库")
+        history = self.HISTORY.read_text(encoding="utf-8")
+        self.assertIn("requestResume", history, "历史页没有调用恢复请求库")
+        self.assertIn("resumeVisible", history, "历史页没有按可恢复条件显隐按钮")
+
+    def test_resume_lib_keeps_dedupe_and_error_passthrough(self):
+        src = self.RESUME_LIB.read_text(encoding="utf-8")
+        self.assertIn("resumeInFlight", src, "恢复请求缺在飞去重（防重复提交）")
+        self.assertIn("encodeURIComponent", src, "任务 id 未经编码就拼进 URL")
+
+    def test_resume_failure_stays_retryable_on_both_pages(self):
+        """U90-R3（10-20）：失败/超时回执不得把按钮永久禁用。
+
+        实测缺陷：503 之后 `resumeNote` 被写成失败文案，按钮 `disabled` 再不可点，
+        用户既看不到原因也不能重试。现在两个页面都必须走三态按钮态推导。
+        """
+        lib = self.RESUME_LIB.read_text(encoding="utf-8")
+        self.assertIn("resumeButtonState", lib, "恢复回执缺少按钮态推导（三态）")
+        self.assertIn("retryable", lib, "回执缺少「能否再试」字段")
+        self.assertIn("AbortController", lib, "POST 恢复缺少有界超时")
+        self.assertIn("正在请求恢复", lib, "缺少在途态文案")
+        history = self.HISTORY.read_text(encoding="utf-8")
+        console = self.CONSOLE.read_text(encoding="utf-8")
+        for name, src in (("History", history), ("ConsoleSideTabs", console)):
+            self.assertIn("resumeButtonState", src, f"{name} 未按三态渲染恢复按钮")
+            self.assertNotIn(
+                "disabled={!!resumeNote[", src,
+                f"{name} 仍用「有回执就禁用」的旧判定（失败不可重试）")
+        self.assertIn("timeout", lib, "超时回执与真实状态查询缺失")
+        self.assertIn("/task/", lib, "超时后未查询真实任务状态（防重复恢复）")
+
+    def test_freeze_compensate_button_is_wired_on_the_panel(self):
+        src = self.PANEL.read_text(encoding="utf-8")
+        self.assertIn("/analysis/freeze", src, "分析面板没有接补算入口")
+        self.assertIn("补算", src, "补算入口对用户不可见")
+
+    def test_scenario_models_are_selectable_for_param_editing(self):
+        """U90-C（10-20）："改一个情景参数"必须有真实入口，不能只列已有运行的模型。
+
+        情景模型（scenario_sensitivity/cash_pressure）注册了可改的情景参数，但本任务
+        可能还没算过它：模型选择器必须合并**注册模型**（含没算过的），且字符串选择型
+        参数（rounding/below_gross_mode）要渲染成候选下拉，而不是消失成不可改。
+        """
+        src = self.PANEL.read_text(encoding="utf-8")
+        self.assertIn("availableModels", src, "模型选择器没有合并注册模型清单")
+        self.assertIn("未算过", src, "没算过的模型没有如实标注")
+        self.assertIn("isChoiceParam", src, "选择型参数（字符串候选）没有单独处理")
+        self.assertIn("<select", src.split("editableKeys.map")[1],
+                      "选择型参数没有渲染成候选下拉")
 
 
 class TestL0BAnalysisSelectionWiring(unittest.TestCase):
@@ -466,10 +559,23 @@ class TestOverlaysEscapeTransformedAncestors(unittest.TestCase):
 
 
 class TestReportPageWiring(unittest.TestCase):
-    """报告页必须渲染后端**早就在返回**的证据字段（F3a 之前这些字段一个都没上屏）。"""
+    """报告页必须渲染后端**早就在返回**的证据字段（F3a 之前这些字段一个都没上屏）。
+
+    说明：结论卡的取表/卡头逻辑已抽到 `frontend/src/lib/topStats.ts`（纯函数、可单测）。
+    守卫的意图是"这件事在产品里被实现了"，不是"必须写在某一个文件里"，所以断言面
+    包含页面本身 **与其抽取模块**；抽走实现不该让守卫误报，也不该让它失效。
+    """
+
+    def _impl_text(self) -> str:
+        parts = [(SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")]
+        for extra in ("lib/topStats.ts", "lib/reportStats.ts"):
+            p = SRC / extra
+            if p.is_file():
+                parts.append(p.read_text(encoding="utf-8"))
+        return "\n".join(parts)
 
     def setUp(self):
-        self.text = (SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")
+        self.text = self._impl_text()
 
     def test_traceability_fields_rendered(self):
         for field in ("covered_ratio", "amount_rate", "untraceable", "unverifiable_count"):

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useTaskStore } from './useTaskStore'
+import { stepDisplayStatus, stepLogStyle } from '../lib/stepSkip'
 
 /**
  * T11 双通道收敛：任务实时更新统一入口。
@@ -75,7 +76,8 @@ export function useTaskLive(taskId: string | null) {
         iteration: s.iteration || 0,
         capability: s.capability || '',
         name: s.instruction || s.name || 'Step',
-        status: (s.result?.status || 'pending').toLowerCase(),
+        // 显示状态：S1 门禁跳过（资料缺口）呈现为 skipped，真失败仍为 failed
+        status: stepDisplayStatus(s),
         children: [],
         agent_id: s.result?.agent_id || '',
         result: s.result || null,
@@ -120,12 +122,14 @@ export function useTaskLive(taskId: string | null) {
         if (seenLogs.current.has(logId)) return
         seenLogs.current.add(logId)
         const msg = (s.instruction || '').slice(0, 60)
+        // 门禁跳过不进红色 error 流（那是"失败"的颜色，与后端语义不符）
+        const style = stepLogStyle(s, st)
         addLog({
           id: logId,
           timestamp: new Date().toLocaleTimeString(),
-          type: st === 'success' ? 'dispatch' : 'error',
+          type: style.type,
           agent: s.capability || 'worker',
-          message: (st === 'success' ? 'Completed: ' : 'Failed: ') + msg,
+          message: style.prefix + msg,
         })
       })
 
@@ -142,13 +146,32 @@ export function useTaskLive(taskId: string | null) {
             successSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'success').length,
             failedSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'failed').length,
             duration: Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000)) },
-          steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: (s.result?.status||'pending').toLowerCase(), children: [] })),
+          steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: stepDisplayStatus(s), children: [] })),
           final_report: d.report || d.final_report || '',
           // 验收缺口：SUCCESS_WITH_ISSUES 任务的报告顶部展示
           acceptance: (d.acceptance && Array.isArray(d.acceptance.gaps))
             ? { overall: d.acceptance.overall || d.status, gaps: d.acceptance.gaps }
             : undefined,
         }
+        // P0-4/P1-8：SSE/快照里没有 export / elapsed_sec / search_coverage（快照是任务行投影，
+        // 不是任务页 payload）。不补这几项：导出面板读不到包名会误报"暂无交付包"，
+        // 统计条会把跑了 23 分钟的任务写成"耗时 0s"、拿不到检索降级数。
+        try {
+          const r2 = await fetch('/task/' + taskId)
+          if (r2.ok) {
+            const dd = await r2.json()
+            reportObj.export = dd.export ?? null
+            if (typeof dd.elapsed_sec === 'number') {
+              reportObj.elapsedSec = dd.elapsed_sec
+              reportObj.stats.duration = dd.elapsed_sec
+            }
+            reportObj.searchCoverage = dd.search_coverage ?? null
+            reportObj.research = dd.research ?? null
+            if (!reportObj.acceptance && dd.acceptance && Array.isArray(dd.acceptance.gaps)) {
+              reportObj.acceptance = { overall: dd.acceptance.overall || dd.status, gaps: dd.acceptance.gaps }
+            }
+          }
+        } catch { /* 任务详情读不到：导出面板按"文件逐个下载"的口径显示，不误报有包 */ }
         try {
           const dl = await (await fetch('/api/task/' + taskId + '/deliverables')).json()
           reportObj.files = (dl.files ?? []).map((f: any) => ({ name: f.name, size: f.size, kind: f.kind }))

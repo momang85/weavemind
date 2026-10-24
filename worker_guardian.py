@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -142,6 +143,9 @@ class WorkerGuardian:
         self._running = False
         self._shutting_down = False
 
+        # 任务20：Redis 探活的本地镜像（告警按**状态变化**发，不按心跳频率刷屏）
+        self._redis_degraded = False
+
         logger.info(
             "WorkerGuardian ready (mode=%s). "
             "Heartbeat timeout=%ds, quarantine=%d restarts / %ds, grace period=%.0fs",
@@ -163,6 +167,9 @@ class WorkerGuardian:
 
         # 注册 Guardian 自己的心跳
         self._publish_guardian_heartbeat()
+        # 任务20：启动即探一次 Redis——"起来才发现 Redis 不在"要在启动日志里留下结论，
+        # 而不是让检索在后续步骤里无声失效（launcher 只在**拉起服务前**自检一次）。
+        self._check_redis_health()
         # 任务6：启动即先回收一轮（上次宕机遗留的 RUNNING 不该永久滞留）
         self._reap_stuck_tasks()
 
@@ -183,6 +190,13 @@ class WorkerGuardian:
             # Guardian 自身心跳
             if time.time() - last_guardian_hb >= GUARDIAN_HEARTBEAT_INTERVAL:
                 self._publish_guardian_heartbeat()
+                # 任务20：每次心跳探一次 Redis，恢复后自动退出降级模式（无需重启）
+                self._check_redis_health()
+                # 任务17：心跳顺带读 metrics 汇总的 routing_health，
+                # 能力×执行者错配 → 发 capability_routing_mismatch 告警
+                self._check_routing_health()
+                # 任务23：心跳顺带看 LLM 端点熔断（本进程 + worker 镜像）→ llm_circuit_open
+                self._check_llm_circuit()
                 last_guardian_hb = time.time()
                 # 任务6：每次心跳顺带回收 stuck 任务（超 task_timeout×1.5 → cancelled）
                 self._reap_stuck_tasks()
@@ -501,6 +515,142 @@ class WorkerGuardian:
             })
         except Exception:
             pass
+
+    def _check_redis_health(self) -> dict:
+        """任务20：Redis 探活（启动 + 每次心跳）→ 告警 / 降级标志 / 自动恢复。
+
+        为什么需要它：`launcher.py` 只在**拉起服务前**自检一次 Redis（不通过就拒绝启动），
+        但 Redis 在运行中崩溃没有任何人再看——worker 的 BRPOP 拿不到任务、编排器的
+        `lpush` 抛连接异常、webui 的检索/行情健康快照全读成"未知"，用户看到的只是
+        "任务失败了"。这里让**运行期宕机**立即可见，并在恢复后自动退出降级。
+
+        告警按**状态变化**发（不可用持续期间不每 30s 刷一条）；注意告警通道本身就是
+        Redis，Redis 挂着时 `_alert` 发不出去——所以同时用 `logger.error` 落到本地日志，
+        日志才是那一刻唯一可靠的证据通道。
+
+        返回探测结果（`{available, latency_ms, error}`），失败不抛。
+        """
+        try:
+            import redis_health as rh
+        except Exception as exc:                        # noqa: BLE001 - 探活装不上不拦守护
+            logger.warning("Redis 探活不可用：%s", str(exc)[:120])
+            return {}
+        try:
+            result = rh.check_redis()
+        except Exception as exc:                        # noqa: BLE001 - 探测异常=不可用
+            result = {"available": False, "latency_ms": None,
+                      "error": rh.sanitize_error(exc) or "探测异常"}
+        was_bad = bool(getattr(self, "_redis_degraded", False))
+        is_bad = not bool(result.get("available"))
+        try:
+            rh.set_degraded_mode(is_bad, error=str(result.get("error") or ""),
+                                 source="worker_guardian")
+        except Exception as exc:                        # noqa: BLE001 - 标志写不进不拦守护
+            logger.warning("降级标志写入失败：%s", str(exc)[:120])
+        self._redis_degraded = is_bad
+
+        if is_bad and not was_bad:
+            why = rh.sanitize_error(result.get("error")) or "连接失败"
+            logger.error(
+                "Redis 不可用（%s）→ 进入降级模式：队列/结果通道中断，新步骤无法派发、"
+                "worker 拿不到任务；心跳每 %ds 复检，恢复后自动解除（无需重启）。",
+                why, GUARDIAN_HEARTBEAT_INTERVAL)
+            self._alert("redis_unavailable",
+                        f"Redis 不可用（{why}）：系统进入降级模式，检索/派发通道中断")
+        elif not is_bad and was_bad:
+            logger.info("Redis 已恢复（延迟 %sms）→ 退出降级模式，队列/结果通道恢复",
+                        result.get("latency_ms"))
+            self._alert("redis_recovered",
+                        f"Redis 已恢复（延迟 {result.get('latency_ms')}ms）：退出降级模式")
+        return result
+
+    def _check_routing_health(self) -> None:
+        """任务17：能力×执行者错配告警（读 metrics 汇总，不自己算库）。
+
+        数据源是 metrics 进程写的 `routing_health`（口径见 metrics_collector.
+        `_routing_health`）：任一能力有白名单外执行者 → 发一次
+        `capability_routing_mismatch` 告警。
+
+        去重：错配是**持续状态**而不是事件，心跳每 30s 一次，不去重就会每
+        30s 刷一条。按 (能力, 错配步数) 指纹记忆，指纹没变不再告警；
+        错配消失后指纹复位，下次出现会重新告警。
+        汇总文件缺失/损坏（metrics 未跑或还没写）→ 静默返回，
+        不能把"没有数据"当成"没有错配"来告警。
+        """
+        try:
+            from metrics_collector import SUMMARY_FILE
+            with open(SUMMARY_FILE, encoding="utf-8") as f:
+                routing = (json.load(f) or {}).get("routing_health") or {}
+        except Exception:
+            return
+
+        try:
+            details = routing.get("details") or []
+            if not routing.get("has_mismatch") or not isinstance(details, list):
+                self._last_routing_mismatch = None
+                return
+
+            sig = tuple(sorted(
+                (str(d.get("capability") or ""), int(d.get("mismatch_count") or 0))
+                for d in details if isinstance(d, dict)))
+            if not sig or sig == getattr(self, "_last_routing_mismatch", None):
+                return                                        # 同一错配已告警过
+            self._last_routing_mismatch = sig
+
+            parts = []
+            for d in details:
+                if not isinstance(d, dict):
+                    continue
+                bad = ", ".join(d.get("unexpected_executors") or []) or "?"
+                parts.append(f"{d.get('capability')} 错配 {d.get('mismatch_count')} 步"
+                             f"（白名单外执行者：{bad}）")
+            self._alert("capability_routing_mismatch",
+                        "能力-执行者错配：" + "；".join(parts))
+        except Exception as exc:
+            logger.warning("routing health check failed: %s", exc)
+
+    def _check_llm_circuit(self) -> None:
+        """任务23：LLM 端点熔断告警（本进程单例 + worker 写的 Redis 镜像取最坏）。
+
+        为什么 guardian 要知道：真正发起模型调用的是 worker 进程，主端点持续故障时
+        它会把调用切到备援（`llm_circuit_breaker`），别的进程看不见——用户只会觉得
+        "结果变差了"。熔断期间必须有一条显式告警，而不是靠事后翻日志。
+
+        数据源：`llm_circuit_breaker.aggregate_view()`（本进程单例 + `llm:circuit:{service}`
+        镜像，取最坏状态；镜像带 TTL，进程死了自动过期）。Redis 不可用或没装熔断器
+        → 静默返回：不能把"读不到"当成"没熔断"来告警。
+
+        去重：熔断是**持续状态**，按 (state, 活跃端点, 连续失败数) 指纹记忆，
+        指纹没变不重复告警；恢复后指纹复位，下次熔断会重新告警。
+        """
+        try:
+            from llm_circuit_breaker import STATE_CLOSED, aggregate_view
+            view = aggregate_view()
+        except Exception:
+            return
+
+        try:
+            state = str(view.get("state") or "")
+            endpoint = str(view.get("active_endpoint") or "")
+            failures = int(view.get("consecutive_failures") or 0)
+            if state == STATE_CLOSED:
+                if getattr(self, "_last_llm_circuit", None):
+                    self._last_llm_circuit = None
+                    self._alert("llm_circuit_recovered",
+                                "LLM 端点熔断已恢复：活跃端点回到 primary，连续失败计数清零")
+                return
+            sig = (state, endpoint, failures)
+            if sig == getattr(self, "_last_llm_circuit", None):
+                return                                        # 同一熔断状态已告警过
+            self._last_llm_circuit = sig
+            self._alert("llm_circuit_open",
+                        f"LLM 端点熔断中（state={state}）：活跃端点 {endpoint}，"
+                        f"连续失败 {failures} 次，已按备援列表顺序切换")
+            # 告警通道本身走 Redis，Redis 出问题时发不出去：同时落本地日志
+            logger.error("LLM 端点熔断：state=%s 活跃端点=%s 连续失败=%d",
+                         state, endpoint, failures)
+        except Exception as exc:
+            logger.warning("llm circuit check failed: %s", exc)
 
     # ------------------------------------------------------------------
     # stuck 任务回收（任务6 watchdog）
